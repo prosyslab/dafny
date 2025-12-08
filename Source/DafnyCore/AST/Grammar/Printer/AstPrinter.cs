@@ -577,9 +577,19 @@ NoGhost - disable printing of functions, ghost methods, and proof
 
     public JsonNode PrintFunction(Function f, int indent, bool printSignatureOnly) {
       Contract.Requires(f != null);
-      JsonNode fdecl = new JsonObject{["kind"] = "FunctionDeclaration"};
-      fdecl["name"] = f.Name;
-      return fdecl;
+      JsonNode funJson = new JsonObject{["kind"] = "FunctionDecl"};
+      funJson["name"] = f.Name;
+      JsonNode formals = PrintFormals(f.Ins, f, f.Name);
+      funJson["formals"] = formals;
+      if (f.Result != null || (f is not Predicate && f is not ExtremePredicate && f is not TwoStatePredicate && f is not PrefixPredicate)) {
+        if (f.Result != null) {
+          JsonNode resultJson = PrintFormal(f.Result, false);
+          funJson["result"] = resultJson;
+        }
+        JsonNode resultTypeJson = PrintType(f.ResultType);
+        funJson["resultType"] = resultTypeJson;
+      }
+      return funJson;
     }
 
     // ----------------------------- PrintMethod -----------------------------
@@ -599,11 +609,14 @@ NoGhost - disable printing of functions, ghost methods, and proof
       }
       return false;
     }
+
     public JsonNode PrintMethod(MethodOrConstructor method, int indent, bool printSignatureOnly) {
       Contract.Requires(method != null);
-      JsonNode decl = new JsonObject{["kind"] = "MethodOrConstructorDeclaration"};
-      decl["name"] = method.Name;
-      return decl;
+      JsonNode methodJson = new JsonObject{["kind"] = "MethodDecl"};
+      methodJson["name"] = method.Name;
+      JsonNode formals = PrintFormals(method.Ins, method, method.Name);
+      methodJson["formals"] = formals;
+      return methodJson;
     }
 
     private bool PrintModeSkipGeneral(DafnyProject project, IOrigin tok) {
@@ -627,49 +640,29 @@ NoGhost - disable printing of functions, ghost methods, and proof
       }
     }
 
-    internal void PrintFormals(List<Formal> ff, ICallable/*?*/ context, string name = null) {
+    internal JsonNode PrintFormals(List<Formal> ff, ICallable/*?*/ context, string name = null) {
       Contract.Requires(ff != null);
-      if (name != null && name.EndsWith("#")) {
-        wr.Write("[");
-        PrintFormal(ff[0], false);
-        wr.Write("]");
-        ff = [.. ff.Skip(1)];
-      }
-      wr.Write("(");
-      string sep = "";
+      JsonNode formalsJson = new JsonArray();
       foreach (Formal f in ff) {
         Contract.Assert(f != null);
-        wr.Write(sep);
-        sep = ", ";
-        PrintFormal(f, (context is TwoStateLemma || context is TwoStateFunction) && f.InParam);
+        JsonNode formalJson = PrintFormal(f, (context is TwoStateLemma || context is TwoStateFunction) && f.InParam);
+        formalsJson.AsArray().Add(formalJson);
       }
-      wr.Write(")");
+      return formalsJson;
     }
 
-    void PrintFormal(Formal f, bool showNewKeyword) {
+    JsonNode PrintFormal(Formal f, bool showNewKeyword) {
       Contract.Requires(f != null);
-      if (showNewKeyword && !f.IsOld) {
-        wr.Write("new ");
-      }
-      if (f.IsOlder) {
-        Contract.Assert(f.HasName);
-        wr.Write("older ");
-      }
-      if (f.IsGhost) {
-        wr.Write("ghost ");
-      }
-      if (f.IsNameOnly) {
-        Contract.Assert(f.HasName);
-        wr.Write("nameonly ");
-      }
+      JsonNode formalJson = new JsonObject{["kind"] = "Formal"};
       if (f.HasName) {
-        wr.Write("{0}: ", f.DisplayName);
+        formalJson["name"] = f.DisplayName;
       }
-      PrintType(f.Type);
+      formalJson["type"] = PrintType(f.Type);
       if (f.DefaultValue != null) {
         wr.Write(" := ");
         PrintExpression(f.DefaultValue, false);
       }
+      return formalJson;
     }
 
     internal void PrintDecreasesSpec(Specification<Expression> decs, int indent) {
@@ -732,9 +725,11 @@ NoGhost - disable printing of functions, ghost methods, and proof
 
     // ----------------------------- PrintType -----------------------------
 
-    public void PrintType(Type ty) {
+    public JsonNode PrintType(Type ty) {
       Contract.Requires(ty != null);
-      wr.Write(ty.TypeName(options, null, true));
+      JsonNode typeJson = new JsonObject{["kind"] = "Type"};
+      typeJson["name"] = ty.TypeName(options, null, true);
+      return typeJson;
     }
 
     public void PrintType(string prefix, Type ty) {
