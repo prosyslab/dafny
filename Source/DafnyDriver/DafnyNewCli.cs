@@ -48,6 +48,7 @@ public static class DafnyNewCli {
     AddCommand(DocumentationCommand.Create());
     AddCommand(ExtractCommand.Create());
     AddCommand(AstDumpCommand.Create());
+    AddCommand(SimplifyCommand.Create());
 
     OptionRegistry.CheckOptionsAreKnown(AllOptions);
 
