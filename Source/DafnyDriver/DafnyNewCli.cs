@@ -47,6 +47,7 @@ public static class DafnyNewCli {
     AddCommand(CoverageReportCommand.Create());
     AddCommand(DocumentationCommand.Create());
     AddCommand(ExtractCommand.Create());
+    AddCommand(AstDumpCommand.Create());
 
     OptionRegistry.CheckOptionsAreKnown(AllOptions);
 
@@ -189,7 +190,6 @@ public static class DafnyNewCli {
         }
       }
     }
-
     return Parser.InvokeAsync(arguments.ToArray(), console);
   }
 
