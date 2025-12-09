@@ -406,6 +406,7 @@ Change the default opacity of functions.
 ");
 
   public static readonly Option<bool> NoAttribute = new("--no-attribute", "Remove attributes.") {};
+  public static readonly Option<bool> ExplicitEmptyBlock = new("--explicit-empty-block", "Explicitly add {} for empty block.") {};
 
   public static readonly Option<bool> UseStandardLibraries = new("--standard-libraries", () => false,
     @"
@@ -648,6 +649,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
     OptionRegistry.RegisterOption(IgnoreIndentation, OptionScope.Cli);
     OptionRegistry.RegisterOption(CheckSourceLocationConsistency, OptionScope.Cli);
     OptionRegistry.RegisterOption(NoAttribute, OptionScope.Cli);
+    OptionRegistry.RegisterOption(ExplicitEmptyBlock, OptionScope.Cli);
   }
 }
 
