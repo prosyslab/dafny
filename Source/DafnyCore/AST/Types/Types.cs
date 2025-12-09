@@ -87,6 +87,9 @@ public abstract class Type : NodeWithOrigin {
 
     if (typeArgs != null && typeArgs.Count > 0 &&
         (!parseAble || !typeArgs[0].TypeName(options, context, parseAble).StartsWith("_"))) {
+      if (options.Get(SimplifyOptionBag.ExplicitTypeArgs)) {
+        return string.Format("< {0} >", Util.Comma(typeArgs, ty => ty.TypeName(options, context, parseAble)));
+      }
       return string.Format("<{0}>", Util.Comma(typeArgs, ty => ty.TypeName(options, context, parseAble)));
     }
     return "";
