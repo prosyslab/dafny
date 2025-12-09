@@ -674,7 +674,11 @@ namespace Microsoft.Dafny {
             PrintExpression(e.E0, false);
           }
 
-          wr.Write(e.E0 != null && e.E1 != null ? " .. " : "..");
+          if (options.Get(SimplifyOptionBag.ExplicitSubseq)) {
+            wr.Write(e.E0 != null && e.E1 != null ? " .. " : " ..");
+          } else {
+            wr.Write(e.E0 != null && e.E1 != null ? " .. " : "..");
+          }
           if (e.E1 != null) {
             PrintExpression(e.E1, false);
           }
