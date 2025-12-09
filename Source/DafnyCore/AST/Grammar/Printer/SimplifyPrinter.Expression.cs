@@ -863,7 +863,11 @@ namespace Microsoft.Dafny {
         var e = (UnaryOpExpr)expr;
         if (e.Op == UnaryOpExpr.Opcode.Cardinality) {
           wr.Write("|");
+          if (options.Get(SimplifyOptionBag.ExplicitCardinality))
+            wr.Write("(");
           PrintExpression(e.E, false);
+          if (options.Get(SimplifyOptionBag.ExplicitCardinality))
+            wr.Write(")");
           wr.Write("|");
         } else if (e.Op == UnaryOpExpr.Opcode.Allocated) {
           wr.Write("allocated(");
