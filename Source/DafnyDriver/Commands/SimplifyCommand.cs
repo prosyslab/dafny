@@ -14,6 +14,7 @@ public static class SimplifyCommand {
   static SimplifyCommand() {}
 
   public static IEnumerable<Option> Options => new Option[] {
+    SimplifyOptionBag.All,
     SimplifyOptionBag.NoAttribute,
     SimplifyOptionBag.ExplicitEmptyBlock
   };
@@ -28,6 +29,10 @@ public static class SimplifyCommand {
 
     DafnyNewCli.SetHandlerUsingDafnyOptionsContinuation(result, async (options, _) => {
       options.AllowSourceFolders = true;
+      if (options.Get(SimplifyOptionBag.All)) {
+        options.Set(SimplifyOptionBag.NoAttribute, true);
+        options.Set(SimplifyOptionBag.ExplicitEmptyBlock, true);
+      }
       var exitValue = await DoSimplifying(options);
       return (int)exitValue;
     });
