@@ -13,7 +13,9 @@ public static class SimplifyCommand {
 
   static SimplifyCommand() {}
 
-  public static IEnumerable<Option> Options => new Option[] {}.Concat(DafnyCommands.ParserOptions);
+  public static IEnumerable<Option> Options => new Option[] {
+    SimplifyOptionBag.NoAttribute
+  };
 
   public static Command Create() {
     var result = new Command("simplify", @"Simplify the dafny file.");
