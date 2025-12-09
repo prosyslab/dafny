@@ -867,6 +867,10 @@ NoGhost - disable printing of functions, ghost methods, and proof
     /// Use an indent of -1 to put just a space after the @-Attribute
     /// </summary>
     public void PrintAttributes(Attributes a, bool atAttributes, int indent = -1) {
+      if (options.Get(SimplifyOptionBag.NoAttribute)) {
+        return;
+      }
+
       if (a != null) {
         PrintAttributes(a.Prev, atAttributes, indent);
         if (a is UserSuppliedAtAttribute usaa && atAttributes) {
