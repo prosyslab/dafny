@@ -1320,6 +1320,11 @@ namespace Microsoft.Dafny {
       } else if (expr is LambdaExpr) {
         var e = (LambdaExpr)expr;
         bool parensNeeded = !isRightmost;
+
+        if (options.Get(SimplifyOptionBag.ExplicitLambda)) {
+          wr.Write("(");
+        }
+
         if (parensNeeded) {
           wr.Write("(");
         }
@@ -1357,6 +1362,9 @@ namespace Microsoft.Dafny {
           wr.Write(")");
         }
 
+        if (options.Get(SimplifyOptionBag.ExplicitLambda)) {
+          wr.Write(")");
+        }
       } else if (expr is WildcardExpr) {
         wr.Write("*");
 
