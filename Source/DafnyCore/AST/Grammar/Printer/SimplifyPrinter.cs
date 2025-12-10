@@ -1125,6 +1125,13 @@ NoGhost - disable printing of functions, ghost methods, and proof
       wr.Write(")");
     }
 
+    void PrintExplicitIdent(string name) {
+      Contract.Requires(name != null);
+      if (name.StartsWith("array") || name.StartsWith("bv")) {
+        wr.Write("v_");
+      }
+    }
+
     void PrintFormal(Formal f, bool showNewKeyword) {
       Contract.Requires(f != null);
       if (showNewKeyword && !f.IsOld) {
@@ -1142,6 +1149,9 @@ NoGhost - disable printing of functions, ghost methods, and proof
         wr.Write("nameonly ");
       }
       if (f.HasName) {
+        if (options.Get(SimplifyOptionBag.ExplicitIdent)) {
+          PrintExplicitIdent(f.DisplayName);
+        }
         wr.Write("{0}: ", f.DisplayName);
       }
       PrintType(f.Type);
