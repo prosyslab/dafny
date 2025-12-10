@@ -21,6 +21,7 @@ public static class SimplifyCommand {
     SimplifyOptionBag.ExplicitTypeArgs,
     SimplifyOptionBag.ExplicitSubseq,
     SimplifyOptionBag.ExplicitIdent,
+    SimplifyOptionBag.ExplicitLambda,
     SimplifyOptionBag.Debug
   };
 
@@ -41,6 +42,7 @@ public static class SimplifyCommand {
         options.Set(SimplifyOptionBag.ExplicitTypeArgs, true);
         options.Set(SimplifyOptionBag.ExplicitSubseq, true);
         options.Set(SimplifyOptionBag.ExplicitIdent, true);
+        options.Set(SimplifyOptionBag.ExplicitLambda, true);
       }
       var exitValue = await DoSimplifying(options);
       return (int)exitValue;
