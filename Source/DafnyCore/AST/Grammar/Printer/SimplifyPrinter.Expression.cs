@@ -478,9 +478,16 @@ namespace Microsoft.Dafny {
       */
 
       if (expr is StaticReceiverExpr) {
+        if (options.Get(SimplifyOptionBag.Debug)) {
+          wr.Write("/*StatRecExpr*/");
+        }
         StaticReceiverExpr e = (StaticReceiverExpr)expr;
         wr.Write(e.Type);
       } else if (expr is LiteralExpr) {
+        if (options.Get(SimplifyOptionBag.Debug)) {
+          wr.Write("/*LitExpr*/");
+        }
+
         LiteralExpr e = (LiteralExpr)expr;
         if (e.Value == null) {
           wr.Write("null");
@@ -517,14 +524,26 @@ namespace Microsoft.Dafny {
         wr.Write("this");
 
       } else if (expr is IdentifierExpr) {
+        if (options.Get(SimplifyOptionBag.Debug)) {
+          wr.Write("/*IdExpr*/");
+        }
         var e = (IdentifierExpr)expr;
         if (printFlags.UseOriginalDafnyNames) {
+          if (options.Get(SimplifyOptionBag.ExplicitIdent)) {
+            PrintExplicitIdent(e.DafnyName);
+          }
           wr.Write(e.DafnyName);
         } else {
+          if (options.Get(SimplifyOptionBag.ExplicitIdent)) {
+            PrintExplicitIdent(e.Name);
+          }
           wr.Write(e.Name);
         }
 
       } else if (expr is DatatypeValue) {
+        if (options.Get(SimplifyOptionBag.Debug)) {
+          wr.Write("/*DtVal*/");
+        }
         var dtv = (DatatypeValue)expr;
         bool printArgs;
         if (dtv.MemberName.StartsWith(SystemModuleManager.TupleTypeCtorNamePrefix)) {
@@ -545,6 +564,9 @@ namespace Microsoft.Dafny {
         }
 
       } else if (expr is DisplayExpression) {
+        if (options.Get(SimplifyOptionBag.Debug)) {
+          wr.Write("/*DispExpr*/");
+        }
         DisplayExpression e = (DisplayExpression)expr;
         if (e is MultiSetDisplayExpr) {
           wr.Write("multiset");
@@ -564,13 +586,24 @@ namespace Microsoft.Dafny {
         wr.Write("]");
 
       } else if (expr is NameSegment) {
+        if (options.Get(SimplifyOptionBag.Debug)) {
+          wr.Write("/*NameSeg*/");
+        }
+
         var e = (NameSegment)expr;
+        if (options.Get(SimplifyOptionBag.ExplicitIdent)) {
+          PrintExplicitIdent(e.Name);
+        }
         wr.Write(e.Name);
         if (e.OptTypeArguments != null) {
           PrintTypeInstantiation(e.OptTypeArguments);
         }
 
       } else if (expr is ExprDotName) {
+        if (options.Get(SimplifyOptionBag.Debug)) {
+          wr.Write("/*ExprDotName*/");
+        }
+
         var e = (ExprDotName)expr;
         // determine if parens are needed
         int opBindingStrength = BindingStrengthSuffix;
@@ -607,6 +640,9 @@ namespace Microsoft.Dafny {
         }
 
       } else if (expr is ApplySuffix) {
+        if (options.Get(SimplifyOptionBag.Debug)) {
+          wr.Write("/*AppSuff*/");
+        }
         var e = (ApplySuffix)expr;
         // determine if parens are needed
         int opBindingStrength = BindingStrengthSuffix;
@@ -634,6 +670,10 @@ namespace Microsoft.Dafny {
         }
 
       } else if (expr is MemberSelectExpr) {
+        if (options.Get(SimplifyOptionBag.Debug)) {
+          wr.Write("/*MemSelExpr*/");
+        }
+
         MemberSelectExpr e = (MemberSelectExpr)expr;
         // determine if parens are needed
         int opBindingStrength = BindingStrengthSuffix;
@@ -733,6 +773,10 @@ namespace Microsoft.Dafny {
           wr.Write(")");
         }
       } else if (expr is DatatypeUpdateExpr) {
+        if (options.Get(SimplifyOptionBag.Debug)) {
+          wr.Write("/*MemSelExpr*/");
+        }
+
         var e = (DatatypeUpdateExpr)expr;
         // determine if parens are needed
         int opBindingStrength = BindingStrengthSuffix;

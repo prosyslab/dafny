@@ -19,7 +19,9 @@ public static class SimplifyCommand {
     SimplifyOptionBag.ExplicitEmptyBlock,
     SimplifyOptionBag.ExplicitCardinality,
     SimplifyOptionBag.ExplicitTypeArgs,
-    SimplifyOptionBag.ExplicitSubseq
+    SimplifyOptionBag.ExplicitSubseq,
+    SimplifyOptionBag.ExplicitIdent,
+    SimplifyOptionBag.Debug
   };
 
   public static Command Create() {
@@ -38,6 +40,7 @@ public static class SimplifyCommand {
         options.Set(SimplifyOptionBag.ExplicitCardinality, true);
         options.Set(SimplifyOptionBag.ExplicitTypeArgs, true);
         options.Set(SimplifyOptionBag.ExplicitSubseq, true);
+        options.Set(SimplifyOptionBag.ExplicitIdent, true);
       }
       var exitValue = await DoSimplifying(options);
       return (int)exitValue;
