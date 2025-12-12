@@ -25,7 +25,7 @@ namespace Microsoft.Dafny {
   public partial class AstPrinter {
     private DafnyOptions options;
     private const int AtAttributesOnSameLineIndent = -1;
-    static AstPrinter() {}
+    static AstPrinter() { }
 
     public static readonly Option<AstPrintModes> PrintMode = new("--print-mode", () => AstPrintModes.Everything, @"
 Everything - Print everything listed below.
@@ -577,7 +577,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
 
     public JsonNode PrintFunction(Function f, int indent, bool printSignatureOnly) {
       Contract.Requires(f != null);
-      JsonNode funJson = new JsonObject{["kind"] = "FunctionDecl"};
+      JsonNode funJson = new JsonObject { ["kind"] = "FunctionDecl" };
       funJson["name"] = f.Name;
       JsonNode formals = PrintFormals(f.Ins, f, f.Name);
       funJson["formals"] = formals;
@@ -612,7 +612,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
 
     public JsonNode PrintMethod(MethodOrConstructor method, int indent, bool printSignatureOnly) {
       Contract.Requires(method != null);
-      JsonNode methodJson = new JsonObject{["kind"] = "MethodDecl"};
+      JsonNode methodJson = new JsonObject { ["kind"] = "MethodDecl" };
       methodJson["name"] = method.Name;
       JsonNode formals = PrintFormals(method.Ins, method, method.Name);
       methodJson["formals"] = formals;
@@ -653,7 +653,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
 
     JsonNode PrintFormal(Formal f, bool showNewKeyword) {
       Contract.Requires(f != null);
-      JsonNode formalJson = new JsonObject{["kind"] = "Formal"};
+      JsonNode formalJson = new JsonObject { ["kind"] = "Formal" };
       if (f.HasName) {
         formalJson["name"] = f.DisplayName;
       }
@@ -727,7 +727,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
 
     public JsonNode PrintType(Type ty) {
       Contract.Requires(ty != null);
-      JsonNode typeJson = new JsonObject{["kind"] = "Type"};
+      JsonNode typeJson = new JsonObject { ["kind"] = "Type" };
       typeJson["name"] = ty.TypeName(options, null, true);
       return typeJson;
     }

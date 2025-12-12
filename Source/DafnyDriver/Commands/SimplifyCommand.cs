@@ -11,7 +11,7 @@ namespace Microsoft.Dafny;
 
 public static class SimplifyCommand {
 
-  static SimplifyCommand() {}
+  static SimplifyCommand() { }
 
   public static IEnumerable<Option> Options => new Option[] {
     SimplifyOptionBag.All,
