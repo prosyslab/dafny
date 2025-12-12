@@ -13,9 +13,9 @@ namespace Microsoft.Dafny;
 
 public static class AstDumpCommand {
 
-  static AstDumpCommand() {}
+  static AstDumpCommand() { }
 
-  public static IEnumerable<Option> Options => new Option[] {}.Concat(DafnyCommands.ParserOptions);
+  public static IEnumerable<Option> Options => new Option[] { }.Concat(DafnyCommands.ParserOptions);
 
   public static Command Create() {
     var result = new Command("ast-dump", @"Ast dump the dafny file.");
