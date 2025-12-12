@@ -764,7 +764,7 @@ namespace Microsoft.Dafny {
           Indent(indent);
         }
         PrintStatement(s.Body, indent);
-      } else if (s.Body == null  && options.Get(SimplifyOptionBag.ExplicitEmptyBlock)) {
+      } else if (s.Body == null && options.Get(SimplifyOptionBag.ExplicitEmptyBlock)) {
         wr.Write(" ");
         wr.Write("{}");
       }
