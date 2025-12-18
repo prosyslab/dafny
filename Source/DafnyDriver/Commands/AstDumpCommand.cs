@@ -66,9 +66,8 @@ public static class AstDumpCommand {
       } else {
         var firstToken = dafnyProgram.GetFirstTokenForUri(file.Uri);
         var result = originalText;
-        TextWriter tw = Console.Out;
         JsonNode json = new JsonObject();
-        AstPrinter pr = new AstPrinter(tw, json, dafnyProgram.Options);
+        AstPrinter pr = new AstPrinter(json, dafnyProgram.Options);
         pr.PrintProgram(dafnyProgram, false);
         if (firstToken != null) {
           result = Formatting.__default.ReindentProgramFromFirstToken(firstToken,
