@@ -95,8 +95,20 @@ true - In the compiled target code, transform any non-extern
     @"
 (experimental, will be replaced in the future)
 Reduce Dafny's knowledge of non-linear arithmetic (*,/,%).
-  
+
 Results in more manual work, but also produces more predictable behavior.".TrimStart());
+
+  public static readonly Option<bool> AssumeWellFormedDiv = new("--assume-well-formed-div", () => false, @"
+Assume (do not prove) divisor non-zero checks for division and modulo.
+
+WARNING: This weakens verification guarantees and can hide runtime errors.".TrimStart());
+
+  public static readonly Option<bool> AssumeWellFormedIndex = new("--assume-well-formed-index", () => false, @"
+Assume (do not prove) index and slice bounds checks.
+
+This option does NOT affect null/allocated checks for arrays, nor domain membership checks for maps.
+
+WARNING: This weakens verification guarantees and can hide runtime errors.".TrimStart());
 
   public static readonly Option<bool> EnforceDeterminism = new("--enforce-determinism",
     "Check that only deterministic statements are used, so that values seen during execution will be the same in every run of the program.") {
@@ -122,9 +134,9 @@ The `text` format also includes a more detailed breakdown of what assertions app
 
   public static readonly Option<IList<FileInfo>> Libraries = new("--library", () => new List<FileInfo>(),
     @"
-The contents of this file and any files it includes can be referenced from other files as if they were included. 
+The contents of this file and any files it includes can be referenced from other files as if they were included.
 However, these contents are skipped during code generation and verification.
-This option is useful in a diamond dependency situation, 
+This option is useful in a diamond dependency situation,
 to prevent code from the bottom dependency from being generated more than once.
 The value may be a comma-separated list of files and folders.".TrimStart());
 
@@ -191,7 +203,7 @@ https://github.com/dafny-lang/dafny/blob/master/Source/DafnyLanguageServer/READM
 The syntax for quantification domains is changing from Dafny version 3 to version 4, more specifically where quantifier ranges (|
 <Range>) are allowed. This switch gives early access to the new syntax.
 
-3 - Ranges are only allowed after all quantified variables are declared. 
+3 - Ranges are only allowed after all quantified variables are declared.
     (e.g. set x, y | 0 <= x < |s| && y in s[x] && 0 <= y :: y)
 4 - Ranges are allowed after each quantified variable declaration.
     (e.g. set x | 0 <= x < |s|, y <- s[x] | 0 <= y :: y)
@@ -395,9 +407,9 @@ Functionality is still being expanded. Currently only checks contracts on every 
 
   public static readonly Option<DefaultFunctionOpacityOptions> DefaultFunctionOpacity = new("--default-function-opacity", () => DefaultFunctionOpacityOptions.Transparent,
     @"
-Change the default opacity of functions. 
-`transparent` (default) means functions are transparent, can be manually made opaque and then revealed. 
-`autoRevealDependencies` makes all functions not explicitly labelled as opaque to be opaque but reveals them automatically in scopes which do not have `{:autoRevealDependencies false}`. 
+Change the default opacity of functions.
+`transparent` (default) means functions are transparent, can be manually made opaque and then revealed.
+`autoRevealDependencies` makes all functions not explicitly labelled as opaque to be opaque but reveals them automatically in scopes which do not have `{:autoRevealDependencies false}`.
 `opaque` means functions are always opaque so the opaque keyword is not needed, and functions must be revealed everywhere needed for a proof.".TrimStart()) {
   };
 
@@ -529,7 +541,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
           options.Set(option, PrintModes.NoGhostOrIncludes);
         } else if (ps.args[ps.i].Equals("DllEmbed")) {
           // This is called DllEmbed because it was previously only used inside Dafny-compiled .dll files for C#,
-          // but it is now used by the LibraryBackend when building .doo files as well. 
+          // but it is now used by the LibraryBackend when building .doo files as well.
           options.Set(option, PrintModes.Serialization);
         } else {
           DafnyOptions.InvalidArgumentError(option.Name, ps);
@@ -646,6 +658,8 @@ NoGhost - disable printing of functions, ghost methods, and proof
     OptionRegistry.RegisterGlobalOption(EnforceDeterminism, OptionCompatibility.CheckOptionLocalImpliesLibrary);
     OptionRegistry.RegisterGlobalOption(RelaxDefiniteAssignment, OptionCompatibility.OptionLibraryImpliesLocalError);
     OptionRegistry.RegisterGlobalOption(AllowAxioms, OptionCompatibility.OptionLibraryImpliesLocalError);
+    OptionRegistry.RegisterGlobalOption(AssumeWellFormedDiv, OptionCompatibility.OptionLibraryImpliesLocalError);
+    OptionRegistry.RegisterGlobalOption(AssumeWellFormedIndex, OptionCompatibility.OptionLibraryImpliesLocalError);
     OptionRegistry.RegisterGlobalOption(AllowWarnings, OptionCompatibility.OptionLibraryImpliesLocalWarning);
     OptionRegistry.RegisterGlobalOption(AllowDeprecation, OptionCompatibility.OptionLibraryImpliesLocalWarning);
     OptionRegistry.RegisterGlobalOption(WarnShadowing, OptionCompatibility.OptionLibraryImpliesLocalWarning);
@@ -677,6 +691,8 @@ NoGhost - disable printing of functions, ghost methods, and proof
     OptionRegistry.RegisterOption(TypeSystemRefresh, OptionScope.Cli);
     OptionRegistry.RegisterOption(VerificationLogFormat, OptionScope.Cli);
     OptionRegistry.RegisterOption(VerifyIncludedFiles, OptionScope.Cli);
+    OptionRegistry.RegisterOption(AssumeWellFormedDiv, OptionScope.Cli);
+    OptionRegistry.RegisterOption(AssumeWellFormedIndex, OptionScope.Cli);
     OptionRegistry.RegisterOption(DisableNonLinearArithmetic, OptionScope.Module);
     OptionRegistry.RegisterOption(NewTypeInferenceDebug, OptionScope.Cli);
     OptionRegistry.RegisterOption(UseBaseFileName, OptionScope.Cli);
