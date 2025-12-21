@@ -27,6 +27,8 @@ public static class DafnyCommands {
     CommonOptionBag.VerifyIncludedFiles,
     CommonOptionBag.ManualLemmaInduction,
     BoogieOptionBag.SolverPath,
+    CommonOptionBag.AssumeWellFormedDiv,
+    CommonOptionBag.AssumeWellFormedIndex,
     CommonOptionBag.DisableNonLinearArithmetic,
     BoogieOptionBag.IsolateAssertions,
     BoogieOptionBag.BoogieArguments,
