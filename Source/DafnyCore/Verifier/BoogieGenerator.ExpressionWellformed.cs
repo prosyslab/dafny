@@ -248,6 +248,25 @@ namespace Microsoft.Dafny {
       }
     }
 
+    private void AddWellformednessCheckOrAssume(BoogieStmtListBuilder builder, IOrigin tok, Bpl.Expr condition,
+      ProofObligationDescription description, Bpl.QKeyValue kv, bool assume) {
+      Contract.Requires(builder != null);
+      Contract.Requires(tok != null);
+      Contract.Requires(condition != null);
+      Contract.Requires(description != null);
+
+      if (assume) {
+        var cmd = TrAssumeCmd(tok, condition, kv);
+        builder.Add(cmd);
+        proofDependencies?.AddProofDependencyId(cmd, tok, new AssumedProofObligationDependency(tok, description));
+        // Even though we are not proving this condition, it replaces a proof obligation.
+        // Count it so the method implementation is still emitted (otherwise the body may be dropped entirely).
+        assertionCount++;
+      } else {
+        builder.Add(Assert(tok, condition, description, builder.Context, kv));
+      }
+    }
+
     /// <summary>
     /// Check the well-formedness of "expr" (but don't leave hanging around any assumptions that affect control flow)
     /// </summary>
@@ -422,9 +441,9 @@ namespace Microsoft.Dafny {
                 e0 = etran.TrExpr(e.E0);
                 CheckWellformed(e.E0, wfOptions, locals, builder, etran);
                 var desc = new InRange(e.Seq, e.E0, e.SelectOne, e.SelectOne ? "index" : "lower bound");
-                builder.Add(Assert(GetToken(expr),
-                  InSeqRange(selectExpr.Origin, e0, e.E0.Type, seq, isSequence, null, !e.SelectOne),
-                  desc, builder.Context, wfOptions.AssertKv));
+                var inRange = InSeqRange(selectExpr.Origin, e0, e.E0.Type, seq, isSequence, null, !e.SelectOne);
+                AddWellformednessCheckOrAssume(builder, GetToken(expr), inRange, desc, wfOptions.AssertKv,
+                  options.Get(CommonOptionBag.AssumeWellFormedIndex));
               }
               if (e.E1 != null) {
                 CheckWellformed(e.E1, wfOptions, locals, builder, etran);
@@ -434,10 +453,10 @@ namespace Microsoft.Dafny {
                 } else {
                   lowerBound = e0;
                 }
-                builder.Add(Assert(GetToken(expr),
-                  InSeqRange(selectExpr.Origin, etran.TrExpr(e.E1), e.E1.Type, seq, isSequence, lowerBound, true),
+                var sliceBounds = InSeqRange(selectExpr.Origin, etran.TrExpr(e.E1), e.E1.Type, seq, isSequence, lowerBound, true);
+                AddWellformednessCheckOrAssume(builder, GetToken(expr), sliceBounds,
                   new SequenceSelectRangeValid(e.Seq, e.E0, e.E1, isSequence ? "sequence" : "array"),
-                  builder.Context, wfOptions.AssertKv));
+                  wfOptions.AssertKv, options.Get(CommonOptionBag.AssumeWellFormedIndex));
               }
             }
             if (!origOptions.LValueContext && wfOptions.DoReadsChecks && eSeqType.IsArrayType) {
@@ -500,9 +519,9 @@ namespace Microsoft.Dafny {
             CheckWellformed(e.Index, wfOptions, locals, builder, etran);
             if (collectionType is SeqType) {
               var desc = new InRange(e.Seq, e.Index, true, "index");
-              builder.Add(Assert(GetToken(e.Index),
-                InSeqRange(updateExpr.Origin, index, e.Index.Type, seq, true, null, false),
-                desc, builder.Context, wfOptions.AssertKv));
+              var inRange = InSeqRange(updateExpr.Origin, index, e.Index.Type, seq, true, null, false);
+              AddWellformednessCheckOrAssume(builder, GetToken(e.Index), inRange, desc, wfOptions.AssertKv,
+                options.Get(CommonOptionBag.AssumeWellFormedIndex));
             } else {
               CheckSubrange(e.Index.Origin, index, e.Index.Type, collectionType.Arg, e.Index, builder);
             }
@@ -1052,8 +1071,9 @@ namespace Microsoft.Dafny {
                     zero = Bpl.Expr.Literal(0);
                   }
                   CheckWellformed(e.E1, wfOptions, locals, builder, etran);
-                  builder.Add(Assert(GetToken(expr), Bpl.Expr.Neq(etran.TrExpr(e.E1), zero),
-                    new DivisorNonZero(e.E1), builder.Context, wfOptions.AssertKv));
+                  var divisorNonZero = Bpl.Expr.Neq(etran.TrExpr(e.E1), zero);
+                  AddWellformednessCheckOrAssume(builder, GetToken(expr), divisorNonZero,
+                    new DivisorNonZero(e.E1), wfOptions.AssertKv, options.Get(CommonOptionBag.AssumeWellFormedDiv));
                 }
                 break;
               case BinaryExpr.ResolvedOpcode.LeftShift:
@@ -1479,7 +1499,8 @@ namespace Microsoft.Dafny {
         var tok = idx is IdentifierExpr ? e.Origin : idx.Origin; // TODO: Reusing the token of an identifier expression would underline its definition. but this is still not perfect.
 
         var desc = new InRange(arrayExpression, indices[idxId], true, $"index {idxId}", idxId);
-        builder.Add(Assert(tok, BplAnd(lower, upper), desc, builder.Context, wfOptions.AssertKv));
+        AddWellformednessCheckOrAssume(builder, tok, BplAnd(lower, upper), desc, wfOptions.AssertKv,
+          options.Get(CommonOptionBag.AssumeWellFormedIndex));
       }
     }
 
