@@ -26,6 +26,40 @@ public class AutoFuelRewriterTest {
     return program;
   }
 
+  private static async Task<(bool Verified, Microsoft.Boogie.PipelineStatistics Stats)> ParseResolveAndVerify(string dafnyProgramText, DafnyOptions options) {
+    var (program, reporter) = await ParseAndResolveWithReporter(dafnyProgramText, options);
+
+    // We only care about verification outcomes; avoid code generation.
+    options.Compile = false;
+
+    // Make sure solver options (notably Z3 path) are set before verification.
+    options.RunningBoogieFromCommandLine = true;
+    var oldErrorCount = reporter.ErrorCount;
+    options.ProcessSolverOptions(reporter, Token.NoToken);
+    Assert.Equal(oldErrorCount, reporter.ErrorCount);
+
+    using var engine = Microsoft.Boogie.ExecutionEngine.CreateWithoutSharedCache(options);
+    var boogiePrograms = BoogieGenerator.Translate(program, reporter).ToList();
+
+    var verified = true;
+    var totalStats = new Microsoft.Boogie.PipelineStatistics();
+    foreach (var (moduleName, boogieProgram) in boogiePrograms) {
+      var (outcome, stats) = await DafnyMain.BoogieOnce(reporter, options, TextWriter.Null, engine, "autofuel",
+        moduleName, boogieProgram, programId: null);
+      verified &= DafnyMain.IsBoogieVerified(outcome, stats);
+
+      totalStats.VerifiedCount += stats.VerifiedCount;
+      totalStats.ErrorCount += stats.ErrorCount;
+      totalStats.TimeoutCount += stats.TimeoutCount;
+      totalStats.OutOfResourceCount += stats.OutOfResourceCount;
+      totalStats.OutOfMemoryCount += stats.OutOfMemoryCount;
+      totalStats.SolverExceptionCount += stats.SolverExceptionCount;
+      totalStats.InconclusiveCount += stats.InconclusiveCount;
+    }
+
+    return (verified, totalStats);
+  }
+
   [Fact]
   public async Task SelfRecursiveFunctionGetsFuelAndOutOfFuelSiblings() {
     var options = DafnyOptions.Default;
@@ -121,6 +155,36 @@ function {:autofuel 5} F(n: int): int {
     var recursiveCall = ite.Els.DescendantsAndSelf.OfType<FunctionCallExpr>()
       .FirstOrDefault(fc => fc.Function.Name == "F__fuel" && fc.Args.Count == 2);
     Assert.NotNull(recursiveCall);
+  }
+
+  [Fact]
+  public async Task GcdTerminationFailsWithoutAutoFuelButSucceedsWithAutoFuel() {
+    var options = DafnyOptions.Default;
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+
+    var (verifiedWithoutAutoFuel, statsWithoutAutoFuel) = await ParseResolveAndVerify(@"
+datatype Pair = Pair(a: nat, b: nat)
+
+function Gcd(p: Pair): nat {
+  match p
+  case Pair(a, b) => if b == 0 then a else Gcd(Pair(b, a % b))
+}
+", new DafnyOptions(options));
+
+    Assert.False(verifiedWithoutAutoFuel);
+    Assert.True(statsWithoutAutoFuel.ErrorCount > 0);
+
+    var (verifiedWithAutoFuel, statsWithAutoFuel) = await ParseResolveAndVerify(@"
+datatype Pair = Pair(a: nat, b: nat)
+
+function {:autofuel 10} Gcd(p: Pair): nat {
+  match p
+  case Pair(a, b) => if b == 0 then a else Gcd(Pair(b, a % b))
+}
+", new DafnyOptions(options));
+
+    Assert.True(verifiedWithAutoFuel);
+    Assert.Equal(0, statsWithAutoFuel.ErrorCount);
   }
 
   [Fact]
