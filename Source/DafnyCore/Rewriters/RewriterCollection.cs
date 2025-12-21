@@ -16,6 +16,7 @@ public static class RewriterCollection {
     result.Add(new AutoContractsRewriter(program, reporter));
     result.Add(new OpaqueMemberRewriter(reporter));
     result.Add(new AutoReqFunctionRewriter(program, reporter));
+    result.Add(new AutoFuelRewriter(reporter));
     result.Add(new TimeLimitRewriter(reporter));
     result.Add(new ForallStmtRewriter(reporter));
     result.Add(new ProvideRevealAllRewriter(reporter));
