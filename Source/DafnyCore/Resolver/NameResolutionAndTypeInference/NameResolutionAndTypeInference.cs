@@ -699,6 +699,12 @@ namespace Microsoft.Dafny {
           ResolveExpression(arg, resolutionContext);
         }
 
+        var functionMember = e.Function as MemberSelectExpr ?? e.Function.Resolved as MemberSelectExpr;
+        if (functionMember?.Member is Function fn && fn.AllowsNontermination && !resolutionContext.CodeContext.AllowsNontermination) {
+          reporter.Warning(MessageSource.Resolver, ParseErrors.ErrorId.none, e.Origin,
+            "a call to a possibly non-terminating function is allowed only if the calling method/function is also declared (with 'decreases *') to be possibly non-terminating");
+        }
+
         // TODO: the following should be replaced by a type-class constraint that constrains the types of e.Function, e.Args[*], and e.Type
         // Normalize function type to handle type proxies
         var normalizedFunctionType = e.Function.Type?.NormalizeExpand();
@@ -6276,6 +6282,10 @@ namespace Microsoft.Dafny {
               TypeApplication_AtEnclosingClass = mse.TypeApplicationAtEnclosingClass,
               TypeApplication_JustFunction = mse.TypeApplicationJustMember
             };
+            if (callee.AllowsNontermination && !resolutionContext.CodeContext.AllowsNontermination) {
+              reporter.Warning(MessageSource.Resolver, ParseErrors.ErrorId.none, e.Origin,
+                "a call to a possibly non-terminating function is allowed only if the calling method/function is also declared (with 'decreases *') to be possibly non-terminating");
+            }
             var typeMap = BuildTypeArgumentSubstitute(mse.TypeArgumentSubstitutionsAtMemberDeclaration());
             ResolveActualParameters(rr.Bindings, callee.Ins, e.Origin, callee, resolutionContext, typeMap, callee.IsStatic ? null : mse.Obj);
             rr.Type = callee.ResultType.Subst(typeMap);
@@ -6379,6 +6389,10 @@ namespace Microsoft.Dafny {
       } else {
         Function function = (Function)member;
         e.Function = function;
+        if (function.AllowsNontermination && !resolutionContext.CodeContext.AllowsNontermination) {
+          reporter.Warning(MessageSource.Resolver, ParseErrors.ErrorId.none, e.Origin,
+            "a call to a possibly non-terminating function is allowed only if the calling method/function is also declared (with 'decreases *') to be possibly non-terminating");
+        }
         if (function is TwoStateFunction && !resolutionContext.IsTwoState) {
           reporter.Error(MessageSource.Resolver, e.Origin, "a two-state function can be used only in a two-state context");
         }

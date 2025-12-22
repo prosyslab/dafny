@@ -351,6 +351,11 @@ namespace Microsoft.Dafny {
             foreach (var arg in e.Args) {
               ResolveExpression(arg, resolutionContext);
             }
+            var functionMember = e.Function as MemberSelectExpr ?? e.Function.Resolved as MemberSelectExpr;
+            if (functionMember?.Member is Function fn && fn.AllowsNontermination && !resolutionContext.CodeContext.AllowsNontermination) {
+              ReportWarning(e.Origin,
+                "a call to a possibly non-terminating function is allowed only if the calling method/function is also declared (with 'decreases *') to be possibly non-terminating");
+            }
             applyExpr.PreType = CreatePreTypeProxy("apply expression result");
 
             Constraints.AddGuardedConstraint(() => {
@@ -2193,6 +2198,10 @@ namespace Microsoft.Dafny {
             // further bookkeeping
             if (callee is ExtremePredicate extremePredicateCallee) {
               extremePredicateCallee.Uses.Add(rr);
+            }
+            if (callee.AllowsNontermination && !resolutionContext.CodeContext.AllowsNontermination) {
+              ReportWarning(e.Origin,
+                "a call to a possibly non-terminating function is allowed only if the calling method/function is also declared (with 'decreases *') to be possibly non-terminating");
             }
             r = rr;
             ResolveExpression(r, resolutionContext);
