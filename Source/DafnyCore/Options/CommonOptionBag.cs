@@ -110,6 +110,11 @@ This option does NOT affect null/allocated checks for arrays, nor domain members
 
 WARNING: This weakens verification guarantees and can hide runtime errors.".TrimStart());
 
+  public static readonly Option<bool> AllowDecreasesStarOnFunctionsAndLemmas = new("--allow-decreases-star-on-functions-and-lemmas", () => false, @"
+Allow `decreases *` on functions/predicates and lemmas.
+
+WARNING: This is unsound and weakens verification guarantees. It can hide non-termination and other errors.".TrimStart());
+
   public static readonly Option<bool> EnforceDeterminism = new("--enforce-determinism",
     "Check that only deterministic statements are used, so that values seen during execution will be the same in every run of the program.") {
   };
@@ -660,6 +665,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
     OptionRegistry.RegisterGlobalOption(AllowAxioms, OptionCompatibility.OptionLibraryImpliesLocalError);
     OptionRegistry.RegisterGlobalOption(AssumeWellFormedDiv, OptionCompatibility.OptionLibraryImpliesLocalError);
     OptionRegistry.RegisterGlobalOption(AssumeWellFormedIndex, OptionCompatibility.OptionLibraryImpliesLocalError);
+    OptionRegistry.RegisterGlobalOption(AllowDecreasesStarOnFunctionsAndLemmas, OptionCompatibility.OptionLibraryImpliesLocalError);
     OptionRegistry.RegisterGlobalOption(AllowWarnings, OptionCompatibility.OptionLibraryImpliesLocalWarning);
     OptionRegistry.RegisterGlobalOption(AllowDeprecation, OptionCompatibility.OptionLibraryImpliesLocalWarning);
     OptionRegistry.RegisterGlobalOption(WarnShadowing, OptionCompatibility.OptionLibraryImpliesLocalWarning);
@@ -693,6 +699,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
     OptionRegistry.RegisterOption(VerifyIncludedFiles, OptionScope.Cli);
     OptionRegistry.RegisterOption(AssumeWellFormedDiv, OptionScope.Cli);
     OptionRegistry.RegisterOption(AssumeWellFormedIndex, OptionScope.Cli);
+    OptionRegistry.RegisterOption(AllowDecreasesStarOnFunctionsAndLemmas, OptionScope.Cli);
     OptionRegistry.RegisterOption(DisableNonLinearArithmetic, OptionScope.Module);
     OptionRegistry.RegisterOption(NewTypeInferenceDebug, OptionScope.Cli);
     OptionRegistry.RegisterOption(UseBaseFileName, OptionScope.Cli);
