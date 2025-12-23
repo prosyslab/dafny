@@ -325,6 +325,9 @@ true - Print debug information for the new type system.".TrimStart()) {
   public static readonly Option<bool> AllowWarnings = new("--allow-warnings",
     "Allow compilation to continue and succeed when warnings occur. Errors will still halt and fail compilation.");
 
+  public static readonly Option<bool> SuppressWarnings = new("--suppress-warnings",
+    "Suppress all warning and info diagnostics from CLI output. Errors are still shown.");
+
   public static readonly Option<bool> WarnMissingConstructorParenthesis = new("--warn-missing-constructor-parentheses",
     "Emits a warning when a constructor name in a case pattern is not followed by parentheses.");
   public static readonly Option<bool> WarnShadowing = new("--warn-shadowing",
@@ -673,6 +676,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
     OptionRegistry.RegisterGlobalOption(Referrers, OptionCompatibility.CheckOptionMatches);
     OptionRegistry.RegisterOption(TranslateStandardLibrary, OptionScope.Cli);
     OptionRegistry.RegisterOption(WarnAsErrors, OptionScope.Cli);
+    OptionRegistry.RegisterOption(SuppressWarnings, OptionScope.Cli);
     OptionRegistry.RegisterOption(ProgressOption, OptionScope.Cli);
     OptionRegistry.RegisterOption(LogLocation, OptionScope.Cli);
     OptionRegistry.RegisterOption(LogLevelOption, OptionScope.Cli);

@@ -35,6 +35,10 @@ public class HumanReadableOutputWriter(DafnyOptions options) : IDafnyOutputWrite
   }
 
   public void WriteDiagnostic(DafnyDiagnostic diagnostic) {
+    if (options.Get(CommonOptionBag.SuppressWarnings) && diagnostic.Level != ErrorLevel.Error) {
+      return;
+    }
+
     ConsoleColor previousColor = Console.ForegroundColor;
     if (options.BaseOutputWriter == Console.Out) {
       Console.ForegroundColor = ColorForLevel(diagnostic.Level);
