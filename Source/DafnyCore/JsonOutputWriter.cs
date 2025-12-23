@@ -49,6 +49,10 @@ class JsonOutputWriter(DafnyOptions options) : IDafnyOutputWriter {
   }
 
   public void WriteDiagnostic(DafnyDiagnostic dafnyDiagnostic) {
+    if (options.Get(CommonOptionBag.SuppressWarnings) && dafnyDiagnostic.Level != ErrorLevel.Error) {
+      return;
+    }
+
     var data = new DiagnosticMessageData(dafnyDiagnostic.Source, dafnyDiagnostic.Level, dafnyDiagnostic.Range,
       dafnyDiagnostic.Level == ErrorLevel.Error ? "Error" : null, dafnyDiagnostic.ErrorId, dafnyDiagnostic.MessageParts,
       dafnyDiagnostic.RelatedInformation);

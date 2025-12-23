@@ -82,6 +82,7 @@ public static class DafnyCommands {
     DeveloperOptionBag.BoogiePrint,
     Printer.PrintMode,
     CommonOptionBag.AllowWarnings,
+    CommonOptionBag.SuppressWarnings,
     CommonOptionBag.WarnAsErrors,
     CommonOptionBag.InputType
   });
