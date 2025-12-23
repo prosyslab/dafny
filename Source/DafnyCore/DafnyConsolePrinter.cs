@@ -84,6 +84,10 @@ public class DafnyConsolePrinter : ConsolePrinter {
       return;
     }
 
+    if (Options.Get(CommonOptionBag.SuppressWarnings) && !error) {
+      return;
+    }
+
     if (category != null) {
       message = $"{category}: {message}";
     }

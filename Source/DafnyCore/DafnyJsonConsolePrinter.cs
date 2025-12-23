@@ -10,8 +10,15 @@ namespace Microsoft.Dafny;
 
 public class JsonConsoleErrorReporter(DafnyOptions options) : BatchErrorReporter(options) {
   public override bool MessageCore(DafnyDiagnostic dafnyDiagnostic) {
-    if (!base.MessageCore(dafnyDiagnostic) ||
-        (Options is not { PrintTooltips: true } && dafnyDiagnostic.Level == ErrorLevel.Info)) {
+    if (!base.MessageCore(dafnyDiagnostic)) {
+      return false;
+    }
+
+    if (Options.Get(CommonOptionBag.SuppressWarnings) && dafnyDiagnostic.Level != ErrorLevel.Error) {
+      return false;
+    }
+
+    if (Options is not { PrintTooltips: true } && dafnyDiagnostic.Level == ErrorLevel.Info) {
       return false;
     }
 
@@ -25,6 +32,10 @@ public class JsonConsoleErrorReporter(DafnyOptions options) : BatchErrorReporter
 
 public class DafnyJsonConsolePrinter(DafnyOptions options) : DafnyConsolePrinter(options) {
   public override void ReportBplError(Boogie.IToken tok, string message, bool error, TextWriter tw, string? category = null) {
+    if (Options.Get(CommonOptionBag.SuppressWarnings) && !error) {
+      return;
+    }
+
     var level = error ? ErrorLevel.Error : ErrorLevel.Warning;
     var dafnyToken = BoogieGenerator.ToDafnyToken(tok);
     var relatedInformation = new List<DafnyRelatedInformation>();
