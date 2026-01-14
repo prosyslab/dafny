@@ -595,6 +595,13 @@ namespace Microsoft.Dafny {
         if (e.SplitQuantifier != null) {
           return TrExpr(e.SplitQuantifierExpression);
         } else {
+          if (e is ForallExpr forallExpr) {
+            var maxInstances = options.Get(CommonOptionBag.UnrollBoundedQuantifiers);
+            if (maxInstances > 0 && TryTranslateUnrolledForall(forallExpr, maxInstances, out var unrolled)) {
+              return unrolled;
+            }
+          }
+
           List<Variable> bvars = [];
           var bodyEtran = this;
           if (e is ExistsExpr && BoogieGenerator.stmtContext == StmtType.ASSERT && BoogieGenerator.adjustFuelForExists) {
@@ -629,6 +636,133 @@ namespace Microsoft.Dafny {
             return new Boogie.ExistsExpr(GetToken(quantifierExpr), [], bvars, kv, tr, BplAnd(antecedent, body));
           }
         }
+      }
+
+      private bool IsNatType(Type type) {
+        // "nat" is a subset type declared in the system module, with the implicit constraint 0 <= x.
+        // We use NormalizeExpandKeepConstraints so that we can distinguish nat from other int-based subset types.
+        if (type.NormalizeExpandKeepConstraints() is UserDefinedType { ResolvedClass: var resolvedClass }) {
+          return resolvedClass == BoogieGenerator.program.SystemModuleManager.NatDecl;
+        }
+        return false;
+      }
+
+      private static bool IsPlainIntType(Type type) {
+        // Use NormalizeExpandKeepConstraints to avoid treating arbitrary subset types as plain int.
+        return type.NormalizeExpandKeepConstraints() is IntType;
+      }
+
+      private bool TryTranslateUnrolledForall(ForallExpr forallExpr, uint maxInstances, out Expr translated) {
+        translated = null;
+
+        if (forallExpr.Bounds == null || forallExpr.Bounds.Count != forallExpr.BoundVars.Count) {
+          return false;
+        }
+
+        // Limit the implementation to `int` intervals discovered by BoundsDiscovery (IntBoundedPool).
+        var intervals = new (BoundVar Var, BigInteger Lower, BigInteger UpperExclusive)[forallExpr.BoundVars.Count];
+        var totalInstances = BigInteger.One;
+        for (var i = 0; i < forallExpr.BoundVars.Count; i++) {
+          var bv = forallExpr.BoundVars[i];
+          var isNat = IsNatType(bv.Type);
+          if (!IsPlainIntType(bv.Type) && !isNat) {
+            return false;
+          }
+
+          if (forallExpr.Bounds[i] is not IntBoundedPool intPool || intPool.UpperBound == null) {
+            return false;
+          }
+
+          BigInteger lower;
+          if (intPool.LowerBound == null) {
+            if (!isNat) {
+              return false;
+            }
+            // nat implicitly bounds values below by 0 even if bounds discovery didn't supply a lower bound.
+            lower = BigInteger.Zero;
+          } else if (!TryEvaluateIntLiteral(intPool.LowerBound, out lower)) {
+            return false;
+          }
+
+          if (!TryEvaluateIntLiteral(intPool.UpperBound, out var upperExclusive)) {
+            return false;
+          }
+
+          var length = upperExclusive - lower;
+          if (length <= 0) {
+            // Empty interval => vacuously true forall.
+            totalInstances = BigInteger.Zero;
+          } else if (totalInstances != BigInteger.Zero) {
+            totalInstances *= length;
+            if (totalInstances > maxInstances) {
+              return false;
+            }
+          }
+
+          intervals[i] = (bv, lower, upperExclusive);
+        }
+
+        if (totalInstances == BigInteger.Zero) {
+          translated = Expr.True;
+          return true;
+        }
+
+        // Instantiate the logical body (Range ==> Term) for every value tuple in the cartesian product.
+        var logicalBody = forallExpr.LogicalBody();
+        var substMap = new Dictionary<IVariable, Expression>(forallExpr.BoundVars.Count);
+        Expr conjunction = Expr.True;
+        var done = false;
+
+        void AddInstances(int index) {
+          if (done) {
+            return;
+          }
+          if (index == intervals.Length) {
+            var instantiated = BoogieGenerator.Substitute(logicalBody, null, substMap);
+            conjunction = BplAnd(conjunction, TrExpr(instantiated));
+            if (RemoveLit(conjunction) == Expr.False) {
+              done = true;
+            }
+            return;
+          }
+
+          var (v, lower, upperExclusive) = intervals[index];
+          for (var value = lower; value < upperExclusive; value++) {
+            // Preserve the bound variable's type (int or nat) so that instantiations type-check downstream
+            // (e.g., when the variable is passed to a function expecting nat).
+            substMap[v] = new LiteralExpr(v.Origin, value) { Type = v.Type };
+            AddInstances(index + 1);
+          }
+        }
+
+        AddInstances(0);
+        translated = conjunction;
+        return true;
+      }
+
+      private static bool TryEvaluateIntLiteral(Expression expr, out BigInteger value) {
+        expr = expr.Resolved;
+
+        if (Expression.IsIntLiteral(expr, out value)) {
+          return true;
+        }
+
+        if (expr is BinaryExpr binary && binary.Type.IsIntegerType) {
+          if (binary.ResolvedOp == BinaryExpr.ResolvedOpcode.Add) {
+            if (TryEvaluateIntLiteral(binary.E0, out var a) && TryEvaluateIntLiteral(binary.E1, out var b)) {
+              value = a + b;
+              return true;
+            }
+          } else if (binary.ResolvedOp == BinaryExpr.ResolvedOpcode.Sub) {
+            if (TryEvaluateIntLiteral(binary.E0, out var a) && TryEvaluateIntLiteral(binary.E1, out var b)) {
+              value = a - b;
+              return true;
+            }
+          }
+        }
+
+        value = default;
+        return false;
       }
 
       private Expr TranslateTernaryExpr(TernaryExpr ternaryExpr) {

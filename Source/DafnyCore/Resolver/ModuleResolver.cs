@@ -848,10 +848,10 @@ namespace Microsoft.Dafny {
         so the .Flattened field of NestedMatchExpr was not set.
         Also, rewriters.PostResolve was not run, so .Flattened was not set after cloning
         which led to a crash during Boogie generation.
-       
-        Cloning with resolved fields is not an option, 
+
+        Cloning with resolved fields is not an option,
         because then internal references of the cloned code can point to the old code.
-       
+
         I(keyboardDrummer) think it would be better altogether if no cloning was done for abstract modules,
         But until that happens here is code that explicitly calls MatchFlattener which sets .Flattened
         Alternatively, we could call all the rewriter.PostResolve methods
@@ -1259,13 +1259,13 @@ namespace Microsoft.Dafny {
 
       // ---------------------------------- Pass 2 ----------------------------------
       // This pass fills in various additional information.
-      // * Subset type in comprehensions have a compilable constraint 
+      // * Subset type in comprehensions have a compilable constraint
       // * Postconditions and bodies of prefix lemmas
       // * Compute postconditions and statement body of prefix lemmas
       // * Perform the stratosphere check on inductive datatypes, and compute to what extent the inductive datatypes require equality support
       // * Set the SccRepr field of codatatypes
       // * Perform the guardedness check on co-datatypes
-      // * Do datatypes and type synonyms until a fixpoint is reached, same for functions and methods	
+      // * Do datatypes and type synonyms until a fixpoint is reached, same for functions and methods
       // * Check that functions claiming to be abstemious really are
       // * Check that all == and != operators in non-ghost contexts are applied to equality-supporting types.
       // * Extreme predicate recursivity checks
@@ -1935,7 +1935,7 @@ namespace Microsoft.Dafny {
                 new TailRecursion(reporter).DetermineTailRecursion(m);
               } else {
                 // m should not be null, unless an error has been reported
-                // (e.g. function-by-method and method with the same name) 
+                // (e.g. function-by-method and method with the same name)
                 Contract.Assert(reporter.HasErrors);
               }
             }
@@ -3025,7 +3025,7 @@ namespace Microsoft.Dafny {
         DetermineEqualitySupportType(typeMap.Range, ref thingsChanged);
       } else if (type.AsSeqType is { } typeSeq) {
         // Like the Range type of a map, it is optional for a sequence type's argument type to support equality. So, we make a call
-        // to determine it.  
+        // to determine it.
         DetermineEqualitySupportType(typeSeq.Arg, ref thingsChanged);
       }
     }
@@ -3303,7 +3303,7 @@ namespace Microsoft.Dafny {
     /// Check that "stmt" is a valid statement for the body of an assert-by, forall,
     /// or calc-hint statement. In particular, check that the local variables assigned in
     /// the bodies of these statements are declared in the statements, not in some enclosing
-    /// context. 
+    /// context.
     /// </summary>
     public void CheckLocalityUpdates(Statement stmt, ISet<LocalVariable> localsAllowedInUpdates, string where) {
       Contract.Requires(stmt != null);

@@ -51,6 +51,15 @@ public class CommonOptionBag {
       IsHidden = true
     };
 
+  public static readonly Option<uint> UnrollBoundedQuantifiers = new("--unroll-bounded-quantifiers", () => 0,
+    @"
+When verifying, expand bounded `forall` quantifiers over `int` and `nat` by enumerating all values when the bounds are concrete.
+The argument is a per-quantifier limit on the total number of instantiated cases.
+0 (default) disables this feature.".TrimStart()
+  ) {
+    ArgumentHelpName = "max-instances"
+  };
+
   public static readonly Option<bool> ManualTriggerOption =
     new("--manual-triggers", "Do not generate {:trigger} annotations for user-level quantifiers") {
       IsHidden = true
@@ -680,6 +689,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
     OptionRegistry.RegisterOption(ProgressOption, OptionScope.Cli);
     OptionRegistry.RegisterOption(LogLocation, OptionScope.Cli);
     OptionRegistry.RegisterOption(LogLevelOption, OptionScope.Cli);
+    OptionRegistry.RegisterOption(UnrollBoundedQuantifiers, OptionScope.Cli);
     OptionRegistry.RegisterOption(ManualTriggerOption, OptionScope.Module);
     OptionRegistry.RegisterOption(ShowHints, OptionScope.Cli);
     OptionRegistry.RegisterOption(Libraries, OptionScope.Module);
