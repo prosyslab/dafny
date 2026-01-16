@@ -107,6 +107,8 @@ public static class DafnyCommands {
     CommonOptionBag.TypeSystemRefresh,
     CommonOptionBag.TypeInferenceDebug,
     CommonOptionBag.NewTypeInferenceDebug,
+    CommonOptionBag.PartialEvalEntry,
+    CommonOptionBag.PartialEvalInlineDepth,
     CommonOptionBag.AllowDecreasesStarOnFunctionsAndLemmas,
     Method.ReadsClausesOnMethods,
     CommonOptionBag.UseStandardLibraries,
