@@ -478,6 +478,17 @@ namespace Microsoft.Dafny {
         case LabeledStatement labeledStatement:
           // content already handled earlier
           break;
+        case BlockByProofStmt blockByProofStatement: {
+            var s = blockByProofStatement;
+            if (s.Body is AssertStmt) {
+              PrintPredicateStmt(s.Body, false);
+            } else {
+              PrintStatement(s.Body, indent);
+            }
+            wr.Write(" by ");
+            PrintBlockStmt(s.Proof, indent);
+            break;
+          }
         default:
           Contract.Assert(false); throw new Cce.UnreachableException();  // unexpected statement
       }
