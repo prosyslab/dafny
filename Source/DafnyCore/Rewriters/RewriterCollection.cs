@@ -21,6 +21,8 @@ public static class RewriterCollection {
     result.Add(new ForallStmtRewriter(reporter));
     result.Add(new ProvideRevealAllRewriter(reporter));
     result.Add(new MatchFlattener(reporter));
+    result.Add(new PartialEvaluator(program, reporter));
+    result.Add(new UnrollBoundedQuantifiersRewriter(program, reporter));
 
     if (reporter.Options.AutoTriggers) {
       result.Add(new QuantifierSplittingRewriter(reporter));
