@@ -60,6 +60,20 @@ The argument is a per-quantifier limit on the total number of instantiated cases
     ArgumentHelpName = "max-instances"
   };
 
+  public static readonly Option<string> PartialEvalEntry = new("--partial-eval-entry", () => "",
+    @"
+Enable partial evaluation scoped to a single entry function or method by name.".TrimStart()
+  ) {
+    ArgumentHelpName = "entry-name"
+  };
+
+  public static readonly Option<uint> PartialEvalInlineDepth = new("--partial-eval-inline-depth", () => 3,
+    @"
+Maximum inlining depth during partial evaluation. Only applies when --partial-eval-entry is set.".TrimStart()
+  ) {
+    ArgumentHelpName = "max-depth"
+  };
+
   public static readonly Option<bool> ManualTriggerOption =
     new("--manual-triggers", "Do not generate {:trigger} annotations for user-level quantifiers") {
       IsHidden = true
@@ -690,6 +704,8 @@ NoGhost - disable printing of functions, ghost methods, and proof
     OptionRegistry.RegisterOption(LogLocation, OptionScope.Cli);
     OptionRegistry.RegisterOption(LogLevelOption, OptionScope.Cli);
     OptionRegistry.RegisterOption(UnrollBoundedQuantifiers, OptionScope.Cli);
+    OptionRegistry.RegisterOption(PartialEvalEntry, OptionScope.Cli);
+    OptionRegistry.RegisterOption(PartialEvalInlineDepth, OptionScope.Cli);
     OptionRegistry.RegisterOption(ManualTriggerOption, OptionScope.Module);
     OptionRegistry.RegisterOption(ShowHints, OptionScope.Cli);
     OptionRegistry.RegisterOption(Libraries, OptionScope.Module);
