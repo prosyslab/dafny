@@ -61,219 +61,23 @@ internal sealed class PartialEvaluatorEngine {
   }
 
   public void PartialEvalEntry(ICallable callable) {
+    var state = new PartialEvalState((int)inlineDepth, new HashSet<Function>());
+    var visitor = new PartialEvaluatorVisitor(this);
     switch (callable) {
       case Function function when function.Body != null:
-        function.Body = SimplifyExpr(function.Body, (int)inlineDepth, new HashSet<Function>());
+        function.Body = visitor.SimplifyExpression(function.Body, state);
         break;
       case MethodOrConstructor method when method.Body != null:
-        SimplifyStmt(method.Body, (int)inlineDepth, new HashSet<Function>());
+        visitor.Visit(method.Body, state);
         break;
     }
   }
 
-  private void SimplifyStmt(Statement stmt, int depth, HashSet<Function> inlineStack) {
-    switch (stmt) {
-      case BlockStmt block:
-        foreach (var s in block.Body) {
-          SimplifyStmt(s, depth, inlineStack);
-        }
-        break;
-      case IfStmt ifStmt:
-        ifStmt.Guard = SimplifyExpr(ifStmt.Guard, depth, inlineStack);
-        SimplifyStmt(ifStmt.Thn, depth, inlineStack);
-        if (ifStmt.Els != null) {
-          SimplifyStmt(ifStmt.Els, depth, inlineStack);
-        }
-        break;
-      case WhileStmt whileStmt:
-        whileStmt.Guard = SimplifyExpr(whileStmt.Guard, depth, inlineStack);
-        foreach (var inv in whileStmt.Invariants) {
-          inv.E = SimplifyExpr(inv.E, depth, inlineStack);
-        }
-        if (whileStmt.Decreases?.Expressions != null) {
-          for (var i = 0; i < whileStmt.Decreases.Expressions.Count; i++) {
-            whileStmt.Decreases.Expressions[i] =
-              SimplifyExpr(whileStmt.Decreases.Expressions[i], depth, inlineStack);
-          }
-        }
-        SimplifyStmt(whileStmt.Body, depth, inlineStack);
-        break;
-      case AssertStmt assertStmt:
-        assertStmt.Expr = SimplifyExpr(assertStmt.Expr, depth, inlineStack);
-        break;
-      case AssumeStmt assumeStmt:
-        assumeStmt.Expr = SimplifyExpr(assumeStmt.Expr, depth, inlineStack);
-        break;
-      case ExpectStmt expectStmt:
-        expectStmt.Expr = SimplifyExpr(expectStmt.Expr, depth, inlineStack);
-        if (expectStmt.Message != null) {
-          expectStmt.Message = SimplifyExpr(expectStmt.Message, depth, inlineStack);
-        }
-        break;
-      case SingleAssignStmt assignStmt:
-        if (assignStmt.Rhs is ExprRhs exprRhs) {
-          exprRhs.Expr = SimplifyExpr(exprRhs.Expr, depth, inlineStack);
-        }
-        break;
-      case CallStmt callStmt:
-        callStmt.MethodSelect.Obj = SimplifyExpr(callStmt.MethodSelect.Obj, depth, inlineStack);
-        for (var i = 0; i < callStmt.Args.Count; i++) {
-          callStmt.Args[i] = SimplifyExpr(callStmt.Args[i], depth, inlineStack);
-        }
-        break;
-      case ReturnStmt returnStmt:
-        if (returnStmt.Rhss != null) {
-          foreach (var rhs in returnStmt.Rhss) {
-            if (rhs is ExprRhs returnExprRhs) {
-              returnExprRhs.Expr = SimplifyExpr(returnExprRhs.Expr, depth, inlineStack);
-            }
-          }
-        }
-        break;
-      case HideRevealStmt hideRevealStmt:
-        if (hideRevealStmt.Exprs != null) {
-          for (var i = 0; i < hideRevealStmt.Exprs.Count; i++) {
-            var exprToSimplify = hideRevealStmt.Exprs[i];
-            if (exprToSimplify == null || !exprToSimplify.WasResolved()) {
-              continue;
-            }
-            hideRevealStmt.Exprs[i] = SimplifyExpr(exprToSimplify, depth, inlineStack);
-          }
-        }
-        break;
-      default:
-        foreach (var sub in stmt.SubStatements) {
-          SimplifyStmt(sub, depth, inlineStack);
-        }
-        break;
-    }
-  }
-
-  private Expression SimplifyExpr(Expression expr, int depth, HashSet<Function> inlineStack) {
+  private static void AssertHasResolvedType(Expression expr) {
     if (expr == null) {
-      return null;
+      return;
     }
-
-    if (expr.Resolved != null && expr.Resolved != expr) {
-      expr = expr.Resolved;
-    }
-
-    switch (expr) {
-      case ParensExpression parens:
-        return SimplifyExpr(parens.E, depth, inlineStack);
-      case LiteralExpr:
-        return expr;
-      case UnaryOpExpr unary:
-        unary.E = SimplifyExpr(unary.E, depth, inlineStack);
-        if (unary.ResolvedOp == UnaryOpExpr.ResolvedOpcode.BoolNot &&
-            Expression.IsBoolLiteral(unary.E, out var boolValue)) {
-          return Expression.CreateBoolLiteral(unary.Origin, !boolValue);
-        }
-        return unary;
-      case BinaryExpr binary:
-        binary.E0 = SimplifyExpr(binary.E0, depth, inlineStack);
-        binary.E1 = SimplifyExpr(binary.E1, depth, inlineStack);
-        return SimplifyBinary(binary);
-      case ITEExpr ite:
-        ite.Test = SimplifyExpr(ite.Test, depth, inlineStack);
-        if (Expression.IsBoolLiteral(ite.Test, out var cond)) {
-          return SimplifyExpr(cond ? ite.Thn : ite.Els, depth, inlineStack);
-        }
-        ite.Thn = SimplifyExpr(ite.Thn, depth, inlineStack);
-        ite.Els = SimplifyExpr(ite.Els, depth, inlineStack);
-        return ite;
-      case FunctionCallExpr callExpr:
-        callExpr.Receiver = SimplifyExpr(callExpr.Receiver, depth, inlineStack);
-        for (var i = 0; i < callExpr.Args.Count; i++) {
-          callExpr.Args[i] = SimplifyExpr(callExpr.Args[i], depth, inlineStack);
-        }
-        if (depth > 0 && TryInlineCall(callExpr, depth, inlineStack, out var inlined)) {
-          return inlined;
-        }
-        return callExpr;
-      case QuantifierExpr quantifierExpr:
-        quantifierExpr.Range = quantifierExpr.Range == null
-          ? null
-          : SimplifyExpr(quantifierExpr.Range, depth, inlineStack);
-        quantifierExpr.Term = SimplifyExpr(quantifierExpr.Term, depth, inlineStack);
-        quantifierExpr.Bounds = SimplifyBounds(quantifierExpr.Bounds, depth, inlineStack);
-        return quantifierExpr;
-      case LetExpr letExpr:
-        for (var i = 0; i < letExpr.RHSs.Count; i++) {
-          letExpr.RHSs[i] = SimplifyExpr(letExpr.RHSs[i], depth, inlineStack);
-        }
-        letExpr.Body = SimplifyExpr(letExpr.Body, depth, inlineStack);
-        return letExpr;
-      default:
-        return expr;
-    }
-  }
-
-  private List<BoundedPool> SimplifyBounds(List<BoundedPool> bounds, int depth, HashSet<Function> inlineStack) {
-    if (bounds == null) {
-      return null;
-    }
-    var changed = false;
-    var newBounds = new List<BoundedPool>(bounds.Count);
-    foreach (var bound in bounds) {
-      var simplified = SimplifyBoundedPool(bound, depth, inlineStack);
-      if (!ReferenceEquals(simplified, bound)) {
-        changed = true;
-      }
-      newBounds.Add(simplified);
-    }
-    return changed ? newBounds : bounds;
-  }
-
-  private BoundedPool SimplifyBoundedPool(BoundedPool bound, int depth, HashSet<Function> inlineStack) {
-    switch (bound) {
-      case IntBoundedPool intPool: {
-        var lower = intPool.LowerBound == null ? null : SimplifyExpr(intPool.LowerBound, depth, inlineStack);
-        var upper = intPool.UpperBound == null ? null : SimplifyExpr(intPool.UpperBound, depth, inlineStack);
-        if (lower != intPool.LowerBound || upper != intPool.UpperBound) {
-          return new IntBoundedPool(lower, upper);
-        }
-        return bound;
-      }
-      case SetBoundedPool setPool: {
-        var set = SimplifyExpr(setPool.Set, depth, inlineStack);
-        return set != setPool.Set
-          ? new SetBoundedPool(set, setPool.BoundVariableType, setPool.CollectionElementType, setPool.IsFiniteCollection)
-          : bound;
-      }
-      case SubSetBoundedPool subSet: {
-        var upper = SimplifyExpr(subSet.UpperBound, depth, inlineStack);
-        return upper != subSet.UpperBound
-          ? new SubSetBoundedPool(upper, subSet.IsFiniteCollection)
-          : bound;
-      }
-      case SuperSetBoundedPool superSet: {
-        var lower = SimplifyExpr(superSet.LowerBound, depth, inlineStack);
-        return lower != superSet.LowerBound
-          ? new SuperSetBoundedPool(lower)
-          : bound;
-      }
-      case SeqBoundedPool seqPool: {
-        var seq = SimplifyExpr(seqPool.Seq, depth, inlineStack);
-        return seq != seqPool.Seq
-          ? new SeqBoundedPool(seq, seqPool.BoundVariableType, seqPool.CollectionElementType)
-          : bound;
-      }
-      case MapBoundedPool mapPool: {
-        var map = SimplifyExpr(mapPool.Map, depth, inlineStack);
-        return map != mapPool.Map
-          ? new MapBoundedPool(map, mapPool.BoundVariableType, mapPool.CollectionElementType, mapPool.IsFiniteCollection)
-          : bound;
-      }
-      case MultiSetBoundedPool multiSetPool: {
-        var multiset = SimplifyExpr(multiSetPool.MultiSet, depth, inlineStack);
-        return multiset != multiSetPool.MultiSet
-          ? new MultiSetBoundedPool(multiset, multiSetPool.BoundVariableType, multiSetPool.CollectionElementType)
-          : bound;
-      }
-      default:
-        return bound;
-    }
+    Contract.Assert(expr.Type != null, "PartialEvaluator produced an expression with null Type");
   }
 
   private Expression SimplifyBinary(BinaryExpr binary) {
@@ -399,10 +203,10 @@ internal sealed class PartialEvaluatorEngine {
     return binary;
   }
 
-  private bool TryInlineCall(FunctionCallExpr callExpr, int depth, HashSet<Function> inlineStack, out Expression inlined) {
+  private bool TryInlineCall(FunctionCallExpr callExpr, PartialEvalState state, PartialEvaluatorVisitor visitor, out Expression inlined) {
     inlined = null;
     var function = callExpr.Function;
-    if (function == null || function.Body == null || depth <= 0) {
+    if (function == null || function.Body == null || state.Depth <= 0) {
       return false;
     }
 
@@ -415,14 +219,14 @@ internal sealed class PartialEvaluatorEngine {
     }
 
     for (var i = 0; i < callExpr.Args.Count; i++) {
-      var simplifiedArg = SimplifyExpr(callExpr.Args[i], 0, inlineStack);
+      var simplifiedArg = visitor.SimplifyExpression(callExpr.Args[i], state.WithDepth(0));
       if (simplifiedArg is not LiteralExpr) {
         return false;
       }
       callExpr.Args[i] = simplifiedArg;
     }
 
-    if (!inlineStack.Add(function)) {
+    if (!state.InlineStack.Add(function)) {
       return false;
     }
 
@@ -435,12 +239,273 @@ internal sealed class PartialEvaluatorEngine {
     var typeMap = callExpr.GetTypeArgumentSubstitutions();
     var substituter = new Substituter(receiverReplacement, substMap, typeMap, null, systemModuleManager);
     var body = substituter.Substitute(function.Body);
-    inlined = SimplifyExpr(body, depth - 1, inlineStack);
-    inlineStack.Remove(function);
+    inlined = visitor.SimplifyExpression(body, state.WithDepth(state.Depth - 1));
+    state.InlineStack.Remove(function);
     return true;
   }
 
   private static LiteralExpr CreateIntLiteral(IOrigin origin, BigInteger value) {
     return new LiteralExpr(origin, value) { Type = Type.Int };
+  }
+
+  private sealed class PartialEvalState {
+    public int Depth { get; }
+    public HashSet<Function> InlineStack { get; }
+
+    public PartialEvalState(int depth, HashSet<Function> inlineStack) {
+      Depth = depth;
+      InlineStack = inlineStack;
+    }
+
+    public PartialEvalState WithDepth(int depth) {
+      return new PartialEvalState(depth, InlineStack);
+    }
+  }
+
+  private sealed class PartialEvaluatorVisitor : TopDownVisitor<PartialEvalState> {
+    private readonly PartialEvaluatorEngine engine;
+    private readonly Dictionary<Expression, Expression> replacements = new();
+
+    public PartialEvaluatorVisitor(PartialEvaluatorEngine engine) {
+      this.engine = engine;
+    }
+
+    public Expression SimplifyExpression(Expression expr, PartialEvalState state) {
+      if (expr == null) {
+        return null;
+      }
+
+      if (expr.Resolved != null && expr.Resolved != expr) {
+        var resolvedResult = SimplifyExpression(expr.Resolved, state);
+        if (!ReferenceEquals(resolvedResult, expr)) {
+          AssertHasResolvedType(resolvedResult);
+        }
+        return resolvedResult;
+      }
+
+      Visit(expr, state);
+      var result = GetReplacement(expr);
+      if (!ReferenceEquals(result, expr)) {
+        AssertHasResolvedType(result);
+      }
+      return result;
+    }
+
+    private Expression GetReplacement(Expression expr) {
+      return replacements.TryGetValue(expr, out var replacement) ? replacement : expr;
+    }
+
+    private void SetReplacement(Expression original, Expression replacement) {
+      if (!ReferenceEquals(original, replacement)) {
+        replacements[original] = replacement;
+      }
+    }
+
+    protected override bool VisitOneStmt(Statement stmt, ref PartialEvalState state) {
+      switch (stmt) {
+        case BlockStmt block:
+          foreach (var s in block.Body) {
+            Visit(s, state);
+          }
+          break;
+        case IfStmt ifStmt:
+          ifStmt.Guard = SimplifyExpression(ifStmt.Guard, state);
+          Visit(ifStmt.Thn, state);
+          if (ifStmt.Els != null) {
+            Visit(ifStmt.Els, state);
+          }
+          break;
+        case WhileStmt whileStmt:
+          whileStmt.Guard = SimplifyExpression(whileStmt.Guard, state);
+          foreach (var inv in whileStmt.Invariants) {
+            inv.E = SimplifyExpression(inv.E, state);
+          }
+          if (whileStmt.Decreases?.Expressions != null) {
+            for (var i = 0; i < whileStmt.Decreases.Expressions.Count; i++) {
+              whileStmt.Decreases.Expressions[i] = SimplifyExpression(whileStmt.Decreases.Expressions[i], state);
+            }
+          }
+          Visit(whileStmt.Body, state);
+          break;
+        case AssertStmt assertStmt:
+          assertStmt.Expr = SimplifyExpression(assertStmt.Expr, state);
+          break;
+        case AssumeStmt assumeStmt:
+          assumeStmt.Expr = SimplifyExpression(assumeStmt.Expr, state);
+          break;
+        case ExpectStmt expectStmt:
+          expectStmt.Expr = SimplifyExpression(expectStmt.Expr, state);
+          if (expectStmt.Message != null) {
+            expectStmt.Message = SimplifyExpression(expectStmt.Message, state);
+          }
+          break;
+        case SingleAssignStmt assignStmt:
+          if (assignStmt.Rhs is ExprRhs exprRhs) {
+            exprRhs.Expr = SimplifyExpression(exprRhs.Expr, state);
+          }
+          break;
+        case CallStmt callStmt:
+          callStmt.MethodSelect.Obj = SimplifyExpression(callStmt.MethodSelect.Obj, state);
+          for (var i = 0; i < callStmt.Args.Count; i++) {
+            callStmt.Args[i] = SimplifyExpression(callStmt.Args[i], state);
+          }
+          break;
+        case ReturnStmt returnStmt:
+          if (returnStmt.Rhss != null) {
+            foreach (var rhs in returnStmt.Rhss) {
+              if (rhs is ExprRhs returnExprRhs) {
+                returnExprRhs.Expr = SimplifyExpression(returnExprRhs.Expr, state);
+              }
+            }
+          }
+          break;
+        case HideRevealStmt hideRevealStmt:
+          if (hideRevealStmt.Exprs != null) {
+            for (var i = 0; i < hideRevealStmt.Exprs.Count; i++) {
+              var exprToSimplify = hideRevealStmt.Exprs[i];
+              if (exprToSimplify == null || !exprToSimplify.WasResolved()) {
+                continue;
+              }
+              hideRevealStmt.Exprs[i] = SimplifyExpression(exprToSimplify, state);
+            }
+          }
+          break;
+        default:
+          foreach (var sub in stmt.SubStatements) {
+            Visit(sub, state);
+          }
+          break;
+      }
+      return false;
+    }
+
+    protected override bool VisitOneExpr(Expression expr, ref PartialEvalState state) {
+      Expression result;
+      switch (expr) {
+        case ParensExpression parens:
+          result = SimplifyExpression(parens.E, state);
+          SetReplacement(parens, result);
+          return false;
+        case LiteralExpr:
+          return false;
+        case UnaryOpExpr unary:
+          unary.E = SimplifyExpression(unary.E, state);
+          if (unary.ResolvedOp == UnaryOpExpr.ResolvedOpcode.BoolNot &&
+              Expression.IsBoolLiteral(unary.E, out var boolValue)) {
+            result = Expression.CreateBoolLiteral(unary.Origin, !boolValue);
+            SetReplacement(unary, result);
+            return false;
+          }
+          return false;
+        case BinaryExpr binary:
+          binary.E0 = SimplifyExpression(binary.E0, state);
+          binary.E1 = SimplifyExpression(binary.E1, state);
+          result = engine.SimplifyBinary(binary);
+          SetReplacement(binary, result);
+          return false;
+        case ITEExpr ite:
+          ite.Test = SimplifyExpression(ite.Test, state);
+          if (Expression.IsBoolLiteral(ite.Test, out var cond)) {
+            result = SimplifyExpression(cond ? ite.Thn : ite.Els, state);
+            SetReplacement(ite, result);
+            return false;
+          }
+          ite.Thn = SimplifyExpression(ite.Thn, state);
+          ite.Els = SimplifyExpression(ite.Els, state);
+          return false;
+        case FunctionCallExpr callExpr:
+          callExpr.Receiver = SimplifyExpression(callExpr.Receiver, state);
+          for (var i = 0; i < callExpr.Args.Count; i++) {
+            callExpr.Args[i] = SimplifyExpression(callExpr.Args[i], state);
+          }
+          if (state.Depth > 0 && engine.TryInlineCall(callExpr, state, this, out var inlined)) {
+            SetReplacement(callExpr, inlined);
+            return false;
+          }
+          return false;
+        case QuantifierExpr quantifierExpr:
+          quantifierExpr.Range = quantifierExpr.Range == null
+            ? null
+            : SimplifyExpression(quantifierExpr.Range, state);
+          quantifierExpr.Term = SimplifyExpression(quantifierExpr.Term, state);
+          quantifierExpr.Bounds = SimplifyBounds(quantifierExpr.Bounds, state);
+          return false;
+        case LetExpr letExpr:
+          for (var i = 0; i < letExpr.RHSs.Count; i++) {
+            letExpr.RHSs[i] = SimplifyExpression(letExpr.RHSs[i], state);
+          }
+          letExpr.Body = SimplifyExpression(letExpr.Body, state);
+          return false;
+        default:
+          return false;
+      }
+    }
+
+    private List<BoundedPool> SimplifyBounds(List<BoundedPool> bounds, PartialEvalState state) {
+      if (bounds == null) {
+        return null;
+      }
+      var changed = false;
+      var newBounds = new List<BoundedPool>(bounds.Count);
+      foreach (var bound in bounds) {
+        var simplified = SimplifyBoundedPool(bound, state);
+        if (!ReferenceEquals(simplified, bound)) {
+          changed = true;
+        }
+        newBounds.Add(simplified);
+      }
+      return changed ? newBounds : bounds;
+    }
+
+    private BoundedPool SimplifyBoundedPool(BoundedPool bound, PartialEvalState state) {
+      switch (bound) {
+        case IntBoundedPool intPool: {
+          var lower = intPool.LowerBound == null ? null : SimplifyExpression(intPool.LowerBound, state);
+          var upper = intPool.UpperBound == null ? null : SimplifyExpression(intPool.UpperBound, state);
+          if (lower != intPool.LowerBound || upper != intPool.UpperBound) {
+            return new IntBoundedPool(lower, upper);
+          }
+          return bound;
+        }
+        case SetBoundedPool setPool: {
+          var set = SimplifyExpression(setPool.Set, state);
+          return set != setPool.Set
+            ? new SetBoundedPool(set, setPool.BoundVariableType, setPool.CollectionElementType, setPool.IsFiniteCollection)
+            : bound;
+        }
+        case SubSetBoundedPool subSet: {
+          var upper = SimplifyExpression(subSet.UpperBound, state);
+          return upper != subSet.UpperBound
+            ? new SubSetBoundedPool(upper, subSet.IsFiniteCollection)
+            : bound;
+        }
+        case SuperSetBoundedPool superSet: {
+          var lower = SimplifyExpression(superSet.LowerBound, state);
+          return lower != superSet.LowerBound
+            ? new SuperSetBoundedPool(lower)
+            : bound;
+        }
+        case SeqBoundedPool seqPool: {
+          var seq = SimplifyExpression(seqPool.Seq, state);
+          return seq != seqPool.Seq
+            ? new SeqBoundedPool(seq, seqPool.BoundVariableType, seqPool.CollectionElementType)
+            : bound;
+        }
+        case MapBoundedPool mapPool: {
+          var map = SimplifyExpression(mapPool.Map, state);
+          return map != mapPool.Map
+            ? new MapBoundedPool(map, mapPool.BoundVariableType, mapPool.CollectionElementType, mapPool.IsFiniteCollection)
+            : bound;
+        }
+        case MultiSetBoundedPool multiSetPool: {
+          var multiset = SimplifyExpression(multiSetPool.MultiSet, state);
+          return multiset != multiSetPool.MultiSet
+            ? new MultiSetBoundedPool(multiset, multiSetPool.BoundVariableType, multiSetPool.CollectionElementType)
+            : bound;
+        }
+        default:
+          return bound;
+      }
+    }
   }
 }
