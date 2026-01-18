@@ -279,10 +279,12 @@ internal sealed class PartialEvaluatorEngine {
     private readonly PartialEvaluatorEngine engine;
     private readonly Dictionary<Expression, Expression> replacements = new();
     private readonly Dictionary<string, CachedLiteral> inlineCallCache;
+    private List<Dictionary<IVariable, ConstValue>> constScopes = [];
 
     public PartialEvaluatorVisitor(PartialEvaluatorEngine engine) {
       this.engine = engine;
       inlineCallCache = new Dictionary<string, CachedLiteral>(System.StringComparer.Ordinal);
+      constScopes.Add(new Dictionary<IVariable, ConstValue>());
     }
 
     public Expression SimplifyExpression(Expression expr, PartialEvalState state) {
@@ -313,6 +315,123 @@ internal sealed class PartialEvaluatorEngine {
     private void SetReplacement(Expression original, Expression replacement) {
       if (!ReferenceEquals(original, replacement)) {
         replacements[original] = replacement;
+      }
+    }
+
+    private void EnterScope() {
+      constScopes.Add(new Dictionary<IVariable, ConstValue>());
+    }
+
+    private void ExitScope() {
+      if (constScopes.Count > 1) {
+        constScopes.RemoveAt(constScopes.Count - 1);
+      } else {
+        // The visitor always keeps a root scope.
+        constScopes[0].Clear();
+      }
+    }
+
+    private bool TryLookupConst(IVariable variable, out ConstValue value) {
+      for (var i = constScopes.Count - 1; i >= 0; i--) {
+        if (constScopes[i].TryGetValue(variable, out value)) {
+          return true;
+        }
+      }
+
+      value = default;
+      return false;
+    }
+
+    private void SetConst(IVariable variable, ConstValue value) {
+      constScopes[^1][variable] = value;
+    }
+
+    private void InvalidateConst(IVariable variable) {
+      for (var i = constScopes.Count - 1; i >= 0; i--) {
+        if (constScopes[i].Remove(variable)) {
+          return;
+        }
+      }
+    }
+
+    private void InvalidateAssignedLocals(Statement stmt) {
+      foreach (var ide in stmt.GetAssignedLocals()) {
+        if (ide?.Var != null) {
+          InvalidateConst(ide.Var);
+        }
+      }
+    }
+
+    private List<Dictionary<IVariable, ConstValue>> CloneConstScopes() {
+      var snapshot = new List<Dictionary<IVariable, ConstValue>>(constScopes.Count);
+      foreach (var scope in constScopes) {
+        snapshot.Add(new Dictionary<IVariable, ConstValue>(scope));
+      }
+      return snapshot;
+    }
+
+    private static HashSet<IVariable> CollectAssignedLocalsDeep(Statement root) {
+      var assigned = new HashSet<IVariable>();
+      if (root == null) {
+        return assigned;
+      }
+
+      var stack = new Stack<Statement>();
+      stack.Push(root);
+      while (stack.Count > 0) {
+        var current = stack.Pop();
+        foreach (var ide in current.GetAssignedLocals()) {
+          if (ide?.Var != null) {
+            assigned.Add(ide.Var);
+          }
+        }
+        foreach (var child in current.SubStatements) {
+          stack.Push(child);
+        }
+      }
+
+      return assigned;
+    }
+
+    private void TryRecordLiteralLocalInitializers(VarDeclStmt varDeclStmt) {
+      if (varDeclStmt.Assign is not AssignStatement assignStatement) {
+        return;
+      }
+
+      // For var declarations, we only record locals that are initialized to int/bool literals.
+      // This stays conservative and avoids having to define general value semantics.
+      var resolvedStatements = assignStatement.ResolvedStatements;
+      if (resolvedStatements == null) {
+        return;
+      }
+
+      var declaredLocals = new HashSet<LocalVariable>(varDeclStmt.Locals);
+      foreach (var s in resolvedStatements) {
+        if (s is not SingleAssignStmt singleAssign) {
+          continue;
+        }
+
+        if (singleAssign.Lhs.Resolved is not IdentifierExpr ide) {
+          continue;
+        }
+
+        if (ide.Var is not LocalVariable local || !declaredLocals.Contains(local)) {
+          continue;
+        }
+
+        if (singleAssign.Rhs is not ExprRhs exprRhs) {
+          continue;
+        }
+
+        if (exprRhs.Expr is not LiteralExpr literal) {
+          continue;
+        }
+
+        if (!ConstValue.TryCreate(literal, out var constValue)) {
+          continue;
+        }
+
+        SetConst(ide.Var, constValue);
       }
     }
 
@@ -404,15 +523,43 @@ internal sealed class PartialEvaluatorEngine {
     protected override bool VisitOneStmt(Statement stmt, ref PartialEvalState state) {
       switch (stmt) {
         case BlockStmt block:
+          EnterScope();
           foreach (var s in block.Body) {
             Visit(s, state);
           }
+          ExitScope();
           break;
         case IfStmt ifStmt:
           ifStmt.Guard = SimplifyExpression(ifStmt.Guard, state);
-          Visit(ifStmt.Thn, state);
-          if (ifStmt.Els != null) {
-            Visit(ifStmt.Els, state);
+          if (Expression.IsBoolLiteral(ifStmt.Guard, out var cond)) {
+            if (cond) {
+              Visit(ifStmt.Thn, state);
+            } else if (ifStmt.Els != null) {
+              Visit(ifStmt.Els, state);
+            }
+          } else {
+            // Visit both branches, but do so from the same incoming environment so that substitutions
+            // within one branch do not affect the other.
+            var incoming = CloneConstScopes();
+
+            constScopes = CloneConstScopes();
+            Visit(ifStmt.Thn, state);
+
+            constScopes = incoming;
+            if (ifStmt.Els != null) {
+              constScopes = CloneConstScopes();
+              Visit(ifStmt.Els, state);
+            }
+
+            // After the join, conservatively drop any locals assigned in either branch.
+            constScopes = incoming;
+            var assigned = CollectAssignedLocalsDeep(ifStmt.Thn);
+            if (ifStmt.Els != null) {
+              assigned.UnionWith(CollectAssignedLocalsDeep(ifStmt.Els));
+            }
+            foreach (var v in assigned) {
+              InvalidateConst(v);
+            }
           }
           break;
         case WhileStmt whileStmt:
@@ -426,6 +573,12 @@ internal sealed class PartialEvaluatorEngine {
             }
           }
           Visit(whileStmt.Body, state);
+          // Be conservative across loops: assignments in the body may happen multiple times.
+          if (whileStmt.Body != null) {
+            foreach (var v in CollectAssignedLocalsDeep(whileStmt.Body)) {
+              InvalidateConst(v);
+            }
+          }
           break;
         case AssertStmt assertStmt:
           assertStmt.Expr = SimplifyExpression(assertStmt.Expr, state);
@@ -443,12 +596,24 @@ internal sealed class PartialEvaluatorEngine {
           if (assignStmt.Rhs is ExprRhs exprRhs) {
             exprRhs.Expr = SimplifyExpression(exprRhs.Expr, state);
           }
+          InvalidateAssignedLocals(assignStmt);
           break;
         case CallStmt callStmt:
           callStmt.MethodSelect.Obj = SimplifyExpression(callStmt.MethodSelect.Obj, state);
           for (var i = 0; i < callStmt.Args.Count; i++) {
             callStmt.Args[i] = SimplifyExpression(callStmt.Args[i], state);
           }
+          InvalidateAssignedLocals(callStmt);
+          break;
+        case VarDeclStmt varDeclStmt:
+          if (varDeclStmt.Assign != null) {
+            Visit(varDeclStmt.Assign, state);
+          }
+          TryRecordLiteralLocalInitializers(varDeclStmt);
+          break;
+        case AssignSuchThatStmt assignSuchThatStmt:
+          assignSuchThatStmt.Expr = SimplifyExpression(assignSuchThatStmt.Expr, state);
+          InvalidateAssignedLocals(assignSuchThatStmt);
           break;
         case ReturnStmt returnStmt:
           if (returnStmt.Rhss != null) {
@@ -487,6 +652,12 @@ internal sealed class PartialEvaluatorEngine {
           SetReplacement(parens, result);
           return false;
         case LiteralExpr:
+          return false;
+        case IdentifierExpr identifierExpr:
+          if (identifierExpr.Var != null && TryLookupConst(identifierExpr.Var, out var constValue)) {
+            result = constValue.CreateLiteral(identifierExpr.Origin, identifierExpr.Type);
+            SetReplacement(identifierExpr, result);
+          }
           return false;
         case UnaryOpExpr unary:
           unary.E = SimplifyExpression(unary.E, state);
@@ -640,6 +811,37 @@ internal sealed class PartialEvaluatorEngine {
     private enum CachedLiteralKind {
       Int,
       Bool
+    }
+
+    private readonly record struct ConstValue(CachedLiteralKind Kind, BigInteger IntValue, bool BoolValue) {
+      public static bool TryCreate(LiteralExpr literal, out ConstValue cached) {
+        cached = default;
+        if (literal == null) {
+          return false;
+        }
+
+        if (Expression.IsIntLiteral(literal, out var intValue)) {
+          cached = new ConstValue(CachedLiteralKind.Int, intValue, default);
+          return true;
+        }
+
+        if (Expression.IsBoolLiteral(literal, out var boolValue)) {
+          cached = new ConstValue(CachedLiteralKind.Bool, default, boolValue);
+          return true;
+        }
+
+        return false;
+      }
+
+      public Expression CreateLiteral(IOrigin origin, Type type) {
+        // Preserve the resolved type from the original use site to avoid introducing null/incorrect types
+        // (for example, when the variable is a subset type).
+        return Kind switch {
+          CachedLiteralKind.Int => new LiteralExpr(origin, IntValue) { Type = type },
+          CachedLiteralKind.Bool => new LiteralExpr(origin, BoolValue) { Type = type },
+          _ => null
+        };
+      }
     }
   }
 }
