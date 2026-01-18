@@ -4,6 +4,7 @@
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 
 namespace Microsoft.Dafny;
 
@@ -226,6 +227,13 @@ internal sealed class PartialEvaluatorEngine {
       callExpr.Args[i] = simplifiedArg;
     }
 
+    // Cache inlined results for pure, static calls with literal arguments, when the inlined body
+    // simplifies all the way to an int/bool literal. This avoids redundant substitution+rewrite work
+    // for repeated calls like f(5).
+    if (visitor.TryGetCachedInlinedLiteral(callExpr, state, out inlined)) {
+      return true;
+    }
+
     if (!state.InlineStack.Add(function)) {
       return false;
     }
@@ -240,6 +248,11 @@ internal sealed class PartialEvaluatorEngine {
     var substituter = new Substituter(receiverReplacement, substMap, typeMap, null, systemModuleManager);
     var body = substituter.Substitute(function.Body);
     inlined = visitor.SimplifyExpression(body, state.WithDepth(state.Depth - 1));
+
+    if (inlined is LiteralExpr literal) {
+      visitor.CacheInlinedLiteral(callExpr, state, literal);
+    }
+
     state.InlineStack.Remove(function);
     return true;
   }
@@ -265,9 +278,11 @@ internal sealed class PartialEvaluatorEngine {
   private sealed class PartialEvaluatorVisitor : TopDownVisitor<PartialEvalState> {
     private readonly PartialEvaluatorEngine engine;
     private readonly Dictionary<Expression, Expression> replacements = new();
+    private readonly Dictionary<string, CachedLiteral> inlineCallCache;
 
     public PartialEvaluatorVisitor(PartialEvaluatorEngine engine) {
       this.engine = engine;
+      inlineCallCache = new Dictionary<string, CachedLiteral>(System.StringComparer.Ordinal);
     }
 
     public Expression SimplifyExpression(Expression expr, PartialEvalState state) {
@@ -299,6 +314,91 @@ internal sealed class PartialEvaluatorEngine {
       if (!ReferenceEquals(original, replacement)) {
         replacements[original] = replacement;
       }
+    }
+
+    internal bool TryGetCachedInlinedLiteral(FunctionCallExpr callExpr, PartialEvalState state, out Expression inlined) {
+      inlined = null;
+      var function = callExpr.Function;
+      if (function == null || !function.IsStatic) {
+        return false;
+      }
+
+      if (!TryBuildInlineCallCacheKey(callExpr, state, out var key)) {
+        return false;
+      }
+
+      if (!inlineCallCache.TryGetValue(key, out var cached)) {
+        return false;
+      }
+
+      inlined = cached.CreateLiteral(callExpr.Origin);
+      return true;
+    }
+
+    internal void CacheInlinedLiteral(FunctionCallExpr callExpr, PartialEvalState state, LiteralExpr literal) {
+      var function = callExpr.Function;
+      if (function == null || !function.IsStatic) {
+        return;
+      }
+
+      if (!TryBuildInlineCallCacheKey(callExpr, state, out var key)) {
+        return;
+      }
+
+      if (CachedLiteral.TryCreate(literal, out var cached)) {
+        inlineCallCache.TryAdd(key, cached);
+      }
+    }
+
+    private static bool TryBuildInlineCallCacheKey(FunctionCallExpr callExpr, PartialEvalState state, out string key) {
+      key = null;
+
+      var function = callExpr.Function;
+      if (function == null) {
+        return false;
+      }
+
+      // Keep caching conservative: we only memoize calls whose (already simplified) arguments are int/bool literals.
+      // This covers the motivating case like f(5) while avoiding having to define a full AST hashing story.
+      foreach (var arg in callExpr.Args) {
+        if (!Expression.IsIntLiteral(arg, out _) && !Expression.IsBoolLiteral(arg, out _)) {
+          return false;
+        }
+      }
+
+      // The inlined result can depend on inlining context (depth and stack), so include it in the key.
+      // IMPORTANT: Exclude the current function, because cache lookup happens before we push it on the stack,
+      // while cache store happens after. Excluding it keeps lookup/store aligned.
+      var stackKey = BuildInlineStackKey(state.InlineStack, function);
+
+      // Use the printer-based representation of the call as a canonical-ish signature (includes name, receiver,
+      // type arguments, and literal arguments). This avoids hand-rolling a structural hash for expressions.
+      var callKey = callExpr.ToString();
+
+      key = $"{RuntimeHelpers.GetHashCode(function)}|d={state.Depth}|s={stackKey}|c={callKey}";
+      return true;
+    }
+
+    private static string BuildInlineStackKey(HashSet<Function> inlineStack, Function functionToExclude) {
+      if (inlineStack == null || inlineStack.Count == 0) {
+        return "";
+      }
+
+      List<int> ids = null;
+      foreach (var f in inlineStack) {
+        if (ReferenceEquals(f, functionToExclude)) {
+          continue;
+        }
+        ids ??= new List<int>();
+        ids.Add(RuntimeHelpers.GetHashCode(f));
+      }
+
+      if (ids == null || ids.Count == 0) {
+        return "";
+      }
+
+      ids.Sort();
+      return string.Join(",", ids);
     }
 
     protected override bool VisitOneStmt(Statement stmt, ref PartialEvalState state) {
@@ -460,52 +560,86 @@ internal sealed class PartialEvaluatorEngine {
     private BoundedPool SimplifyBoundedPool(BoundedPool bound, PartialEvalState state) {
       switch (bound) {
         case IntBoundedPool intPool: {
-          var lower = intPool.LowerBound == null ? null : SimplifyExpression(intPool.LowerBound, state);
-          var upper = intPool.UpperBound == null ? null : SimplifyExpression(intPool.UpperBound, state);
-          if (lower != intPool.LowerBound || upper != intPool.UpperBound) {
-            return new IntBoundedPool(lower, upper);
+            var lower = intPool.LowerBound == null ? null : SimplifyExpression(intPool.LowerBound, state);
+            var upper = intPool.UpperBound == null ? null : SimplifyExpression(intPool.UpperBound, state);
+            if (lower != intPool.LowerBound || upper != intPool.UpperBound) {
+              return new IntBoundedPool(lower, upper);
+            }
+            return bound;
           }
-          return bound;
-        }
         case SetBoundedPool setPool: {
-          var set = SimplifyExpression(setPool.Set, state);
-          return set != setPool.Set
-            ? new SetBoundedPool(set, setPool.BoundVariableType, setPool.CollectionElementType, setPool.IsFiniteCollection)
-            : bound;
-        }
+            var set = SimplifyExpression(setPool.Set, state);
+            return set != setPool.Set
+              ? new SetBoundedPool(set, setPool.BoundVariableType, setPool.CollectionElementType, setPool.IsFiniteCollection)
+              : bound;
+          }
         case SubSetBoundedPool subSet: {
-          var upper = SimplifyExpression(subSet.UpperBound, state);
-          return upper != subSet.UpperBound
-            ? new SubSetBoundedPool(upper, subSet.IsFiniteCollection)
-            : bound;
-        }
+            var upper = SimplifyExpression(subSet.UpperBound, state);
+            return upper != subSet.UpperBound
+              ? new SubSetBoundedPool(upper, subSet.IsFiniteCollection)
+              : bound;
+          }
         case SuperSetBoundedPool superSet: {
-          var lower = SimplifyExpression(superSet.LowerBound, state);
-          return lower != superSet.LowerBound
-            ? new SuperSetBoundedPool(lower)
-            : bound;
-        }
+            var lower = SimplifyExpression(superSet.LowerBound, state);
+            return lower != superSet.LowerBound
+              ? new SuperSetBoundedPool(lower)
+              : bound;
+          }
         case SeqBoundedPool seqPool: {
-          var seq = SimplifyExpression(seqPool.Seq, state);
-          return seq != seqPool.Seq
-            ? new SeqBoundedPool(seq, seqPool.BoundVariableType, seqPool.CollectionElementType)
-            : bound;
-        }
+            var seq = SimplifyExpression(seqPool.Seq, state);
+            return seq != seqPool.Seq
+              ? new SeqBoundedPool(seq, seqPool.BoundVariableType, seqPool.CollectionElementType)
+              : bound;
+          }
         case MapBoundedPool mapPool: {
-          var map = SimplifyExpression(mapPool.Map, state);
-          return map != mapPool.Map
-            ? new MapBoundedPool(map, mapPool.BoundVariableType, mapPool.CollectionElementType, mapPool.IsFiniteCollection)
-            : bound;
-        }
+            var map = SimplifyExpression(mapPool.Map, state);
+            return map != mapPool.Map
+              ? new MapBoundedPool(map, mapPool.BoundVariableType, mapPool.CollectionElementType, mapPool.IsFiniteCollection)
+              : bound;
+          }
         case MultiSetBoundedPool multiSetPool: {
-          var multiset = SimplifyExpression(multiSetPool.MultiSet, state);
-          return multiset != multiSetPool.MultiSet
-            ? new MultiSetBoundedPool(multiset, multiSetPool.BoundVariableType, multiSetPool.CollectionElementType)
-            : bound;
-        }
+            var multiset = SimplifyExpression(multiSetPool.MultiSet, state);
+            return multiset != multiSetPool.MultiSet
+              ? new MultiSetBoundedPool(multiset, multiSetPool.BoundVariableType, multiSetPool.CollectionElementType)
+              : bound;
+          }
         default:
           return bound;
       }
+    }
+
+    private readonly record struct CachedLiteral(CachedLiteralKind Kind, BigInteger IntValue, bool BoolValue) {
+      public static bool TryCreate(LiteralExpr literal, out CachedLiteral cached) {
+        cached = default;
+        if (literal == null) {
+          return false;
+        }
+
+        if (Expression.IsIntLiteral(literal, out var intValue)) {
+          cached = new CachedLiteral(CachedLiteralKind.Int, intValue, default);
+          return true;
+        }
+
+        if (Expression.IsBoolLiteral(literal, out var boolValue)) {
+          cached = new CachedLiteral(CachedLiteralKind.Bool, default, boolValue);
+          return true;
+        }
+
+        return false;
+      }
+
+      public Expression CreateLiteral(IOrigin origin) {
+        return Kind switch {
+          CachedLiteralKind.Int => CreateIntLiteral(origin, IntValue),
+          CachedLiteralKind.Bool => Expression.CreateBoolLiteral(origin, BoolValue),
+          _ => null
+        };
+      }
+    }
+
+    private enum CachedLiteralKind {
+      Int,
+      Bool
     }
   }
 }
