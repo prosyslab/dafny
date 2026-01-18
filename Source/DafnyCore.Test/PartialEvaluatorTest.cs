@@ -402,4 +402,34 @@ function Entry(): int {
     Assert.True(Expression.IsIntLiteral(entry.Body!, out var value));
     Assert.Equal(2, (int)value);
   }
+
+  [Fact]
+  public async Task PartialEvaluation_CacheDoesNotCrossInliningDepthBoundaries() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 2U);
+
+    var program = await ParseAndResolve(@"
+function G(): int { 1 }
+function F(): int { G() }
+function H(): int { F() }
+
+function Entry(): int {
+  F() + H()
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Function>().Where(f => f.Name == "Entry"));
+    Assert.NotNull(entry.Body);
+
+    // At depth=2: F() at the top level simplifies to 1, but H() calls F() at depth=1, which cannot
+    // inline G() at depth=0. So we should still see a call to G().
+    var add = Assert.IsType<BinaryExpr>(entry.Body!);
+    Assert.Equal(BinaryExpr.ResolvedOpcode.Add, add.ResolvedOp);
+    Assert.True(Expression.IsIntLiteral(add.E0, out var left) && (int)left == 1);
+    var gCall = Assert.IsType<FunctionCallExpr>(add.E1);
+    Assert.Equal("G", gCall.Function.Name);
+  }
 }
