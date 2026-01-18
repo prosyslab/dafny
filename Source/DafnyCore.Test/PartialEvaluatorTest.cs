@@ -432,4 +432,95 @@ function Entry(): int {
     var gCall = Assert.IsType<FunctionCallExpr>(add.E1);
     Assert.Equal("G", gCall.Function.Name);
   }
+
+  [Fact]
+  public async Task PartialEvaluation_SubstitutesLiteralInitializedLocals() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+predicate Spec(x: int, y: int) { x + y == 108 }
+
+method Entry() {
+  var arg_0 := 100;
+  var arg_1 := 8;
+  assert !Spec(arg_0, arg_1);
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    Assert.NotNull(entry.Body);
+
+    var assertStmt = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .Single();
+
+    Assert.True(Expression.IsBoolLiteral(assertStmt.Expr, out var value));
+    Assert.False(value);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_ReassignmentCancelsLocalSubstitution() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+function Id(x: int): int { x }
+
+method Entry() {
+  var a := 1;
+  assert Id(a) == 1;
+  a := 2;
+  assert Id(a) == 2;
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var body = Assert.IsType<BlockStmt>(entry.Body);
+    var asserts = body.Body.OfType<AssertStmt>().ToList();
+    Assert.Equal(2, asserts.Count);
+
+    Assert.True(Expression.IsBoolLiteral(asserts[0].Expr, out var first) && first);
+    Assert.False(Expression.IsBoolLiteral(asserts[1].Expr, out _));
+    Assert.Contains(asserts[1].Expr.DescendantsAndSelf.OfType<IdentifierExpr>(), ide => ide.Name == "a");
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_NestedBlocksRespectConstScopes() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+function Id(x: int): int { x }
+
+method Entry() {
+  var a := 1;
+  {
+    var b := 2;
+    assert Id(a) == 1;
+    assert Id(b) == 2;
+  }
+  assert Id(a) == 1;
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    Assert.NotNull(entry.Body);
+
+    var asserts = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .ToList();
+    Assert.Equal(3, asserts.Count);
+
+    Assert.All(asserts, a => Assert.True(Expression.IsBoolLiteral(a.Expr, out var b) && b));
+  }
 }
