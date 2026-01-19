@@ -53,7 +53,7 @@ public class CommonOptionBag {
 
   public static readonly Option<uint> UnrollBoundedQuantifiers = new("--unroll-bounded-quantifiers", () => 0,
     @"
-When verifying, expand bounded `forall` quantifiers over `int` and `nat` by enumerating all values when the bounds are concrete.
+When verifying, expand bounded `forall`/`exists` quantifiers over `int` and `nat` by enumerating all values when the bounds are concrete.
 The argument is a per-quantifier limit on the total number of instantiated cases.
 0 (default) disables this feature.".TrimStart()
   ) {
