@@ -154,6 +154,24 @@ public class UnrollBoundedQuantifiersTest {
     }
   }
 
+  private static bool ContainsAnyQuantifier(Bpl.Expr expr) {
+    switch (expr) {
+      case Bpl.ForallExpr:
+      case Bpl.ExistsExpr:
+        return true;
+      case Bpl.LetExpr letExpr:
+        return ContainsAnyQuantifier(letExpr.Body) || GetLetExprRhss(letExpr).Any(ContainsAnyQuantifier);
+      case Bpl.OldExpr oldExpr:
+        return ContainsAnyQuantifier(oldExpr.Expr);
+      case Bpl.NAryExpr nAryExpr:
+        return nAryExpr.Args.Any(ContainsAnyQuantifier);
+      case Bpl.QuantifierExpr quantifierExpr:
+        return ContainsAnyQuantifier(quantifierExpr.Body);
+      default:
+        return false;
+    }
+  }
+
   private static IEnumerable<Bpl.Expr> GetLetExprRhss(Bpl.LetExpr letExpr) {
     const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     var type = letExpr.GetType();
@@ -401,6 +419,47 @@ method MultiVar() {
     var asserts = AssertStatementAsserts(impl).ToList();
     Assert.NotEmpty(asserts);
     Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
+  }
+
+  // Objective: unroll a simple bounded exists within the instance cap.
+  [Fact]
+  public async Task SingleVariableBoundedExists_IsUnrolled_WhenWithinMaxInstances() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Induction = 0;
+    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 10U);
+
+    var impl = await TranslateSingleImplementation(@"
+predicate IsOne(x: int) { x == 1 }
+
+method SingleExists() {
+  assert exists x :: 0 <= x < 3 && IsOne(x);
+}
+", options, "SingleExists");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.All(asserts, a => Assert.False(ContainsAnyQuantifier(a.Expr)));
+  }
+
+  // Objective: keep exists when the domain size exceeds the cap.
+  [Fact]
+  public async Task BoundedExists_IsNotUnrolled_WhenExceedingMaxInstances() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Induction = 0;
+    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 10U);
+
+    // Domain size is 4 * 4 = 16, which exceeds the max-instances cap (10).
+    var impl = await TranslateSingleImplementation(@"
+method ExistsExceedsCap() {
+  assert exists x, y :: 0 <= x < 4 && 0 <= y < 4 && x + y == 0;
+}
+", options, "ExistsExceedsCap");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.Contains(asserts, a => ContainsAnyQuantifier(a.Expr));
   }
 
   // Objective: keep forall when the domain size exceeds the cap.
