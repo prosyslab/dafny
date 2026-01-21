@@ -399,7 +399,13 @@ namespace Microsoft.Dafny {
               if (local.Attributes != null) {
                 PrintAttributes(local.Attributes, AtAttributesOnSameLineIndent, () => { });
               }
-              wr.Write(" {0}", local.DisplayName);
+              if (options.Get(SimplifyOptionBag.ExplicitIdent)) {
+                wr.Write(" ");
+                PrintExplicitIdent(local.DisplayName);
+                wr.Write(local.DisplayName);
+              } else {
+                wr.Write(" {0}", local.DisplayName);
+              }
               PrintType(": ", local.SafeSyntacticType);
               sep = ",";
             }
