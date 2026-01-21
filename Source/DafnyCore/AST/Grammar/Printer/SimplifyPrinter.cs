@@ -779,7 +779,11 @@ NoGhost - disable printing of functions, ghost methods, and proof
         typeArgs.All(tp => !tp.IsAutoCompleted));
 
       if (typeArgs.Count != 0 && !typeArgs[0].IsAutoCompleted) {
-        wr.Write("<{0}>", Util.Comma(typeArgs, TypeParamString));
+        if (options.Get(SimplifyOptionBag.ExplicitTypeArgs)) {
+          wr.Write("< {0} >", Util.Comma(typeArgs, TypeParamString));
+        } else{
+          wr.Write("<{0}>", Util.Comma(typeArgs, TypeParamString));
+        }
       }
     }
 
