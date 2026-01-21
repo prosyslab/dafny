@@ -1127,7 +1127,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
 
     void PrintExplicitIdent(string name) {
       Contract.Requires(name != null);
-      if (name.StartsWith("array") || name.StartsWith("bv")) {
+      if (name == "array0" || name == "array1") {
         wr.Write("v_");
       }
     }

@@ -17,7 +17,7 @@ public class SimplifyOptionBag {
   public static readonly Option<bool> ExplicitCardinality = new("--explicit-cardinality", "Explicitly add parentheses for cardinality expression.") { };
   public static readonly Option<bool> ExplicitTypeArgs = new("--explicit-type-args", "Explicitly add space for type arguments.") { };
   public static readonly Option<bool> ExplicitSubseq = new("--explicit-subseq", "Explicitly add space for subsequence.") { };
-  public static readonly Option<bool> ExplicitIdent = new("--explicit-ident", "Explicitly 'v_' before identifier names starting with 'array' or 'bv'.") { };
+  public static readonly Option<bool> ExplicitIdent = new("--explicit-ident", "Explicitly 'v_' before identifier names 'array0' or 'array1'.") { };
   public static readonly Option<bool> ExplicitLambda = new("--explicit-lambda", "Explicitly add space for lambda.") { };
   public static readonly Option<bool> Debug = new("--debug", "Print debug information.") { };
 
