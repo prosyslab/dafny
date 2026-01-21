@@ -18,6 +18,7 @@ public static class SimplifyCommand {
     SimplifyOptionBag.NoAttribute,
     SimplifyOptionBag.ExplicitEmptyBlock,
     SimplifyOptionBag.ExplicitCardinality,
+    SimplifyOptionBag.ExplicitSetComprehension,
     SimplifyOptionBag.ExplicitTypeArgs,
     SimplifyOptionBag.ExplicitSubseq,
     SimplifyOptionBag.ExplicitIdent,
@@ -39,6 +40,7 @@ public static class SimplifyCommand {
         options.Set(SimplifyOptionBag.NoAttribute, true);
         options.Set(SimplifyOptionBag.ExplicitEmptyBlock, true);
         options.Set(SimplifyOptionBag.ExplicitCardinality, true);
+        options.Set(SimplifyOptionBag.ExplicitSetComprehension, true);
         options.Set(SimplifyOptionBag.ExplicitTypeArgs, true);
         options.Set(SimplifyOptionBag.ExplicitSubseq, true);
         options.Set(SimplifyOptionBag.ExplicitIdent, true);

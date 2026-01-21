@@ -1257,6 +1257,10 @@ namespace Microsoft.Dafny {
       } else if (expr is SetComprehension) {
         var e = (SetComprehension)expr;
         bool parensNeeded = !isRightmost;
+        if (options.Get(SimplifyOptionBag.ExplicitSetComprehension)) {
+          parensNeeded = true;
+        }
+
         if (parensNeeded) {
           wr.Write("(");
         }
