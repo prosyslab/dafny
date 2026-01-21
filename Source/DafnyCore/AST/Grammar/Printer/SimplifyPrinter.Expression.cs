@@ -952,6 +952,9 @@ namespace Microsoft.Dafny {
           }
 
           wr.Write(op);
+          if (options.Get(SimplifyOptionBag.ExplicitUnaryNot)) {
+            wr.Write(" ");
+          }
           PrintExpr(e.E, opBindingStrength, false, parensNeeded || isRightmost, !parensNeeded && isFollowedBySemicolon,
             -1, keyword);
           if (parensNeeded) {
