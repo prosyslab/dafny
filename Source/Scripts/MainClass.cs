@@ -10,6 +10,9 @@ public class MainClass {
     root.AddCommand(SyntaxSchemaGenerator.GetCommand());
     root.AddCommand(SyntaxDeserializerGenerator.GetCommand());
     root.AddCommand(SourceToBinary.GetCommand(Console.Out));
+    root.AddCommand(RewriterAstPrinter.GetCommand(Console.Out));
+    root.AddCommand(RewriterAstPrinter.GetTestCommand(Console.Out));
+    root.AddCommand(RewriterAstPrinter.GetPartialEvalAndUnrollCommand(Console.Out));
     return root.InvokeAsync(args);
   }
 }
