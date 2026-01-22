@@ -25,7 +25,8 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
       return;
     }
 
-    var engine = new UnrollEngine(program.SystemModuleManager, maxInstances);
+    var partialEvaluator = new PartialEvaluatorEngine(Reporter.Options, moduleDefinition, program.SystemModuleManager, inlineDepth: 2);
+    var engine = new UnrollEngine(program.SystemModuleManager, maxInstances, partialEvaluator);
     foreach (var decl in ModuleDefinition.AllCallablesIncludingPrefixDeclarations(moduleDefinition.TopLevelDecls)) {
       engine.Rewrite(decl);
     }
@@ -34,10 +35,18 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
   internal sealed class UnrollEngine {
     private readonly SystemModuleManager systemModuleManager;
     private readonly uint maxInstances;
+    private readonly PartialEvaluatorEngine? partialEvaluator;
 
     internal UnrollEngine(SystemModuleManager systemModuleManager, uint maxInstances) {
       this.systemModuleManager = systemModuleManager ?? throw new ArgumentNullException(nameof(systemModuleManager));
       this.maxInstances = maxInstances;
+      this.partialEvaluator = null;
+    }
+
+    internal UnrollEngine(SystemModuleManager systemModuleManager, uint maxInstances, PartialEvaluatorEngine partialEvaluator) {
+      this.systemModuleManager = systemModuleManager ?? throw new ArgumentNullException(nameof(systemModuleManager));
+      this.maxInstances = maxInstances;
+      this.partialEvaluator = partialEvaluator ?? throw new ArgumentNullException(nameof(partialEvaluator));
     }
 
     public void Rewrite(ICallable decl) {
@@ -562,7 +571,9 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
         if (varIndex == domains.Length) {
           var substituter = new Substituter(null, substMap, typeMap);
           var inst = substituter.Substitute(logicalBody);
-          inst = SimplifyBoolExpr(inst);
+          inst = partialEvaluator == null
+            ? PartialEvaluatorEngine.SimplifyBooleanExpression(inst)
+            : partialEvaluator.SimplifyExpression(inst);
           AddInstance(inst);
           return;
         }
@@ -621,84 +632,5 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
       return true;
     }
 
-    private static Expression SimplifyBoolExpr(Expression expr) {
-      if (expr == null) {
-        throw new ArgumentNullException(nameof(expr));
-      }
-
-      if (expr.Resolved != null && expr.Resolved != expr) {
-        expr = expr.Resolved;
-      }
-
-      if (expr is ParensExpression parens && parens.ResolvedExpression != null) {
-        expr = parens.ResolvedExpression;
-      }
-
-      switch (expr) {
-        case UnaryOpExpr { ResolvedOp: UnaryOpExpr.ResolvedOpcode.BoolNot } unary: {
-            unary.E = SimplifyBoolExpr(unary.E);
-            if (Expression.IsBoolLiteral(unary.E, out var b)) {
-              return Expression.CreateBoolLiteral(unary.Origin, !b);
-            }
-            return unary;
-          }
-
-        case BinaryExpr binary: {
-            binary.E0 = SimplifyBoolExpr(binary.E0);
-            binary.E1 = SimplifyBoolExpr(binary.E1);
-
-            // Boolean connectives
-            if (binary.ResolvedOp == BinaryExpr.ResolvedOpcode.And) {
-              if (Expression.IsBoolLiteral(binary.E0, out var lAnd)) {
-                return lAnd ? binary.E1 : Expression.CreateBoolLiteral(binary.Origin, false);
-              }
-              if (Expression.IsBoolLiteral(binary.E1, out var rAnd)) {
-                return rAnd ? binary.E0 : Expression.CreateBoolLiteral(binary.Origin, false);
-              }
-              return binary;
-            }
-            if (binary.ResolvedOp == BinaryExpr.ResolvedOpcode.Or) {
-              if (Expression.IsBoolLiteral(binary.E0, out var lOr)) {
-                return lOr ? Expression.CreateBoolLiteral(binary.Origin, true) : binary.E1;
-              }
-              if (Expression.IsBoolLiteral(binary.E1, out var rOr)) {
-                return rOr ? Expression.CreateBoolLiteral(binary.Origin, true) : binary.E0;
-              }
-              return binary;
-            }
-            if (binary.ResolvedOp == BinaryExpr.ResolvedOpcode.Imp) {
-              if (Expression.IsBoolLiteral(binary.E0, out var ante)) {
-                return ante ? binary.E1 : Expression.CreateBoolLiteral(binary.Origin, true);
-              }
-              if (Expression.IsBoolLiteral(binary.E1, out var cons)) {
-                return cons ? Expression.CreateBoolLiteral(binary.Origin, true) : Expression.CreateNot(binary.E0.Origin, binary.E0);
-              }
-              return binary;
-            }
-
-            // Relational comparisons that become decidable after substitution.
-            if (binary.ResolvedOp is BinaryExpr.ResolvedOpcode.Le or BinaryExpr.ResolvedOpcode.Lt or BinaryExpr.ResolvedOpcode.Ge or BinaryExpr.ResolvedOpcode.Gt
-                or BinaryExpr.ResolvedOpcode.EqCommon or BinaryExpr.ResolvedOpcode.NeqCommon) {
-              if (Expression.IsIntLiteral(binary.E0, out var a) && Expression.IsIntLiteral(binary.E1, out var b)) {
-                var value = binary.ResolvedOp switch {
-                  BinaryExpr.ResolvedOpcode.Le => a <= b,
-                  BinaryExpr.ResolvedOpcode.Lt => a < b,
-                  BinaryExpr.ResolvedOpcode.Ge => a >= b,
-                  BinaryExpr.ResolvedOpcode.Gt => a > b,
-                  BinaryExpr.ResolvedOpcode.EqCommon => a == b,
-                  BinaryExpr.ResolvedOpcode.NeqCommon => a != b,
-                  _ => throw new InvalidOperationException()
-                };
-                return Expression.CreateBoolLiteral(binary.Origin, value);
-              }
-            }
-
-            return binary;
-          }
-
-        default:
-          return expr;
-      }
-    }
   }
 }

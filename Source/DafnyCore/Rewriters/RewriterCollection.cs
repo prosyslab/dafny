@@ -23,7 +23,6 @@ public static class RewriterCollection {
     result.Add(new MatchFlattener(reporter));
     result.Add(new PartialEvaluator(program, reporter));
     result.Add(new UnrollBoundedQuantifiersRewriter(program, reporter));
-    result.Add(new PartialEvaluator(program, reporter));
 
     if (reporter.Options.AutoTriggers) {
       result.Add(new QuantifierSplittingRewriter(reporter));
