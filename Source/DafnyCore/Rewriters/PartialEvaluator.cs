@@ -1,6 +1,7 @@
 // Copyright by the contributors to the Dafny Project
 // SPDX-License-Identifier: MIT
 
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
 using System.Numerics;
@@ -53,6 +54,7 @@ internal sealed class PartialEvaluatorEngine {
   private readonly ModuleDefinition module;
   private readonly SystemModuleManager systemModuleManager;
   private readonly uint inlineDepth;
+  private readonly Dictionary<string, CachedLiteral> inlineCallCache = new(StringComparer.Ordinal);
 
   public PartialEvaluatorEngine(DafnyOptions options, ModuleDefinition module, SystemModuleManager systemModuleManager, uint inlineDepth) {
     this.options = options;
@@ -63,7 +65,7 @@ internal sealed class PartialEvaluatorEngine {
 
   public void PartialEvalEntry(ICallable callable) {
     var state = new PartialEvalState((int)inlineDepth, new HashSet<Function>());
-    var visitor = new PartialEvaluatorVisitor(this);
+    var visitor = new PartialEvaluatorVisitor(this, inlineCallCache);
     switch (callable) {
       case Function function when function.Body != null:
         function.Body = visitor.SimplifyExpression(function.Body, state);
@@ -72,6 +74,12 @@ internal sealed class PartialEvaluatorEngine {
         visitor.Visit(method.Body, state);
         break;
     }
+  }
+
+  internal Expression SimplifyExpression(Expression expr) {
+    var state = new PartialEvalState((int)inlineDepth, new HashSet<Function>());
+    var visitor = new PartialEvaluatorVisitor(this, inlineCallCache);
+    return visitor.SimplifyExpression(expr, state);
   }
 
   private static void AssertHasResolvedType(Expression expr) {
@@ -84,37 +92,13 @@ internal sealed class PartialEvaluatorEngine {
   private Expression SimplifyBinary(BinaryExpr binary) {
     switch (binary.ResolvedOp) {
       case BinaryExpr.ResolvedOpcode.And:
-        if (Expression.IsBoolLiteral(binary.E0, out var lAnd)) {
-          return lAnd ? binary.E1 : Expression.CreateBoolLiteral(binary.Origin, false);
-        }
-        if (Expression.IsBoolLiteral(binary.E1, out var rAnd)) {
-          return rAnd ? binary.E0 : Expression.CreateBoolLiteral(binary.Origin, false);
-        }
-        return binary;
+        return SimplifyBooleanBinary(binary);
       case BinaryExpr.ResolvedOpcode.Or:
-        if (Expression.IsBoolLiteral(binary.E0, out var lOr)) {
-          return lOr ? Expression.CreateBoolLiteral(binary.Origin, true) : binary.E1;
-        }
-        if (Expression.IsBoolLiteral(binary.E1, out var rOr)) {
-          return rOr ? Expression.CreateBoolLiteral(binary.Origin, true) : binary.E0;
-        }
-        return binary;
+        return SimplifyBooleanBinary(binary);
       case BinaryExpr.ResolvedOpcode.Imp:
-        if (Expression.IsBoolLiteral(binary.E0, out var lImp)) {
-          return lImp ? binary.E1 : Expression.CreateBoolLiteral(binary.Origin, true);
-        }
-        if (Expression.IsBoolLiteral(binary.E1, out var rImp)) {
-          return rImp ? Expression.CreateBoolLiteral(binary.Origin, true) : Expression.CreateNot(binary.Origin, binary.E0);
-        }
-        return binary;
+        return SimplifyBooleanBinary(binary);
       case BinaryExpr.ResolvedOpcode.Iff:
-        if (Expression.IsBoolLiteral(binary.E0, out var lIff)) {
-          return lIff ? binary.E1 : Expression.CreateNot(binary.Origin, binary.E1);
-        }
-        if (Expression.IsBoolLiteral(binary.E1, out var rIff)) {
-          return rIff ? binary.E0 : Expression.CreateNot(binary.Origin, binary.E0);
-        }
-        return binary;
+        return SimplifyBooleanBinary(binary);
       case BinaryExpr.ResolvedOpcode.Add:
         return SimplifyIntBinary(binary, (a, b) => a + b, 0, BinaryExpr.ResolvedOpcode.Add);
       case BinaryExpr.ResolvedOpcode.Sub:
@@ -137,6 +121,106 @@ internal sealed class PartialEvaluatorEngine {
         return SimplifyEquality(binary, true);
       case BinaryExpr.ResolvedOpcode.NeqCommon:
         return SimplifyEquality(binary, false);
+      default:
+        return binary;
+    }
+  }
+
+  internal static Expression SimplifyBooleanExpression(Expression expr) {
+    if (expr == null) {
+      throw new ArgumentNullException(nameof(expr));
+    }
+
+    if (expr.Resolved != null && expr.Resolved != expr) {
+      expr = expr.Resolved;
+    }
+
+    if (expr is ParensExpression parens && parens.ResolvedExpression != null) {
+      expr = parens.ResolvedExpression;
+    }
+
+    switch (expr) {
+      case UnaryOpExpr { ResolvedOp: UnaryOpExpr.ResolvedOpcode.BoolNot } unary: {
+          unary.E = SimplifyBooleanExpression(unary.E);
+          if (Expression.IsBoolLiteral(unary.E, out var boolValue)) {
+            return CreateBoolLiteral(unary.Origin, !boolValue);
+          }
+          return unary;
+        }
+      case BinaryExpr binary: {
+          binary.E0 = SimplifyBooleanExpression(binary.E0);
+          binary.E1 = SimplifyBooleanExpression(binary.E1);
+
+          if (binary.ResolvedOp is BinaryExpr.ResolvedOpcode.And or BinaryExpr.ResolvedOpcode.Or
+              or BinaryExpr.ResolvedOpcode.Imp or BinaryExpr.ResolvedOpcode.Iff) {
+            return SimplifyBooleanBinary(binary);
+          }
+
+          if (binary.ResolvedOp is BinaryExpr.ResolvedOpcode.EqCommon or BinaryExpr.ResolvedOpcode.NeqCommon) {
+            return SimplifyEquality(binary, binary.ResolvedOp == BinaryExpr.ResolvedOpcode.EqCommon);
+          }
+
+          if (binary.ResolvedOp is BinaryExpr.ResolvedOpcode.Le or BinaryExpr.ResolvedOpcode.Lt
+              or BinaryExpr.ResolvedOpcode.Ge or BinaryExpr.ResolvedOpcode.Gt) {
+            if (Expression.IsIntLiteral(binary.E0, out var left) && Expression.IsIntLiteral(binary.E1, out var right)) {
+              var value = binary.ResolvedOp switch {
+                BinaryExpr.ResolvedOpcode.Le => left <= right,
+                BinaryExpr.ResolvedOpcode.Lt => left < right,
+                BinaryExpr.ResolvedOpcode.Ge => left >= right,
+                BinaryExpr.ResolvedOpcode.Gt => left > right,
+                _ => false
+              };
+              return CreateBoolLiteral(binary.Origin, value);
+            }
+          }
+
+          return binary;
+        }
+      default:
+        return expr;
+    }
+  }
+
+  private static Expression CreateBoolLiteral(IOrigin origin, bool value) {
+    var literal = Expression.CreateBoolLiteral(origin, value);
+    literal.Type = Type.Bool;
+    return literal;
+  }
+
+  private static Expression SimplifyBooleanBinary(BinaryExpr binary) {
+    switch (binary.ResolvedOp) {
+      case BinaryExpr.ResolvedOpcode.And:
+        if (Expression.IsBoolLiteral(binary.E0, out var lAnd)) {
+          return lAnd ? binary.E1 : CreateBoolLiteral(binary.Origin, false);
+        }
+        if (Expression.IsBoolLiteral(binary.E1, out var rAnd)) {
+          return rAnd ? binary.E0 : CreateBoolLiteral(binary.Origin, false);
+        }
+        return binary;
+      case BinaryExpr.ResolvedOpcode.Or:
+        if (Expression.IsBoolLiteral(binary.E0, out var lOr)) {
+          return lOr ? CreateBoolLiteral(binary.Origin, true) : binary.E1;
+        }
+        if (Expression.IsBoolLiteral(binary.E1, out var rOr)) {
+          return rOr ? CreateBoolLiteral(binary.Origin, true) : binary.E0;
+        }
+        return binary;
+      case BinaryExpr.ResolvedOpcode.Imp:
+        if (Expression.IsBoolLiteral(binary.E0, out var lImp)) {
+          return lImp ? binary.E1 : CreateBoolLiteral(binary.Origin, true);
+        }
+        if (Expression.IsBoolLiteral(binary.E1, out var rImp)) {
+          return rImp ? CreateBoolLiteral(binary.Origin, true) : Expression.CreateNot(binary.Origin, binary.E0);
+        }
+        return binary;
+      case BinaryExpr.ResolvedOpcode.Iff:
+        if (Expression.IsBoolLiteral(binary.E0, out var lIff)) {
+          return lIff ? binary.E1 : Expression.CreateNot(binary.Origin, binary.E1);
+        }
+        if (Expression.IsBoolLiteral(binary.E1, out var rIff)) {
+          return rIff ? binary.E0 : Expression.CreateNot(binary.Origin, binary.E0);
+        }
+        return binary;
       default:
         return binary;
     }
@@ -177,7 +261,7 @@ internal sealed class PartialEvaluatorEngine {
     return binary;
   }
 
-  private Expression SimplifyIntBinary(BinaryExpr binary, System.Func<BigInteger, BigInteger, BigInteger?> op) {
+  private Expression SimplifyIntBinary(BinaryExpr binary, Func<BigInteger, BigInteger, BigInteger?> op) {
     if (Expression.IsIntLiteral(binary.E0, out var left) && Expression.IsIntLiteral(binary.E1, out var right)) {
       var result = op(left, right);
       if (result != null) {
@@ -187,19 +271,19 @@ internal sealed class PartialEvaluatorEngine {
     return binary;
   }
 
-  private Expression SimplifyIntComparison(BinaryExpr binary, System.Func<BigInteger, BigInteger, bool> op) {
+  private Expression SimplifyIntComparison(BinaryExpr binary, Func<BigInteger, BigInteger, bool> op) {
     if (Expression.IsIntLiteral(binary.E0, out var left) && Expression.IsIntLiteral(binary.E1, out var right)) {
       return Expression.CreateBoolLiteral(binary.Origin, op(left, right));
     }
     return binary;
   }
 
-  private Expression SimplifyEquality(BinaryExpr binary, bool isEq) {
+  private static Expression SimplifyEquality(BinaryExpr binary, bool isEq) {
     if (Expression.IsBoolLiteral(binary.E0, out var leftBool) && Expression.IsBoolLiteral(binary.E1, out var rightBool)) {
-      return Expression.CreateBoolLiteral(binary.Origin, isEq ? leftBool == rightBool : leftBool != rightBool);
+      return CreateBoolLiteral(binary.Origin, isEq ? leftBool == rightBool : leftBool != rightBool);
     }
     if (Expression.IsIntLiteral(binary.E0, out var leftInt) && Expression.IsIntLiteral(binary.E1, out var rightInt)) {
-      return Expression.CreateBoolLiteral(binary.Origin, isEq ? leftInt == rightInt : leftInt != rightInt);
+      return CreateBoolLiteral(binary.Origin, isEq ? leftInt == rightInt : leftInt != rightInt);
     }
     return binary;
   }
@@ -261,6 +345,40 @@ internal sealed class PartialEvaluatorEngine {
     return new LiteralExpr(origin, value) { Type = Type.Int };
   }
 
+  private enum CachedLiteralKind {
+    Int,
+    Bool
+  }
+
+  private readonly record struct CachedLiteral(CachedLiteralKind Kind, BigInteger IntValue, bool BoolValue) {
+    public static bool TryCreate(LiteralExpr literal, out CachedLiteral cached) {
+      cached = default;
+      if (literal == null) {
+        return false;
+      }
+
+      if (Expression.IsIntLiteral(literal, out var intValue)) {
+        cached = new CachedLiteral(CachedLiteralKind.Int, intValue, default);
+        return true;
+      }
+
+      if (Expression.IsBoolLiteral(literal, out var boolValue)) {
+        cached = new CachedLiteral(CachedLiteralKind.Bool, default, boolValue);
+        return true;
+      }
+
+      return false;
+    }
+
+    public Expression CreateLiteral(IOrigin origin) {
+      return Kind switch {
+        CachedLiteralKind.Int => CreateIntLiteral(origin, IntValue),
+        CachedLiteralKind.Bool => Expression.CreateBoolLiteral(origin, BoolValue),
+        _ => null
+      };
+    }
+  }
+
   private sealed class PartialEvalState {
     public int Depth { get; }
     public HashSet<Function> InlineStack { get; }
@@ -281,9 +399,9 @@ internal sealed class PartialEvaluatorEngine {
     private readonly Dictionary<string, CachedLiteral> inlineCallCache;
     private List<Dictionary<IVariable, ConstValue>> constScopes = [];
 
-    public PartialEvaluatorVisitor(PartialEvaluatorEngine engine) {
+    public PartialEvaluatorVisitor(PartialEvaluatorEngine engine, Dictionary<string, CachedLiteral> inlineCallCache = null) {
       this.engine = engine;
-      inlineCallCache = new Dictionary<string, CachedLiteral>(System.StringComparer.Ordinal);
+      this.inlineCallCache = inlineCallCache ?? new Dictionary<string, CachedLiteral>(System.StringComparer.Ordinal);
       constScopes.Add(new Dictionary<IVariable, ConstValue>());
     }
 
@@ -777,40 +895,6 @@ internal sealed class PartialEvaluatorEngine {
         default:
           return bound;
       }
-    }
-
-    private readonly record struct CachedLiteral(CachedLiteralKind Kind, BigInteger IntValue, bool BoolValue) {
-      public static bool TryCreate(LiteralExpr literal, out CachedLiteral cached) {
-        cached = default;
-        if (literal == null) {
-          return false;
-        }
-
-        if (Expression.IsIntLiteral(literal, out var intValue)) {
-          cached = new CachedLiteral(CachedLiteralKind.Int, intValue, default);
-          return true;
-        }
-
-        if (Expression.IsBoolLiteral(literal, out var boolValue)) {
-          cached = new CachedLiteral(CachedLiteralKind.Bool, default, boolValue);
-          return true;
-        }
-
-        return false;
-      }
-
-      public Expression CreateLiteral(IOrigin origin) {
-        return Kind switch {
-          CachedLiteralKind.Int => CreateIntLiteral(origin, IntValue),
-          CachedLiteralKind.Bool => Expression.CreateBoolLiteral(origin, BoolValue),
-          _ => null
-        };
-      }
-    }
-
-    private enum CachedLiteralKind {
-      Int,
-      Bool
     }
 
     private readonly record struct ConstValue(CachedLiteralKind Kind, BigInteger IntValue, bool BoolValue) {

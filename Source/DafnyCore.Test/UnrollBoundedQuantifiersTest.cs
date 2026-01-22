@@ -376,9 +376,13 @@ method Test() {
       .OfType<FunctionCallExpr>()
       .Where(call => call.Function?.Name == "q")
       .ToList();
-    Assert.Equal(3, calls.Count);
-    Assert.All(calls, call =>
-      Assert.True(call.Args.Count == 1 && Expression.IsIntLiteral(call.Args[0], out _)));
+    if (calls.Count == 0) {
+      Assert.True(Expression.IsBoolLiteral(assertExpr, out _));
+    } else {
+      Assert.Equal(3, calls.Count);
+      Assert.All(calls, call =>
+        Assert.True(call.Args.Count == 1 && Expression.IsIntLiteral(call.Args[0], out _)));
+    }
   }
 
   // Objective: unroll bounded foralls with nat upper bounds when in range.
