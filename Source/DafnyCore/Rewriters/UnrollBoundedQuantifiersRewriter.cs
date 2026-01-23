@@ -21,10 +21,6 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
 
   internal override void PostResolveIntermediate(ModuleDefinition moduleDefinition) {
     var maxInstances = Reporter.Options.Get(CommonOptionBag.UnrollBoundedQuantifiers);
-    if (maxInstances == 0) {
-      return;
-    }
-
     var partialEvaluator = new PartialEvaluatorEngine(Reporter.Options, moduleDefinition, program.SystemModuleManager, inlineDepth: 2);
     var engine = new UnrollEngine(program.SystemModuleManager, maxInstances, partialEvaluator);
     foreach (var decl in ModuleDefinition.AllCallablesIncludingPrefixDeclarations(moduleDefinition.TopLevelDecls)) {
@@ -484,10 +480,6 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
     private bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, out Expression rewritten) {
       rewritten = quantifierExpr;
 
-      if (maxInstances == 0) {
-        return false;
-      }
-
       if (quantifierExpr.SplitQuantifier != null || quantifierExpr.SplitQuantifierExpression != null) {
         return false;
       }
@@ -525,7 +517,7 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
         }
 
         size *= width;
-        if (size > maxInstances) {
+        if (maxInstances > 0 && size > maxInstances) {
           return false;
         }
       }

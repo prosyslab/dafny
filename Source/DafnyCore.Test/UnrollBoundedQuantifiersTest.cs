@@ -486,6 +486,26 @@ method ExceedsCap() {
     Assert.Contains(asserts, a => ContainsForall(a.Expr));
   }
 
+  // Objective: unroll bounded foralls with no cap.
+  [Fact]
+  public async Task BoundedForall_IsUnrolled_WhenMaxInstancesIsZero() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Induction = 0;
+    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 0U);
+
+    // Domain size is 4 * 4 = 16, but there is no cap when max-instances is 0.
+    var impl = await TranslateSingleImplementation(@"
+method NoCap() {
+  assert forall x, y :: 0 <= x < 4 && 0 <= y < 4 ==> x + y == 0;
+}
+", options, "NoCap");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
+  }
+
   // Objective: traverse diverse statement kinds without skipping any.
   [Fact]
   public async Task Rewriter_Traverses_DiverseStatements() {
