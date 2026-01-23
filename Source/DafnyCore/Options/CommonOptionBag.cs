@@ -55,7 +55,7 @@ public class CommonOptionBag {
     @"
 When verifying, expand bounded `forall`/`exists` quantifiers over `int` and `nat` by enumerating all values when the bounds are concrete.
 The argument is a per-quantifier limit on the total number of instantiated cases.
-0 (default) disables this feature.".TrimStart()
+0 (default) means no per-quantifier cap.".TrimStart()
   ) {
     ArgumentHelpName = "max-instances"
   };

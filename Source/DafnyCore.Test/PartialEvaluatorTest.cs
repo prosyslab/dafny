@@ -53,6 +53,7 @@ public class PartialEvaluatorTest {
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
     options.Set(CommonOptionBag.PartialEvalInlineDepth, 3U);
+    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 1U);
 
     var program = await ParseAndResolve(@"
 predicate Spec(x: int) { forall i :: 0 < i < x ==> i == 0 }
