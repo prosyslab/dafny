@@ -123,6 +123,16 @@ internal sealed class PartialEvaluatorEngine {
         return SimplifyEquality(binary, true);
       case BinaryExpr.ResolvedOpcode.NeqCommon:
         return SimplifyEquality(binary, false);
+      case BinaryExpr.ResolvedOpcode.Concat:
+        return SimplifySeqConcat(binary);
+      case BinaryExpr.ResolvedOpcode.SeqEq:
+        return SimplifySeqEquality(binary, true);
+      case BinaryExpr.ResolvedOpcode.SeqNeq:
+        return SimplifySeqEquality(binary, false);
+      case BinaryExpr.ResolvedOpcode.Prefix:
+        return SimplifySeqPrefix(binary, false);
+      case BinaryExpr.ResolvedOpcode.ProperPrefix:
+        return SimplifySeqPrefix(binary, true);
       default:
         return binary;
     }
@@ -287,6 +297,68 @@ internal sealed class PartialEvaluatorEngine {
     if (Expression.IsIntLiteral(binary.E0, out var leftInt) && Expression.IsIntLiteral(binary.E1, out var rightInt)) {
       return CreateBoolLiteral(binary.Origin, isEq ? leftInt == rightInt : leftInt != rightInt);
     }
+    if (TryGetCharLiteral(binary.E0, out var leftChar) && TryGetCharLiteral(binary.E1, out var rightChar)) {
+      return CreateBoolLiteral(binary.Origin, isEq ? leftChar == rightChar : leftChar != rightChar);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifySeqConcat(BinaryExpr binary) {
+    if (TryGetStringLiteral(binary.E0, out var leftString, out var leftVerbatim) &&
+        TryGetStringLiteral(binary.E1, out var rightString, out var rightVerbatim)) {
+      if (leftString.Length == 0) {
+        return binary.E1;
+      }
+      if (rightString.Length == 0) {
+        return binary.E0;
+      }
+      return CreateStringLiteral(binary.Origin, leftString + rightString, binary.Type, leftVerbatim && rightVerbatim);
+    }
+
+    if (TryGetSeqDisplayLiteral(binary.E0, out var leftSeq) && TryGetSeqDisplayLiteral(binary.E1, out var rightSeq) &&
+        AllElementsAreLiterals(leftSeq) && AllElementsAreLiterals(rightSeq)) {
+      if (leftSeq.Elements.Count == 0) {
+        return binary.E1;
+      }
+      if (rightSeq.Elements.Count == 0) {
+        return binary.E0;
+      }
+      var merged = new List<Expression>(leftSeq.Elements.Count + rightSeq.Elements.Count);
+      merged.AddRange(leftSeq.Elements);
+      merged.AddRange(rightSeq.Elements);
+      return CreateSeqDisplayLiteral(binary.Origin, merged, binary.Type);
+    }
+
+    return binary;
+  }
+
+  private static Expression SimplifySeqEquality(BinaryExpr binary, bool isEq) {
+    if (TryGetStringLiteral(binary.E0, out var leftString, out _) && TryGetStringLiteral(binary.E1, out var rightString, out _)) {
+      return CreateBoolLiteral(binary.Origin, isEq ? leftString == rightString : leftString != rightString);
+    }
+
+    if (TryGetSeqDisplayLiteral(binary.E0, out var leftSeq) && TryGetSeqDisplayLiteral(binary.E1, out var rightSeq) &&
+        AllElementsAreLiterals(leftSeq) && AllElementsAreLiterals(rightSeq)) {
+      var equal = SeqDisplayLiteralsEqual(leftSeq, rightSeq);
+      return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
+    }
+
+    return binary;
+  }
+
+  private static Expression SimplifySeqPrefix(BinaryExpr binary, bool properPrefix) {
+    if (TryGetStringLiteral(binary.E0, out var leftString, out _) && TryGetStringLiteral(binary.E1, out var rightString, out _)) {
+      var isPrefix = rightString.StartsWith(leftString, StringComparison.Ordinal);
+      var isProper = isPrefix && leftString.Length < rightString.Length;
+      return CreateBoolLiteral(binary.Origin, properPrefix ? isProper : isPrefix);
+    }
+
+    if (TryGetSeqDisplayLiteral(binary.E0, out var leftSeq) && TryGetSeqDisplayLiteral(binary.E1, out var rightSeq) &&
+        AllElementsAreLiterals(leftSeq) && AllElementsAreLiterals(rightSeq)) {
+      var isPrefix = SeqDisplayIsPrefix(leftSeq, rightSeq, out var isProper);
+      return CreateBoolLiteral(binary.Origin, properPrefix ? isProper : isPrefix);
+    }
+
     return binary;
   }
 
@@ -341,15 +413,17 @@ internal sealed class PartialEvaluatorEngine {
       var substituter = new Substituter(receiverReplacement, substMap, typeMap, null, systemModuleManager);
       var body = substituter.Substitute(function.Body);
       inlined = visitor.SimplifyExpression(body, state.WithDepth(state.Depth - 1));
+      // Re-simplify without allowing further inlining beyond the current budget.
       var postVisitor = new PartialEvaluatorVisitor(this, inlineCallCache);
-      inlined = postVisitor.SimplifyExpression(inlined, state.WithDepth(state.Depth - 1));
+      inlined = postVisitor.SimplifyExpression(inlined, state.WithDepth(0));
 
       if (inlined is LiteralExpr literal) {
         visitor.CacheInlinedLiteral(callExpr, state, literal);
       }
 
       return true;
-    } finally {
+    }
+    finally {
       if (addedFunction) {
         state.InlineStack.Remove(function);
       }
@@ -359,6 +433,169 @@ internal sealed class PartialEvaluatorEngine {
 
   private static LiteralExpr CreateIntLiteral(IOrigin origin, BigInteger value) {
     return new LiteralExpr(origin, value) { Type = Type.Int };
+  }
+
+  private static LiteralExpr CreateIntLiteral(IOrigin origin, BigInteger value, Type type) {
+    return new LiteralExpr(origin, value) { Type = type };
+  }
+
+  private static LiteralExpr CreateCharLiteral(IOrigin origin, char value, Type type) {
+    return new CharLiteralExpr(origin, value.ToString()) { Type = type };
+  }
+
+  private static LiteralExpr CreateCharLiteral(IOrigin origin, string value, Type type) {
+    return new CharLiteralExpr(origin, value) { Type = type };
+  }
+
+  private static LiteralExpr CreateStringLiteral(IOrigin origin, string value, Type type, bool isVerbatim) {
+    return new StringLiteralExpr(origin, value, isVerbatim) { Type = type };
+  }
+
+  private static SeqDisplayExpr CreateSeqDisplayLiteral(IOrigin origin, List<Expression> elements, Type type) {
+    return new SeqDisplayExpr(origin, elements) { Type = type };
+  }
+
+  private static bool TryGetStringLiteral(Expression expr, out string value, out bool isVerbatim) {
+    value = null;
+    isVerbatim = false;
+    if (expr is StringLiteralExpr stringLiteral) {
+      value = stringLiteral.Value as string;
+      isVerbatim = stringLiteral.IsVerbatim;
+      return value != null;
+    }
+    return false;
+  }
+
+  private static bool TryGetCharLiteral(Expression expr, out char value) {
+    value = default;
+    if (expr is not CharLiteralExpr charLiteral || charLiteral.Value is not string literal) {
+      return false;
+    }
+
+    if (literal.Length == 1) {
+      value = literal[0];
+      return true;
+    }
+
+    if (literal.Length == 2 && literal[0] == '\\') {
+      value = literal[1] switch {
+        '0' => '\0',
+        'n' => '\n',
+        'r' => '\r',
+        't' => '\t',
+        '\\' => '\\',
+        '\'' => '\'',
+        '"' => '"',
+        _ => default
+      };
+      return value != default || literal[1] == '0';
+    }
+
+    if (literal.StartsWith("\\u", StringComparison.Ordinal) && literal.Length == 6 &&
+        TryParseHex(literal.AsSpan(2), out var utf16Code)) {
+      value = (char)utf16Code;
+      return true;
+    }
+
+    if (literal.StartsWith("\\U{", StringComparison.Ordinal) && literal.EndsWith("}", StringComparison.Ordinal)) {
+      var hexSpan = literal.AsSpan(3, literal.Length - 4);
+      if (TryParseHex(hexSpan, out var unicodeCode) && unicodeCode <= 0xFFFF) {
+        value = (char)unicodeCode;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private static bool TryParseHex(ReadOnlySpan<char> hexSpan, out int value) {
+    value = 0;
+    if (hexSpan.IsEmpty) {
+      return false;
+    }
+
+    foreach (var ch in hexSpan) {
+      int digit;
+      if (ch is >= '0' and <= '9') {
+        digit = ch - '0';
+      } else if (ch is >= 'a' and <= 'f') {
+        digit = ch - 'a' + 10;
+      } else if (ch is >= 'A' and <= 'F') {
+        digit = ch - 'A' + 10;
+      } else {
+        return false;
+      }
+      value = (value << 4) + digit;
+    }
+
+    return true;
+  }
+
+  private static bool TryGetSeqDisplayLiteral(Expression expr, out SeqDisplayExpr display) {
+    display = expr as SeqDisplayExpr;
+    return display != null;
+  }
+
+  private static bool AllElementsAreLiterals(SeqDisplayExpr display) {
+    return display.Elements.All(IsLiteralLike);
+  }
+
+  private static bool IsLiteralLike(Expression expr) {
+    if (expr is LiteralExpr) {
+      return true;
+    }
+    if (expr is SeqDisplayExpr seqDisplay) {
+      return seqDisplay.Elements.All(IsLiteralLike);
+    }
+    return false;
+  }
+
+  private static bool AreLiteralExpressionsEqual(Expression left, Expression right) {
+    if (left is LiteralExpr leftLiteral && right is LiteralExpr rightLiteral) {
+      return Equals(leftLiteral.Value, rightLiteral.Value);
+    }
+    if (left is SeqDisplayExpr leftSeq && right is SeqDisplayExpr rightSeq) {
+      return SeqDisplayLiteralsEqual(leftSeq, rightSeq);
+    }
+    return false;
+  }
+
+  private static bool TryGetIntLiteralValue(Expression expr, out int value) {
+    value = default;
+    if (!Expression.IsIntLiteral(expr, out var literal)) {
+      return false;
+    }
+    if (literal < 0 || literal > int.MaxValue) {
+      return false;
+    }
+    value = (int)literal;
+    return true;
+  }
+
+  private static bool SeqDisplayLiteralsEqual(SeqDisplayExpr left, SeqDisplayExpr right) {
+    if (left.Elements.Count != right.Elements.Count) {
+      return false;
+    }
+    for (var i = 0; i < left.Elements.Count; i++) {
+      if (!AreLiteralExpressionsEqual(left.Elements[i], right.Elements[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static bool SeqDisplayIsPrefix(SeqDisplayExpr left, SeqDisplayExpr right, out bool isProper) {
+    isProper = false;
+    if (left.Elements.Count > right.Elements.Count) {
+      return false;
+    }
+    for (var i = 0; i < left.Elements.Count; i++) {
+      if (!AreLiteralExpressionsEqual(left.Elements[i], right.Elements[i])) {
+        return false;
+      }
+    }
+    isProper = left.Elements.Count < right.Elements.Count;
+    return true;
   }
 
   private static string BuildInlineCallCycleKey(FunctionCallExpr callExpr) {
@@ -622,6 +859,116 @@ internal sealed class PartialEvaluatorEngine {
       return true;
     }
 
+    private static IEnumerable<string> TokenizeStringLiteral(string value, bool isVerbatim) {
+      if (!isVerbatim) {
+        return Util.TokensWithEscapes(value, false);
+      }
+
+      var tokens = new List<string>();
+      for (var i = 0; i < value.Length; i++) {
+        if (value[i] == '"' && i + 1 < value.Length && value[i + 1] == '"') {
+          tokens.Add("\"\"");
+          i++;
+        } else {
+          tokens.Add(value[i].ToString());
+        }
+      }
+      return tokens;
+    }
+
+    private int GetUnescapedStringLength(string value, bool isVerbatim) {
+      return Util.UnescapedCharacters(engine.options, value, isVerbatim).Count();
+    }
+
+    private bool TryGetUnescapedCharLiteral(string value, bool isVerbatim, int index, out string escapedValue) {
+      escapedValue = null;
+      var codePoints = Util.UnescapedCharacters(engine.options, value, isVerbatim).ToList();
+      if (index < 0 || index >= codePoints.Count) {
+        return false;
+      }
+
+      escapedValue = EscapeCharLiteral(codePoints[index], engine.options.Get(CommonOptionBag.UnicodeCharacters));
+      return true;
+    }
+
+    private bool TryGetStringSliceLiteral(string value, bool isVerbatim, int start, int end, out string sliceValue) {
+      sliceValue = null;
+      if (start < 0 || end < start) {
+        return false;
+      }
+
+      var tokens = TokenizeStringLiteral(value, isVerbatim)
+        .Select(token => new {
+          Token = token,
+          UnescapedLength = Util.UnescapedCharacters(engine.options, token, isVerbatim).Count()
+        })
+        .ToList();
+
+      var totalLength = tokens.Sum(token => token.UnescapedLength);
+      if (end > totalLength) {
+        return false;
+      }
+
+      var builder = new StringBuilder();
+      var index = 0;
+      foreach (var token in tokens) {
+        var tokenStart = index;
+        var tokenEnd = index + token.UnescapedLength;
+        if (tokenEnd <= start) {
+          index = tokenEnd;
+          continue;
+        }
+        if (tokenStart >= end) {
+          break;
+        }
+
+        var localStart = Math.Max(start, tokenStart) - tokenStart;
+        var localEnd = Math.Min(end, tokenEnd) - tokenStart;
+        if (token.UnescapedLength == 1) {
+          builder.Append(token.Token);
+        } else {
+          builder.Append(token.Token.Substring(localStart, localEnd - localStart));
+        }
+        index = tokenEnd;
+      }
+
+      sliceValue = builder.ToString();
+      return true;
+    }
+
+    private static string EscapeCharLiteral(int codePoint, bool unicodeChars) {
+      switch (codePoint) {
+        case 0:
+          return "\\0";
+        case 9:
+          return "\\t";
+        case 10:
+          return "\\n";
+        case 13:
+          return "\\r";
+        case 34:
+          return "\\\"";
+        case 39:
+          return "\\\'";
+        case 92:
+          return "\\\\";
+      }
+
+      if (codePoint is >= 32 and <= 126) {
+        return $"{Convert.ToChar(codePoint)}";
+      }
+
+      if (unicodeChars) {
+        return $"\\U{{{codePoint:X4}}}";
+      }
+
+      if (codePoint <= 0xFFFF) {
+        return $"\\u{codePoint:X4}";
+      }
+
+      return $"\\U{{{codePoint:X4}}}";
+    }
+
     internal void CacheInlinedLiteral(FunctionCallExpr callExpr, PartialEvalState state, LiteralExpr literal) {
       var function = callExpr.Function;
       if (function == null || !function.IsStatic) {
@@ -835,6 +1182,18 @@ internal sealed class PartialEvaluatorEngine {
             SetReplacement(unary, result);
             return false;
           }
+          if (unary.ResolvedOp == UnaryOpExpr.ResolvedOpcode.SeqLength) {
+            if (TryGetStringLiteral(unary.E, out var value, out var isVerbatim)) {
+              result = CreateIntLiteral(unary.Origin, GetUnescapedStringLength(value, isVerbatim), unary.Type);
+              SetReplacement(unary, result);
+              return false;
+            }
+            if (TryGetSeqDisplayLiteral(unary.E, out var display)) {
+              result = CreateIntLiteral(unary.Origin, display.Elements.Count, unary.Type);
+              SetReplacement(unary, result);
+              return false;
+            }
+          }
           return false;
         case BinaryExpr binary:
           binary.E0 = SimplifyExpression(binary.E0, state);
@@ -894,16 +1253,85 @@ internal sealed class PartialEvaluatorEngine {
               if (allLiteral) {
                 SetReplacement(letExpr, simplifiedBody);
               }
-            } finally {
+            }
+            finally {
               ExitScope();
             }
           } else {
             letExpr.Body = SimplifyExpression(letExpr.Body, state);
           }
           return false;
+        case SeqDisplayExpr seqDisplayExpr:
+          for (var i = 0; i < seqDisplayExpr.Elements.Count; i++) {
+            seqDisplayExpr.Elements[i] = SimplifyExpression(seqDisplayExpr.Elements[i], state);
+          }
+          return false;
+        case SeqSelectExpr seqSelectExpr:
+          seqSelectExpr.Seq = SimplifyExpression(seqSelectExpr.Seq, state);
+          if (seqSelectExpr.E0 != null) {
+            seqSelectExpr.E0 = SimplifyExpression(seqSelectExpr.E0, state);
+          }
+          if (seqSelectExpr.E1 != null) {
+            seqSelectExpr.E1 = SimplifyExpression(seqSelectExpr.E1, state);
+          }
+          if (seqSelectExpr.SelectOne) {
+            if (TryGetStringLiteral(seqSelectExpr.Seq, out var strValue, out var strVerbatim) &&
+                seqSelectExpr.E0 != null &&
+                TryGetIntLiteralValue(seqSelectExpr.E0, out var index) &&
+                TryGetUnescapedCharLiteral(strValue, strVerbatim, index, out var escapedChar)) {
+              result = CreateCharLiteral(seqSelectExpr.Origin, escapedChar, seqSelectExpr.Type);
+              SetReplacement(seqSelectExpr, result);
+              return false;
+            }
+            if (TryGetSeqDisplayLiteral(seqSelectExpr.Seq, out var display) &&
+                AllElementsAreLiterals(display) &&
+                seqSelectExpr.E0 != null &&
+                TryGetIntLiteralValue(seqSelectExpr.E0, out index) &&
+                0 <= index && index < display.Elements.Count &&
+                IsLiteralLike(display.Elements[index])) {
+              SetReplacement(seqSelectExpr, display.Elements[index]);
+              return false;
+            }
+            return false;
+          }
+          if (TryGetStringLiteral(seqSelectExpr.Seq, out var sourceString, out var sourceVerbatim)) {
+            var unescapedLength = GetUnescapedStringLength(sourceString, sourceVerbatim);
+            if (TryGetSliceBounds(seqSelectExpr, unescapedLength, out var start, out var end) &&
+                TryGetStringSliceLiteral(sourceString, sourceVerbatim, start, end, out var slice)) {
+              result = CreateStringLiteral(seqSelectExpr.Origin, slice, seqSelectExpr.Type, sourceVerbatim);
+              SetReplacement(seqSelectExpr, result);
+              return false;
+            }
+          }
+          if (TryGetSeqDisplayLiteral(seqSelectExpr.Seq, out var sourceSeq) &&
+              AllElementsAreLiterals(sourceSeq) &&
+              TryGetSliceBounds(seqSelectExpr, sourceSeq.Elements.Count, out var seqStart, out var seqEnd)) {
+            var sliced = sourceSeq.Elements.GetRange(seqStart, seqEnd - seqStart);
+            result = CreateSeqDisplayLiteral(seqSelectExpr.Origin, sliced, seqSelectExpr.Type);
+            SetReplacement(seqSelectExpr, result);
+            return false;
+          }
+          return false;
+        case SeqUpdateExpr seqUpdateExpr:
+          seqUpdateExpr.Seq = SimplifyExpression(seqUpdateExpr.Seq, state);
+          seqUpdateExpr.Index = SimplifyExpression(seqUpdateExpr.Index, state);
+          seqUpdateExpr.Value = SimplifyExpression(seqUpdateExpr.Value, state);
+          return false;
         default:
           return false;
       }
+    }
+
+    private static bool TryGetSliceBounds(SeqSelectExpr expr, int length, out int start, out int end) {
+      start = 0;
+      end = length;
+      if (expr.E0 != null && !TryGetIntLiteralValue(expr.E0, out start)) {
+        return false;
+      }
+      if (expr.E1 != null && !TryGetIntLiteralValue(expr.E1, out end)) {
+        return false;
+      }
+      return 0 <= start && start <= end && end <= length;
     }
 
     private List<BoundedPool> SimplifyBounds(List<BoundedPool> bounds, PartialEvalState state) {
