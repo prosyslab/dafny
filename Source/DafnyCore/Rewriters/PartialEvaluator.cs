@@ -4,8 +4,10 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
+using System.Linq;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Text;
 
 namespace Microsoft.Dafny;
 
@@ -64,7 +66,7 @@ internal sealed class PartialEvaluatorEngine {
   }
 
   public void PartialEvalEntry(ICallable callable) {
-    var state = new PartialEvalState((int)inlineDepth, new HashSet<Function>());
+    var state = new PartialEvalState((int)inlineDepth, new HashSet<Function>(), new HashSet<string>(StringComparer.Ordinal));
     var visitor = new PartialEvaluatorVisitor(this, inlineCallCache);
     switch (callable) {
       case Function function when function.Body != null:
@@ -77,7 +79,7 @@ internal sealed class PartialEvaluatorEngine {
   }
 
   internal Expression SimplifyExpression(Expression expr) {
-    var state = new PartialEvalState((int)inlineDepth, new HashSet<Function>());
+    var state = new PartialEvalState((int)inlineDepth, new HashSet<Function>(), new HashSet<string>(StringComparer.Ordinal));
     var visitor = new PartialEvaluatorVisitor(this, inlineCallCache);
     return visitor.SimplifyExpression(expr, state);
   }
@@ -303,12 +305,16 @@ internal sealed class PartialEvaluatorEngine {
       return false;
     }
 
+    var allLiteralArgs = true;
     for (var i = 0; i < callExpr.Args.Count; i++) {
       var simplifiedArg = visitor.SimplifyExpression(callExpr.Args[i], state.WithDepth(0));
-      if (simplifiedArg is not LiteralExpr) {
-        return false;
-      }
       callExpr.Args[i] = simplifiedArg;
+      if (simplifiedArg is not LiteralExpr) {
+        allLiteralArgs = false;
+      }
+    }
+    if (!allLiteralArgs) {
+      return false;
     }
 
     // Cache inlined results for pure, static calls with literal arguments, when the inlined body
@@ -318,31 +324,73 @@ internal sealed class PartialEvaluatorEngine {
       return true;
     }
 
-    if (!state.InlineStack.Add(function)) {
+    var callKey = BuildInlineCallCycleKey(callExpr);
+    if (!state.InlineCallStack.Add(callKey)) {
       return false;
     }
+    var addedFunction = state.InlineStack.Add(function);
 
-    var substMap = new Dictionary<IVariable, Expression>(function.Ins.Count);
-    for (var i = 0; i < function.Ins.Count; i++) {
-      substMap[function.Ins[i]] = callExpr.Args[i];
+    try {
+      var substMap = new Dictionary<IVariable, Expression>(function.Ins.Count);
+      for (var i = 0; i < function.Ins.Count; i++) {
+        substMap[function.Ins[i]] = callExpr.Args[i];
+      }
+
+      Expression receiverReplacement = function.IsStatic ? null : callExpr.Receiver;
+      var typeMap = callExpr.GetTypeArgumentSubstitutions();
+      var substituter = new Substituter(receiverReplacement, substMap, typeMap, null, systemModuleManager);
+      var body = substituter.Substitute(function.Body);
+      inlined = visitor.SimplifyExpression(body, state.WithDepth(state.Depth - 1));
+      var postVisitor = new PartialEvaluatorVisitor(this, inlineCallCache);
+      inlined = postVisitor.SimplifyExpression(inlined, state.WithDepth(state.Depth - 1));
+
+      if (inlined is LiteralExpr literal) {
+        visitor.CacheInlinedLiteral(callExpr, state, literal);
+      }
+
+      return true;
+    } finally {
+      if (addedFunction) {
+        state.InlineStack.Remove(function);
+      }
+      state.InlineCallStack.Remove(callKey);
     }
-
-    Expression receiverReplacement = function.IsStatic ? null : callExpr.Receiver;
-    var typeMap = callExpr.GetTypeArgumentSubstitutions();
-    var substituter = new Substituter(receiverReplacement, substMap, typeMap, null, systemModuleManager);
-    var body = substituter.Substitute(function.Body);
-    inlined = visitor.SimplifyExpression(body, state.WithDepth(state.Depth - 1));
-
-    if (inlined is LiteralExpr literal) {
-      visitor.CacheInlinedLiteral(callExpr, state, literal);
-    }
-
-    state.InlineStack.Remove(function);
-    return true;
   }
 
   private static LiteralExpr CreateIntLiteral(IOrigin origin, BigInteger value) {
     return new LiteralExpr(origin, value) { Type = Type.Int };
+  }
+
+  private static string BuildInlineCallCycleKey(FunctionCallExpr callExpr) {
+    var builder = new StringBuilder();
+    builder.Append(RuntimeHelpers.GetHashCode(callExpr.Function));
+    builder.Append("|r=");
+    if (!callExpr.Function.IsStatic) {
+      builder.Append(callExpr.Receiver);
+    }
+    builder.Append("|a=");
+    for (var i = 0; i < callExpr.Args.Count; i++) {
+      var arg = callExpr.Args[i];
+      if (Expression.IsIntLiteral(arg, out var intValue)) {
+        builder.Append("i").Append(intValue);
+      } else if (Expression.IsBoolLiteral(arg, out var boolValue)) {
+        builder.Append("b").Append(boolValue ? "1" : "0");
+      } else {
+        builder.Append("x");
+      }
+      if (i < callExpr.Args.Count - 1) {
+        builder.Append(",");
+      }
+    }
+    builder.Append("|t=");
+    if (callExpr.TypeApplication_AtEnclosingClass != null) {
+      builder.Append(string.Join(",", callExpr.TypeApplication_AtEnclosingClass.Select(t => t.ToString())));
+    }
+    builder.Append("|tf=");
+    if (callExpr.TypeApplication_JustFunction != null) {
+      builder.Append(string.Join(",", callExpr.TypeApplication_JustFunction.Select(t => t.ToString())));
+    }
+    return builder.ToString();
   }
 
   private enum CachedLiteralKind {
@@ -382,14 +430,16 @@ internal sealed class PartialEvaluatorEngine {
   private sealed class PartialEvalState {
     public int Depth { get; }
     public HashSet<Function> InlineStack { get; }
+    public HashSet<string> InlineCallStack { get; }
 
-    public PartialEvalState(int depth, HashSet<Function> inlineStack) {
+    public PartialEvalState(int depth, HashSet<Function> inlineStack, HashSet<string> inlineCallStack) {
       Depth = depth;
       InlineStack = inlineStack;
+      InlineCallStack = inlineCallStack;
     }
 
     public PartialEvalState WithDepth(int depth) {
-      return new PartialEvalState(depth, InlineStack);
+      return new PartialEvalState(depth, InlineStack, InlineCallStack);
     }
   }
 
@@ -823,7 +873,33 @@ internal sealed class PartialEvaluatorEngine {
           for (var i = 0; i < letExpr.RHSs.Count; i++) {
             letExpr.RHSs[i] = SimplifyExpression(letExpr.RHSs[i], state);
           }
-          letExpr.Body = SimplifyExpression(letExpr.Body, state);
+          if (letExpr.Exact) {
+            EnterScope();
+            try {
+              var allLiteral = true;
+              for (var i = 0; i < letExpr.LHSs.Count; i++) {
+                var boundVar = letExpr.LHSs[i].Var;
+                if (boundVar == null) {
+                  allLiteral = false;
+                  continue;
+                }
+                if (letExpr.RHSs[i] is LiteralExpr literal && ConstValue.TryCreate(literal, out var letConstValue)) {
+                  SetConst(boundVar, letConstValue);
+                } else {
+                  allLiteral = false;
+                }
+              }
+              var simplifiedBody = SimplifyExpression(letExpr.Body, state);
+              letExpr.Body = simplifiedBody;
+              if (allLiteral) {
+                SetReplacement(letExpr, simplifiedBody);
+              }
+            } finally {
+              ExitScope();
+            }
+          } else {
+            letExpr.Body = SimplifyExpression(letExpr.Body, state);
+          }
           return false;
         default:
           return false;
