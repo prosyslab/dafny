@@ -651,4 +651,70 @@ method Entry() {
 
     Assert.All(asserts, a => Assert.True(Expression.IsBoolLiteral(a.Expr, out var b) && b));
   }
+
+  [Fact]
+  public async Task PartialEvaluation_SimplifiesSetDomainOps() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert 1 in {1, 2};
+  assert 3 !in {1, 2};
+  assert {1, 2} + {2, 3} == {1, 2, 3};
+  assert {1, 2} * {2, 3} == {2};
+  assert {1, 2, 3} - {2} == {1, 3};
+  assert {} + {1} == {1};
+  assert {} * {1} == {};
+  assert {} - {1} == {};
+  assert {1} <= {1, 2};
+  assert {1} < {1, 2};
+  assert {1, 2} >= {1};
+  assert |{1, 2}| == 2;
+  assert |{1, 1}| == 1;
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var body = Assert.IsType<BlockStmt>(entry.Body);
+    var asserts = body.Body.OfType<AssertStmt>().ToList();
+    Assert.Equal(13, asserts.Count);
+
+    Assert.All(asserts, assertStmt => Assert.True(Expression.IsBoolLiteral(assertStmt.Expr, out var value) && value));
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_SimplifiesMultiSetDomainOps_NestedCollections() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert multiset{1, 1} + multiset{1} == multiset{1, 1, 1};
+  assert multiset{1, 2} * multiset{2, 2, 3} == multiset{2};
+  assert multiset{1, 2, 2} - multiset{2} == multiset{1, 2};
+  assert 2 in multiset{1, 2, 2};
+  assert 3 !in multiset{1, 2, 2};
+  assert multiset{1, 2} <= multiset{1, 2, 2};
+  assert multiset{1, 2} < multiset{1, 2, 2};
+  assert |multiset{1, 2, 2}| == 3;
+  assert { {1}, {1, 2} } * { {1} } == { {1} };
+  assert multiset{ {1}, {1, 2}, {1} } - multiset{ {1} } == multiset{ {1}, {1, 2} };
+  assert {1} in multiset{ {1}, {2} };
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var body = Assert.IsType<BlockStmt>(entry.Body);
+    var asserts = body.Body.OfType<AssertStmt>().ToList();
+    Assert.Equal(11, asserts.Count);
+
+    Assert.All(asserts, assertStmt => Assert.True(Expression.IsBoolLiteral(assertStmt.Expr, out var value) && value));
+  }
 }
