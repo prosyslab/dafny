@@ -94,6 +94,76 @@ method Entry() {
   }
 
   [Fact]
+  public async Task PartialEvaluation_InlinesSeqDisplayLiteralArguments() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 2U);
+
+    var program = await ParseAndResolve(@"
+predicate Spec(s: seq<char>) { s == ['0', '5', ':'] }
+
+method Entry() {
+  assert Spec(['0', '5', ':']);
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    Assert.NotNull(entry.Body);
+
+    var assertStmt = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .Single();
+    var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+
+    Assert.True(Expression.IsBoolLiteral(assertExpr, out var result));
+    Assert.True(result);
+
+    var calls = assertExpr.DescendantsAndSelf.OfType<FunctionCallExpr>()
+      .Select(call => call.Function.Name)
+      .ToList();
+    Assert.DoesNotContain("Spec", calls);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_InlinesNestedCollectionLiteralArguments() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 2U);
+
+    var program = await ParseAndResolve(@"
+predicate SpecSeq(s: seq<seq<char>>) { s == [['1'], ['2'], ['3']] }
+predicate SpecSet(s: set<set<int>>) { s == {{1}, {2}, {3}} }
+predicate SpecMap(m: map<int, set<int>>) { m == map[1 := {2}, 3 := {4}] }
+
+method Entry() {
+  assert SpecSeq([['1'], ['2'], ['3']]);
+  assert SpecSet({{1}, {2}, {3}});
+  assert SpecMap(map[1 := {2}, 3 := {4}]);
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    Assert.NotNull(entry.Body);
+
+    var assertStmts = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .ToList();
+    Assert.Equal(3, assertStmts.Count);
+
+    var callNames = assertStmts
+      .SelectMany(stmt => (stmt.Expr.Resolved ?? stmt.Expr).DescendantsAndSelf.OfType<FunctionCallExpr>())
+      .Select(call => call.Function.Name)
+      .ToList();
+    Assert.DoesNotContain("SpecSeq", callNames);
+    Assert.DoesNotContain("SpecSet", callNames);
+    Assert.DoesNotContain("SpecMap", callNames);
+  }
+
+  [Fact]
   public async Task PartialEvaluation_NoEntryConfiguredRunsWithoutWarnings() {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
