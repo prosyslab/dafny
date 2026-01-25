@@ -405,6 +405,51 @@ function Entry(): int {
   }
 
   [Fact]
+  public async Task PartialEvaluation_UnfoldsRecursiveLiteralCalls() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 10U);
+
+    var program = await ParseAndResolve(@"
+function CountNonZeroDigits(n: int): int {
+  if n < 10 then (if n != 0 then 1 else 0)
+  else CountNonZeroDigits(n / 10) + (if n % 10 != 0 then 1 else 0)
+}
+
+method Entry() {
+  assert CountNonZeroDigits(202) == 2;
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmt = DescendantStatements(entry.Body!).OfType<AssertStmt>().Single();
+
+    Assert.True(Expression.IsBoolLiteral(assertStmt.Expr, out var value) && value);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_SimplifiesExactLetExpr() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert (var t := 1 + 1; t) == 2;
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmt = DescendantStatements(entry.Body!).OfType<AssertStmt>().Single();
+
+    Assert.True(Expression.IsBoolLiteral(assertStmt.Expr, out var value) && value);
+  }
+
+  [Fact]
   public async Task PartialEvaluation_CacheDoesNotCrossInliningDepthBoundaries() {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
