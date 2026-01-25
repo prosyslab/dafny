@@ -713,7 +713,7 @@ internal sealed class PartialEvaluatorEngine {
     for (var i = 0; i < callExpr.Args.Count; i++) {
       var simplifiedArg = visitor.SimplifyExpression(callExpr.Args[i], state.WithDepth(0));
       callExpr.Args[i] = simplifiedArg;
-      if (simplifiedArg is not LiteralExpr) {
+      if (!IsLiteralLike(simplifiedArg)) {
         allLiteralArgs = false;
       }
     }
@@ -895,6 +895,10 @@ internal sealed class PartialEvaluatorEngine {
     return elements.All(IsLiteralLike);
   }
 
+  private static bool AllElementsAreLiterals(MapDisplayExpr display) {
+    return display.Elements.All(entry => IsLiteralLike(entry.A) && IsLiteralLike(entry.B));
+  }
+
   private static bool IsLiteralLike(Expression expr) {
     if (expr is LiteralExpr) {
       return true;
@@ -907,6 +911,9 @@ internal sealed class PartialEvaluatorEngine {
     }
     if (expr is MultiSetDisplayExpr multiSetDisplay) {
       return AllElementsAreLiterals(multiSetDisplay.Elements);
+    }
+    if (expr is MapDisplayExpr mapDisplay) {
+      return AllElementsAreLiterals(mapDisplay);
     }
     return false;
   }
