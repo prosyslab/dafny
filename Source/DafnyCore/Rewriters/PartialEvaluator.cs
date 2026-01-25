@@ -133,6 +133,54 @@ internal sealed class PartialEvaluatorEngine {
         return SimplifySeqPrefix(binary, false);
       case BinaryExpr.ResolvedOpcode.ProperPrefix:
         return SimplifySeqPrefix(binary, true);
+      case BinaryExpr.ResolvedOpcode.SetEq:
+        return SimplifySetEquality(binary, true);
+      case BinaryExpr.ResolvedOpcode.SetNeq:
+        return SimplifySetEquality(binary, false);
+      case BinaryExpr.ResolvedOpcode.InSet:
+        return SimplifySetMembership(binary, true);
+      case BinaryExpr.ResolvedOpcode.NotInSet:
+        return SimplifySetMembership(binary, false);
+      case BinaryExpr.ResolvedOpcode.Subset:
+        return SimplifySetSubset(binary, binary.E0, binary.E1, false);
+      case BinaryExpr.ResolvedOpcode.ProperSubset:
+        return SimplifySetSubset(binary, binary.E0, binary.E1, true);
+      case BinaryExpr.ResolvedOpcode.Superset:
+        return SimplifySetSubset(binary, binary.E1, binary.E0, false);
+      case BinaryExpr.ResolvedOpcode.ProperSuperset:
+        return SimplifySetSubset(binary, binary.E1, binary.E0, true);
+      case BinaryExpr.ResolvedOpcode.Disjoint:
+        return SimplifySetDisjoint(binary);
+      case BinaryExpr.ResolvedOpcode.Union:
+        return SimplifySetUnion(binary);
+      case BinaryExpr.ResolvedOpcode.Intersection:
+        return SimplifySetIntersection(binary);
+      case BinaryExpr.ResolvedOpcode.SetDifference:
+        return SimplifySetDifference(binary);
+      case BinaryExpr.ResolvedOpcode.MultiSetEq:
+        return SimplifyMultiSetEquality(binary, true);
+      case BinaryExpr.ResolvedOpcode.MultiSetNeq:
+        return SimplifyMultiSetEquality(binary, false);
+      case BinaryExpr.ResolvedOpcode.InMultiSet:
+        return SimplifyMultiSetMembership(binary, true);
+      case BinaryExpr.ResolvedOpcode.NotInMultiSet:
+        return SimplifyMultiSetMembership(binary, false);
+      case BinaryExpr.ResolvedOpcode.MultiSubset:
+        return SimplifyMultiSetSubset(binary, binary.E0, binary.E1, false);
+      case BinaryExpr.ResolvedOpcode.ProperMultiSubset:
+        return SimplifyMultiSetSubset(binary, binary.E0, binary.E1, true);
+      case BinaryExpr.ResolvedOpcode.MultiSuperset:
+        return SimplifyMultiSetSubset(binary, binary.E1, binary.E0, false);
+      case BinaryExpr.ResolvedOpcode.ProperMultiSuperset:
+        return SimplifyMultiSetSubset(binary, binary.E1, binary.E0, true);
+      case BinaryExpr.ResolvedOpcode.MultiSetDisjoint:
+        return SimplifyMultiSetDisjoint(binary);
+      case BinaryExpr.ResolvedOpcode.MultiSetUnion:
+        return SimplifyMultiSetUnion(binary);
+      case BinaryExpr.ResolvedOpcode.MultiSetIntersection:
+        return SimplifyMultiSetIntersection(binary);
+      case BinaryExpr.ResolvedOpcode.MultiSetDifference:
+        return SimplifyMultiSetDifference(binary);
       default:
         return binary;
     }
@@ -362,6 +410,290 @@ internal sealed class PartialEvaluatorEngine {
     return binary;
   }
 
+  private static Expression SimplifySetEquality(BinaryExpr binary, bool isEq) {
+    if (TryGetSetDisplayLiteral(binary.E0, out var leftSet) &&
+        TryGetSetDisplayLiteral(binary.E1, out var rightSet) &&
+        AllElementsAreLiterals(leftSet.Elements) &&
+        AllElementsAreLiterals(rightSet.Elements)) {
+      var equal = SetDisplayLiteralsEqual(leftSet, rightSet);
+      return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifySetMembership(BinaryExpr binary, bool isIn) {
+    if (LiteralExpr.IsEmptySet(binary.E1)) {
+      return CreateBoolLiteral(binary.Origin, !isIn);
+    }
+    if (TryGetSetDisplayLiteral(binary.E1, out var setDisplay) &&
+        AllElementsAreLiterals(setDisplay.Elements) &&
+        IsLiteralLike(binary.E0)) {
+      var contains = ContainsLiteralElement(setDisplay.Elements, binary.E0);
+      return CreateBoolLiteral(binary.Origin, isIn ? contains : !contains);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifySetSubset(BinaryExpr binary, Expression left, Expression right, bool proper) {
+    if (LiteralExpr.IsEmptySet(left)) {
+      if (!proper) {
+        return CreateBoolLiteral(binary.Origin, true);
+      }
+      if (TryGetSetDisplayLiteral(right, out var rightDisplay)) {
+        return CreateBoolLiteral(binary.Origin, rightDisplay.Elements.Count > 0);
+      }
+      return binary;
+    }
+    if (LiteralExpr.IsEmptySet(right) && TryGetSetDisplayLiteral(left, out var leftDisplay)) {
+      return CreateBoolLiteral(binary.Origin, leftDisplay.Elements.Count == 0);
+    }
+    if (TryGetSetDisplayLiteral(left, out leftDisplay) &&
+        TryGetSetDisplayLiteral(right, out var rightDisplayLiteral) &&
+        AllElementsAreLiterals(leftDisplay.Elements) &&
+        AllElementsAreLiterals(rightDisplayLiteral.Elements)) {
+      var leftDistinct = DistinctLiteralElements(leftDisplay.Elements);
+      var rightDistinct = DistinctLiteralElements(rightDisplayLiteral.Elements);
+      var isSubset = leftDistinct.All(element => ContainsLiteralElement(rightDistinct, element));
+      var isProper = isSubset && leftDistinct.Count < rightDistinct.Count;
+      return CreateBoolLiteral(binary.Origin, proper ? isProper : isSubset);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifySetDisjoint(BinaryExpr binary) {
+    if (LiteralExpr.IsEmptySet(binary.E0) || LiteralExpr.IsEmptySet(binary.E1)) {
+      return CreateBoolLiteral(binary.Origin, true);
+    }
+    if (TryGetSetDisplayLiteral(binary.E0, out var leftDisplay) &&
+        TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
+        AllElementsAreLiterals(leftDisplay.Elements) &&
+        AllElementsAreLiterals(rightDisplay.Elements)) {
+      var leftDistinct = DistinctLiteralElements(leftDisplay.Elements);
+      var rightDistinct = DistinctLiteralElements(rightDisplay.Elements);
+      var disjoint = leftDistinct.All(element => !ContainsLiteralElement(rightDistinct, element));
+      return CreateBoolLiteral(binary.Origin, disjoint);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifySetUnion(BinaryExpr binary) {
+    if (LiteralExpr.IsEmptySet(binary.E0)) {
+      return binary.E1;
+    }
+    if (LiteralExpr.IsEmptySet(binary.E1)) {
+      return binary.E0;
+    }
+    if (TryGetSetDisplayLiteral(binary.E0, out var leftDisplay) &&
+        TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
+        AllElementsAreLiterals(leftDisplay.Elements) &&
+        AllElementsAreLiterals(rightDisplay.Elements)) {
+      var merged = DistinctLiteralElements(leftDisplay.Elements);
+      foreach (var element in rightDisplay.Elements) {
+        if (!ContainsLiteralElement(merged, element)) {
+          merged.Add(element);
+        }
+      }
+      return CreateSetDisplayLiteral(binary.Origin, merged, binary.Type);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifySetIntersection(BinaryExpr binary) {
+    if (LiteralExpr.IsEmptySet(binary.E0)) {
+      return binary.E0;
+    }
+    if (LiteralExpr.IsEmptySet(binary.E1)) {
+      return binary.E1;
+    }
+    if (TryGetSetDisplayLiteral(binary.E0, out var leftDisplay) &&
+        TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
+        AllElementsAreLiterals(leftDisplay.Elements) &&
+        AllElementsAreLiterals(rightDisplay.Elements)) {
+      var leftDistinct = DistinctLiteralElements(leftDisplay.Elements);
+      var rightDistinct = DistinctLiteralElements(rightDisplay.Elements);
+      var intersection = new List<Expression>();
+      foreach (var element in leftDistinct) {
+        if (ContainsLiteralElement(rightDistinct, element)) {
+          intersection.Add(element);
+        }
+      }
+      return CreateSetDisplayLiteral(binary.Origin, intersection, binary.Type);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifySetDifference(BinaryExpr binary) {
+    if (LiteralExpr.IsEmptySet(binary.E0) || LiteralExpr.IsEmptySet(binary.E1)) {
+      return binary.E0;
+    }
+    if (TryGetSetDisplayLiteral(binary.E0, out var leftDisplay) &&
+        TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
+        AllElementsAreLiterals(leftDisplay.Elements) &&
+        AllElementsAreLiterals(rightDisplay.Elements)) {
+      var leftDistinct = DistinctLiteralElements(leftDisplay.Elements);
+      var rightDistinct = DistinctLiteralElements(rightDisplay.Elements);
+      var difference = leftDistinct.Where(element => !ContainsLiteralElement(rightDistinct, element)).ToList();
+      return CreateSetDisplayLiteral(binary.Origin, difference, binary.Type);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifyMultiSetEquality(BinaryExpr binary, bool isEq) {
+    if (TryGetMultiSetDisplayLiteral(binary.E0, out var leftDisplay) &&
+        TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
+        AllElementsAreLiterals(leftDisplay.Elements) &&
+        AllElementsAreLiterals(rightDisplay.Elements)) {
+      var equal = MultiSetDisplayLiteralsEqual(leftDisplay, rightDisplay);
+      return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifyMultiSetMembership(BinaryExpr binary, bool isIn) {
+    if (LiteralExpr.IsEmptyMultiset(binary.E1)) {
+      return CreateBoolLiteral(binary.Origin, !isIn);
+    }
+    if (TryGetMultiSetDisplayLiteral(binary.E1, out var multiSetDisplay) &&
+        AllElementsAreLiterals(multiSetDisplay.Elements) &&
+        IsLiteralLike(binary.E0)) {
+      var counts = BuildMultisetCounts(multiSetDisplay.Elements);
+      var contains = counts.Any(entry => AreLiteralExpressionsEqual(entry.Element, binary.E0) && entry.Count > 0);
+      return CreateBoolLiteral(binary.Origin, isIn ? contains : !contains);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifyMultiSetSubset(BinaryExpr binary, Expression left, Expression right, bool proper) {
+    if (LiteralExpr.IsEmptyMultiset(left)) {
+      if (!proper) {
+        return CreateBoolLiteral(binary.Origin, true);
+      }
+      if (TryGetMultiSetDisplayLiteral(right, out var rightDisplay)) {
+        return CreateBoolLiteral(binary.Origin, rightDisplay.Elements.Count > 0);
+      }
+      return binary;
+    }
+    if (LiteralExpr.IsEmptyMultiset(right) && TryGetMultiSetDisplayLiteral(left, out var leftDisplay)) {
+      return CreateBoolLiteral(binary.Origin, leftDisplay.Elements.Count == 0);
+    }
+    if (TryGetMultiSetDisplayLiteral(left, out leftDisplay) &&
+        TryGetMultiSetDisplayLiteral(right, out var rightDisplayLiteral) &&
+        AllElementsAreLiterals(leftDisplay.Elements) &&
+        AllElementsAreLiterals(rightDisplayLiteral.Elements)) {
+      var leftCounts = BuildMultisetCounts(leftDisplay.Elements);
+      var rightCounts = BuildMultisetCounts(rightDisplayLiteral.Elements);
+      var isSubset = leftCounts.All(entry => {
+        var match = rightCounts.FirstOrDefault(candidate => AreLiteralExpressionsEqual(candidate.Element, entry.Element));
+        return match != null && entry.Count <= match.Count;
+      });
+      var isProper = isSubset && leftCounts.Sum(entry => entry.Count) < rightCounts.Sum(entry => entry.Count);
+      return CreateBoolLiteral(binary.Origin, proper ? isProper : isSubset);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifyMultiSetDisjoint(BinaryExpr binary) {
+    if (LiteralExpr.IsEmptyMultiset(binary.E0) || LiteralExpr.IsEmptyMultiset(binary.E1)) {
+      return CreateBoolLiteral(binary.Origin, true);
+    }
+    if (TryGetMultiSetDisplayLiteral(binary.E0, out var leftDisplay) &&
+        TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
+        AllElementsAreLiterals(leftDisplay.Elements) &&
+        AllElementsAreLiterals(rightDisplay.Elements)) {
+      var leftCounts = BuildMultisetCounts(leftDisplay.Elements);
+      var rightCounts = BuildMultisetCounts(rightDisplay.Elements);
+      var disjoint = leftCounts.All(entry => rightCounts.All(candidate => !AreLiteralExpressionsEqual(candidate.Element, entry.Element)));
+      return CreateBoolLiteral(binary.Origin, disjoint);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifyMultiSetUnion(BinaryExpr binary) {
+    if (LiteralExpr.IsEmptyMultiset(binary.E0)) {
+      return binary.E1;
+    }
+    if (LiteralExpr.IsEmptyMultiset(binary.E1)) {
+      return binary.E0;
+    }
+    if (TryGetMultiSetDisplayLiteral(binary.E0, out var leftDisplay) &&
+        TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
+        AllElementsAreLiterals(leftDisplay.Elements) &&
+        AllElementsAreLiterals(rightDisplay.Elements)) {
+      var combined = BuildMultisetCounts(leftDisplay.Elements);
+      foreach (var entry in BuildMultisetCounts(rightDisplay.Elements)) {
+        var target = combined.FirstOrDefault(candidate => AreLiteralExpressionsEqual(candidate.Element, entry.Element));
+        if (target == null) {
+          combined.Add(new MultisetElementCount(entry.Element) { Count = entry.Count });
+        } else {
+          target.Count += entry.Count;
+        }
+      }
+      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCounts(combined), binary.Type);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifyMultiSetIntersection(BinaryExpr binary) {
+    if (LiteralExpr.IsEmptyMultiset(binary.E0)) {
+      return binary.E0;
+    }
+    if (LiteralExpr.IsEmptyMultiset(binary.E1)) {
+      return binary.E1;
+    }
+    if (TryGetMultiSetDisplayLiteral(binary.E0, out var leftDisplay) &&
+        TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
+        AllElementsAreLiterals(leftDisplay.Elements) &&
+        AllElementsAreLiterals(rightDisplay.Elements)) {
+      var leftCounts = BuildMultisetCounts(leftDisplay.Elements);
+      var rightCounts = BuildMultisetCounts(rightDisplay.Elements);
+      var intersection = new List<MultisetElementCount>();
+      foreach (var entry in leftCounts) {
+        var match = rightCounts.FirstOrDefault(candidate => AreLiteralExpressionsEqual(candidate.Element, entry.Element));
+        if (match != null) {
+          var count = Math.Min(entry.Count, match.Count);
+          if (count > 0) {
+            intersection.Add(new MultisetElementCount(entry.Element) { Count = count });
+          }
+        }
+      }
+      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCounts(intersection), binary.Type);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifyMultiSetDifference(BinaryExpr binary) {
+    if (LiteralExpr.IsEmptyMultiset(binary.E0) || LiteralExpr.IsEmptyMultiset(binary.E1)) {
+      return binary.E0;
+    }
+    if (TryGetMultiSetDisplayLiteral(binary.E0, out var leftDisplay) &&
+        TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
+        AllElementsAreLiterals(leftDisplay.Elements) &&
+        AllElementsAreLiterals(rightDisplay.Elements)) {
+      var leftCounts = BuildMultisetCounts(leftDisplay.Elements);
+      var rightCounts = BuildMultisetCounts(rightDisplay.Elements);
+      var difference = new List<MultisetElementCount>();
+      foreach (var entry in leftCounts) {
+        var match = rightCounts.FirstOrDefault(candidate => AreLiteralExpressionsEqual(candidate.Element, entry.Element));
+        var count = entry.Count - (match?.Count ?? 0);
+        if (count > 0) {
+          difference.Add(new MultisetElementCount(entry.Element) { Count = count });
+        }
+      }
+      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCounts(difference), binary.Type);
+    }
+    return binary;
+  }
+
+  private static List<Expression> ExpandMultisetCounts(IEnumerable<MultisetElementCount> counts) {
+    var elements = new List<Expression>();
+    foreach (var entry in counts) {
+      for (var i = 0; i < entry.Count; i++) {
+        elements.Add(entry.Element);
+      }
+    }
+    return elements;
+  }
+
   private bool TryInlineCall(FunctionCallExpr callExpr, PartialEvalState state, PartialEvaluatorVisitor visitor, out Expression inlined) {
     inlined = null;
     var function = callExpr.Function;
@@ -455,6 +787,15 @@ internal sealed class PartialEvaluatorEngine {
     return new SeqDisplayExpr(origin, elements) { Type = type };
   }
 
+  private static SetDisplayExpr CreateSetDisplayLiteral(IOrigin origin, List<Expression> elements, Type type) {
+    var setType = type.NormalizeExpand().AsSetType;
+    return new SetDisplayExpr(origin, setType.Finite, elements) { Type = type };
+  }
+
+  private static MultiSetDisplayExpr CreateMultiSetDisplayLiteral(IOrigin origin, List<Expression> elements, Type type) {
+    return new MultiSetDisplayExpr(origin, elements) { Type = type };
+  }
+
   private static bool TryGetStringLiteral(Expression expr, out string value, out bool isVerbatim) {
     value = null;
     isVerbatim = false;
@@ -537,7 +878,21 @@ internal sealed class PartialEvaluatorEngine {
   }
 
   private static bool AllElementsAreLiterals(SeqDisplayExpr display) {
-    return display.Elements.All(IsLiteralLike);
+    return AllElementsAreLiterals(display.Elements);
+  }
+
+  private static bool TryGetSetDisplayLiteral(Expression expr, out SetDisplayExpr display) {
+    display = expr as SetDisplayExpr;
+    return display != null;
+  }
+
+  private static bool TryGetMultiSetDisplayLiteral(Expression expr, out MultiSetDisplayExpr display) {
+    display = expr as MultiSetDisplayExpr;
+    return display != null;
+  }
+
+  private static bool AllElementsAreLiterals(IEnumerable<Expression> elements) {
+    return elements.All(IsLiteralLike);
   }
 
   private static bool IsLiteralLike(Expression expr) {
@@ -545,7 +900,13 @@ internal sealed class PartialEvaluatorEngine {
       return true;
     }
     if (expr is SeqDisplayExpr seqDisplay) {
-      return seqDisplay.Elements.All(IsLiteralLike);
+      return AllElementsAreLiterals(seqDisplay.Elements);
+    }
+    if (expr is SetDisplayExpr setDisplay) {
+      return AllElementsAreLiterals(setDisplay.Elements);
+    }
+    if (expr is MultiSetDisplayExpr multiSetDisplay) {
+      return AllElementsAreLiterals(multiSetDisplay.Elements);
     }
     return false;
   }
@@ -556,6 +917,12 @@ internal sealed class PartialEvaluatorEngine {
     }
     if (left is SeqDisplayExpr leftSeq && right is SeqDisplayExpr rightSeq) {
       return SeqDisplayLiteralsEqual(leftSeq, rightSeq);
+    }
+    if (left is SetDisplayExpr leftSet && right is SetDisplayExpr rightSet) {
+      return SetDisplayLiteralsEqual(leftSet, rightSet);
+    }
+    if (left is MultiSetDisplayExpr leftMulti && right is MultiSetDisplayExpr rightMulti) {
+      return MultiSetDisplayLiteralsEqual(leftMulti, rightMulti);
     }
     return false;
   }
@@ -582,6 +949,85 @@ internal sealed class PartialEvaluatorEngine {
       }
     }
     return true;
+  }
+
+  private static bool SetDisplayLiteralsEqual(SetDisplayExpr left, SetDisplayExpr right) {
+    if (left.Elements.Count == 0 && right.Elements.Count == 0) {
+      return true;
+    }
+    if (!AllElementsAreLiterals(left.Elements) || !AllElementsAreLiterals(right.Elements)) {
+      return false;
+    }
+    var leftDistinct = DistinctLiteralElements(left.Elements);
+    var rightDistinct = DistinctLiteralElements(right.Elements);
+    if (leftDistinct.Count != rightDistinct.Count) {
+      return false;
+    }
+    foreach (var element in leftDistinct) {
+      if (!ContainsLiteralElement(rightDistinct, element)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static bool MultiSetDisplayLiteralsEqual(MultiSetDisplayExpr left, MultiSetDisplayExpr right) {
+    if (!AllElementsAreLiterals(left.Elements) || !AllElementsAreLiterals(right.Elements)) {
+      return false;
+    }
+    var leftCounts = BuildMultisetCounts(left.Elements);
+    var rightCounts = BuildMultisetCounts(right.Elements);
+    if (leftCounts.Count != rightCounts.Count) {
+      return false;
+    }
+    foreach (var entry in leftCounts) {
+      var match = rightCounts.FirstOrDefault(candidate => AreLiteralExpressionsEqual(entry.Element, candidate.Element));
+      if (match == null || match.Count != entry.Count) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static List<Expression> DistinctLiteralElements(IEnumerable<Expression> elements) {
+    var distinct = new List<Expression>();
+    foreach (var element in elements) {
+      if (!ContainsLiteralElement(distinct, element)) {
+        distinct.Add(element);
+      }
+    }
+    return distinct;
+  }
+
+  private static bool ContainsLiteralElement(List<Expression> elements, Expression candidate) {
+    foreach (var existing in elements) {
+      if (AreLiteralExpressionsEqual(existing, candidate)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private sealed class MultisetElementCount {
+    public MultisetElementCount(Expression element) {
+      Element = element;
+    }
+
+    public Expression Element { get; }
+    public int Count { get; set; }
+  }
+
+  private static List<MultisetElementCount> BuildMultisetCounts(IEnumerable<Expression> elements) {
+    var counts = new List<MultisetElementCount>();
+    foreach (var element in elements) {
+      var existing = counts.FirstOrDefault(entry => AreLiteralExpressionsEqual(entry.Element, element));
+      if (existing == null) {
+        counts.Add(new MultisetElementCount(element) { Count = 1 });
+      } else {
+        existing.Count++;
+      }
+    }
+    return counts;
   }
 
   private static bool SeqDisplayIsPrefix(SeqDisplayExpr left, SeqDisplayExpr right, out bool isProper) {
@@ -1194,6 +1640,23 @@ internal sealed class PartialEvaluatorEngine {
               return false;
             }
           }
+          if (unary.ResolvedOp == UnaryOpExpr.ResolvedOpcode.SetCard) {
+            if (TryGetSetDisplayLiteral(unary.E, out var display)) {
+              if (display.Elements.Count <= 1 || AllElementsAreLiterals(display.Elements)) {
+                var distinct = DistinctLiteralElements(display.Elements);
+                result = CreateIntLiteral(unary.Origin, distinct.Count, unary.Type);
+                SetReplacement(unary, result);
+                return false;
+              }
+            }
+          }
+          if (unary.ResolvedOp == UnaryOpExpr.ResolvedOpcode.MultiSetCard) {
+            if (TryGetMultiSetDisplayLiteral(unary.E, out var display)) {
+              result = CreateIntLiteral(unary.Origin, display.Elements.Count, unary.Type);
+              SetReplacement(unary, result);
+              return false;
+            }
+          }
           return false;
         case BinaryExpr binary:
           binary.E0 = SimplifyExpression(binary.E0, state);
@@ -1264,6 +1727,16 @@ internal sealed class PartialEvaluatorEngine {
         case SeqDisplayExpr seqDisplayExpr:
           for (var i = 0; i < seqDisplayExpr.Elements.Count; i++) {
             seqDisplayExpr.Elements[i] = SimplifyExpression(seqDisplayExpr.Elements[i], state);
+          }
+          return false;
+        case SetDisplayExpr setDisplayExpr:
+          for (var i = 0; i < setDisplayExpr.Elements.Count; i++) {
+            setDisplayExpr.Elements[i] = SimplifyExpression(setDisplayExpr.Elements[i], state);
+          }
+          return false;
+        case MultiSetDisplayExpr multiSetDisplayExpr:
+          for (var i = 0; i < multiSetDisplayExpr.Elements.Count; i++) {
+            multiSetDisplayExpr.Elements[i] = SimplifyExpression(multiSetDisplayExpr.Elements[i], state);
           }
           return false;
         case SeqSelectExpr seqSelectExpr:
