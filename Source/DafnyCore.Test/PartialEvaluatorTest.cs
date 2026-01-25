@@ -430,6 +430,88 @@ method Entry() {
   }
 
   [Fact]
+  public async Task PartialEvaluation_FoldsStringOperations() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+function Entry(): bool {
+  (""a"" + ""b"") == ""ab"" &&
+  |""abc""| == 3 &&
+  |""a\nb""| == 3 &&
+  ""abc""[1] == 'b' &&
+  ""a\nb""[1] == '\n' &&
+  ""abcdef""[1..4] == ""bcd"" &&
+  ""a\nb""[1..2] == ""\n"" &&
+  ""abc""[..2] == ""ab"" &&
+  ""abc""[1..] == ""bc"" &&
+  ""ab"" <= ""abcd"" &&
+  ""ab"" < ""abcd"" &&
+  ""abcd"" != ""ab""
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Function>().Where(f => f.Name == "Entry"));
+    Assert.NotNull(entry.Body);
+
+    Assert.True(Expression.IsBoolLiteral(entry.Body!, out var value) && value);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_FoldsSeqDisplayOperations() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+function Entry(): bool {
+  ([1, 2] + [3]) == [1, 2, 3] &&
+  |[1, 2, 3]| == 3 &&
+  [1, 2, 3][1] == 2 &&
+  [1, 2, 3][1..] == [2, 3] &&
+  [1, 2, 3][..2] == [1, 2] &&
+  [1, 2] <= [1, 2, 3] &&
+  [1, 2] < [1, 2, 3] &&
+  [1, 2, 3] != [1, 2]
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Function>().Where(f => f.Name == "Entry"));
+    Assert.NotNull(entry.Body);
+
+    Assert.True(Expression.IsBoolLiteral(entry.Body!, out var value) && value);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_FoldsNestedSeqDisplayOperations() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+function Entry(): bool {
+  ([[1], [2, 3]] + [[4]]) == [[1], [2, 3], [4]] &&
+  |[[1], [2, 3]]| == 2 &&
+  [[1], [2, 3]][1] == [2, 3] &&
+  [[1], [2, 3]][..1] == [[1]] &&
+  [[1]] < [[1], [2, 3]]
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Function>().Where(f => f.Name == "Entry"));
+    Assert.NotNull(entry.Body);
+
+    Assert.True(Expression.IsBoolLiteral(entry.Body!, out var value) && value);
+  }
+
+  [Fact]
   public async Task PartialEvaluation_SimplifiesExactLetExpr() {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
