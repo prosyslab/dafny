@@ -348,6 +348,13 @@ internal sealed class PartialEvaluatorEngine {
     if (TryGetCharLiteral(binary.E0, out var leftChar) && TryGetCharLiteral(binary.E1, out var rightChar)) {
       return CreateBoolLiteral(binary.Origin, isEq ? leftChar == rightChar : leftChar != rightChar);
     }
+    if (TryGetTupleLiteral(binary.E0, out var leftTuple) &&
+        TryGetTupleLiteral(binary.E1, out var rightTuple) &&
+        AllElementsAreLiterals(leftTuple.Arguments) &&
+        AllElementsAreLiterals(rightTuple.Arguments)) {
+      var equal = TupleLiteralsEqual(leftTuple, rightTuple);
+      return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
+    }
     return binary;
   }
 
@@ -877,6 +884,17 @@ internal sealed class PartialEvaluatorEngine {
     return display != null;
   }
 
+  private static bool TryGetTupleLiteral(Expression expr, out DatatypeValue tuple) {
+    tuple = expr as DatatypeValue;
+    if (tuple == null) {
+      return false;
+    }
+    if (tuple.Ctor?.EnclosingDatatype is TupleTypeDecl) {
+      return true;
+    }
+    return tuple.MemberName.StartsWith(SystemModuleManager.TupleTypeCtorNamePrefix, StringComparison.Ordinal);
+  }
+
   private static bool AllElementsAreLiterals(SeqDisplayExpr display) {
     return AllElementsAreLiterals(display.Elements);
   }
@@ -915,10 +933,16 @@ internal sealed class PartialEvaluatorEngine {
     if (expr is MapDisplayExpr mapDisplay) {
       return AllElementsAreLiterals(mapDisplay);
     }
+    if (TryGetTupleLiteral(expr, out var tuple)) {
+      return AllElementsAreLiterals(tuple.Arguments);
+    }
     return false;
   }
 
   private static bool AreLiteralExpressionsEqual(Expression left, Expression right) {
+    if (TryGetCharLiteral(left, out var leftChar) && TryGetCharLiteral(right, out var rightChar)) {
+      return leftChar == rightChar;
+    }
     if (left is LiteralExpr leftLiteral && right is LiteralExpr rightLiteral) {
       return Equals(leftLiteral.Value, rightLiteral.Value);
     }
@@ -930,6 +954,9 @@ internal sealed class PartialEvaluatorEngine {
     }
     if (left is MultiSetDisplayExpr leftMulti && right is MultiSetDisplayExpr rightMulti) {
       return MultiSetDisplayLiteralsEqual(leftMulti, rightMulti);
+    }
+    if (TryGetTupleLiteral(left, out var leftTuple) && TryGetTupleLiteral(right, out var rightTuple)) {
+      return TupleLiteralsEqual(leftTuple, rightTuple);
     }
     return false;
   }
@@ -952,6 +979,18 @@ internal sealed class PartialEvaluatorEngine {
     }
     for (var i = 0; i < left.Elements.Count; i++) {
       if (!AreLiteralExpressionsEqual(left.Elements[i], right.Elements[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static bool TupleLiteralsEqual(DatatypeValue left, DatatypeValue right) {
+    if (left.Arguments.Count != right.Arguments.Count) {
+      return false;
+    }
+    for (var i = 0; i < left.Arguments.Count; i++) {
+      if (!AreLiteralExpressionsEqual(left.Arguments[i], right.Arguments[i])) {
         return false;
       }
     }
@@ -1691,6 +1730,16 @@ internal sealed class PartialEvaluatorEngine {
             return false;
           }
           return false;
+        case MemberSelectExpr memberSelectExpr: {
+            memberSelectExpr.Obj = SimplifyExpression(memberSelectExpr.Obj, state);
+            if (TryGetTupleLiteral(memberSelectExpr.Obj, out var tuple) &&
+                int.TryParse(memberSelectExpr.MemberName, out var tupleIndex) &&
+                0 <= tupleIndex && tupleIndex < tuple.Arguments.Count &&
+                IsLiteralLike(tuple.Arguments[tupleIndex])) {
+              SetReplacement(memberSelectExpr, tuple.Arguments[tupleIndex]);
+            }
+            return false;
+          }
         case QuantifierExpr quantifierExpr:
           quantifierExpr.Range = quantifierExpr.Range == null
             ? null
@@ -1734,6 +1783,11 @@ internal sealed class PartialEvaluatorEngine {
         case SeqDisplayExpr seqDisplayExpr:
           for (var i = 0; i < seqDisplayExpr.Elements.Count; i++) {
             seqDisplayExpr.Elements[i] = SimplifyExpression(seqDisplayExpr.Elements[i], state);
+          }
+          return false;
+        case DatatypeValue datatypeValue:
+          for (var i = 0; i < datatypeValue.Arguments.Count; i++) {
+            datatypeValue.Arguments[i] = SimplifyExpression(datatypeValue.Arguments[i], state);
           }
           return false;
         case SetDisplayExpr setDisplayExpr:
