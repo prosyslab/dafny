@@ -787,4 +787,30 @@ method Entry() {
 
     Assert.All(asserts, assertStmt => Assert.True(Expression.IsBoolLiteral(assertStmt.Expr, out var value) && value));
   }
+
+  [Fact]
+  public async Task PartialEvaluation_FoldsTupleOperations_NestedCollections() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+function Entry(): bool {
+  (1, 2) == (1, 2) &&
+  (1, 2).0 == 1 &&
+  (1, (2, 3)).1.0 == 2 &&
+  [ (1, 2) ] < [ (1, 2), (3, 4) ] &&
+  [ (1, 2), (3, 4) ][1].0 == 3 &&
+  ([1, 2], [3]) == ([1, 2], [3]) &&
+  ([1, 2], [3]).0[1] == 2
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Function>().Where(f => f.Name == "Entry"));
+    Assert.NotNull(entry.Body);
+
+    Assert.True(Expression.IsBoolLiteral(entry.Body!, out var value) && value);
+  }
 }
