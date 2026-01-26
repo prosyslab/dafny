@@ -92,6 +92,7 @@ internal sealed class PartialEvaluatorEngine {
   }
 
   private Expression SimplifyBinary(BinaryExpr binary) {
+    // Print the content of the binary object for debugging
     switch (binary.ResolvedOp) {
       case BinaryExpr.ResolvedOpcode.And:
         return SimplifyBooleanBinary(binary);
@@ -720,6 +721,11 @@ internal sealed class PartialEvaluatorEngine {
     for (var i = 0; i < callExpr.Args.Count; i++) {
       var simplifiedArg = visitor.SimplifyExpression(callExpr.Args[i], state.WithDepth(0));
       callExpr.Args[i] = simplifiedArg;
+      // Keep ActualBindings.ArgumentBindings in sync with the resolved argument list, so
+      // Expression.ToString() (which uses the non-resolved printer by default) reflects the rewrite.
+      if (i < callExpr.Bindings.ArgumentBindings.Count) {
+        callExpr.Bindings.ArgumentBindings[i].Actual = simplifiedArg;
+      }
       if (!IsLiteralLike(simplifiedArg)) {
         allLiteralArgs = false;
       }
@@ -1723,7 +1729,11 @@ internal sealed class PartialEvaluatorEngine {
         case FunctionCallExpr callExpr:
           callExpr.Receiver = SimplifyExpression(callExpr.Receiver, state);
           for (var i = 0; i < callExpr.Args.Count; i++) {
-            callExpr.Args[i] = SimplifyExpression(callExpr.Args[i], state);
+            var simplifiedArg = SimplifyExpression(callExpr.Args[i], state);
+            callExpr.Args[i] = simplifiedArg;
+            if (i < callExpr.Bindings.ArgumentBindings.Count) {
+              callExpr.Bindings.ArgumentBindings[i].Actual = simplifiedArg;
+            }
           }
           if (state.Depth > 0 && engine.TryInlineCall(callExpr, state, this, out var inlined)) {
             SetReplacement(callExpr, inlined);
@@ -1787,7 +1797,13 @@ internal sealed class PartialEvaluatorEngine {
           return false;
         case DatatypeValue datatypeValue:
           for (var i = 0; i < datatypeValue.Arguments.Count; i++) {
-            datatypeValue.Arguments[i] = SimplifyExpression(datatypeValue.Arguments[i], state);
+            var simplifiedArg = SimplifyExpression(datatypeValue.Arguments[i], state);
+            datatypeValue.Arguments[i] = simplifiedArg;
+            // Keep ActualBindings.ArgumentBindings in sync with the resolved argument list, so
+            // Expression.ToString() (which uses the non-resolved printer by default) reflects the rewrite.
+            if (i < datatypeValue.Bindings.ArgumentBindings.Count) {
+              datatypeValue.Bindings.ArgumentBindings[i].Actual = simplifiedArg;
+            }
           }
           return false;
         case SetDisplayExpr setDisplayExpr:
