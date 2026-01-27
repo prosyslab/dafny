@@ -52,11 +52,13 @@ public class PartialEvaluator : IRewriter {
 }
 
 internal sealed class PartialEvaluatorEngine {
+  private const uint DefaultPartialEvalUnrollCap = 100;
   private readonly DafnyOptions options;
   private readonly ModuleDefinition module;
   private readonly SystemModuleManager systemModuleManager;
   private readonly uint inlineDepth;
   private readonly Dictionary<string, CachedLiteral> inlineCallCache = new(StringComparer.Ordinal);
+  private UnrollBoundedQuantifiersRewriter.UnrollEngine boundedQuantifierUnroller;
 
   public PartialEvaluatorEngine(DafnyOptions options, ModuleDefinition module, SystemModuleManager systemModuleManager, uint inlineDepth) {
     this.options = options;
@@ -82,6 +84,38 @@ internal sealed class PartialEvaluatorEngine {
     var state = new PartialEvalState((int)inlineDepth, new HashSet<Function>(), new HashSet<string>(StringComparer.Ordinal));
     var visitor = new PartialEvaluatorVisitor(this, inlineCallCache);
     return visitor.SimplifyExpression(expr, state);
+  }
+
+  private uint GetPartialEvalUnrollCap() {
+    return options.Options.OptionArguments.ContainsKey(CommonOptionBag.UnrollBoundedQuantifiers)
+      ? options.Get(CommonOptionBag.UnrollBoundedQuantifiers)
+      : DefaultPartialEvalUnrollCap;
+  }
+
+  private UnrollBoundedQuantifiersRewriter.UnrollEngine GetQuantifierUnroller() {
+    if (boundedQuantifierUnroller != null) {
+      return boundedQuantifierUnroller;
+    }
+    var maxInstances = GetPartialEvalUnrollCap();
+    boundedQuantifierUnroller = new UnrollBoundedQuantifiersRewriter.UnrollEngine(systemModuleManager, maxInstances, this);
+    return boundedQuantifierUnroller;
+  }
+
+  internal bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, out Expression rewritten) {
+    return GetQuantifierUnroller().TryUnrollQuantifier(quantifierExpr, out rewritten);
+  }
+
+  internal bool TryMaterializeSetComprehension(SetComprehension setComprehension, out SetDisplayExpr displayExpr) {
+    displayExpr = null;
+    if (!setComprehension.Finite) {
+      return false;
+    }
+    var unroller = GetQuantifierUnroller();
+    if (!unroller.TryMaterializeSetComprehension(setComprehension, out var elements)) {
+      return false;
+    }
+    displayExpr = new SetDisplayExpr(setComprehension.Origin, true, elements) { Type = setComprehension.Type };
+    return true;
   }
 
   private static void AssertHasResolvedType(Expression expr) {
@@ -1301,7 +1335,7 @@ internal sealed class PartialEvaluatorEngine {
         return;
       }
 
-      // For var declarations, we only record locals that are initialized to int/bool literals.
+      // For var declarations, we only record locals that are initialized to literal-like expressions.
       // This stays conservative and avoids having to define general value semantics.
       var resolvedStatements = assignStatement.ResolvedStatements;
       if (resolvedStatements == null) {
@@ -1326,11 +1360,8 @@ internal sealed class PartialEvaluatorEngine {
           continue;
         }
 
-        if (exprRhs.Expr is not LiteralExpr literal) {
-          continue;
-        }
-
-        if (!ConstValue.TryCreate(literal, out var constValue)) {
+        var rhsExpr = exprRhs.Expr;
+        if (!ConstValue.TryCreate(rhsExpr, out var constValue)) {
           continue;
         }
 
@@ -1668,7 +1699,7 @@ internal sealed class PartialEvaluatorEngine {
           return false;
         case IdentifierExpr identifierExpr:
           if (identifierExpr.Var != null && TryLookupConst(identifierExpr.Var, out var constValue)) {
-            result = constValue.CreateLiteral(identifierExpr.Origin, identifierExpr.Type);
+            result = constValue.CreateExpression(identifierExpr.Type);
             SetReplacement(identifierExpr, result);
           }
           return false;
@@ -1735,6 +1766,10 @@ internal sealed class PartialEvaluatorEngine {
               callExpr.Bindings.ArgumentBindings[i].Actual = simplifiedArg;
             }
           }
+          if (TrySimplifyArbitraryElement(callExpr, out var simplifiedElement)) {
+            SetReplacement(callExpr, simplifiedElement);
+            return false;
+          }
           if (state.Depth > 0 && engine.TryInlineCall(callExpr, state, this, out var inlined)) {
             SetReplacement(callExpr, inlined);
             return false;
@@ -1756,6 +1791,29 @@ internal sealed class PartialEvaluatorEngine {
             : SimplifyExpression(quantifierExpr.Range, state);
           quantifierExpr.Term = SimplifyExpression(quantifierExpr.Term, state);
           quantifierExpr.Bounds = SimplifyBounds(quantifierExpr.Bounds, state);
+          if (engine.TryUnrollQuantifier(quantifierExpr, out var unrolled)) {
+            SetReplacement(quantifierExpr, unrolled);
+            return false;
+          }
+          return false;
+        case SetComprehension setComprehension:
+          setComprehension.Range = SimplifyExpression(setComprehension.Range, state);
+          setComprehension.Term = SimplifyExpression(setComprehension.Term, state);
+          setComprehension.Bounds = SimplifyBounds(setComprehension.Bounds, state);
+          if (engine.TryMaterializeSetComprehension(setComprehension, out var setDisplay)) {
+            SetReplacement(setComprehension, setDisplay);
+          }
+          return false;
+        case MapComprehension mapComprehension:
+          mapComprehension.Range = SimplifyExpression(mapComprehension.Range, state);
+          mapComprehension.Term = SimplifyExpression(mapComprehension.Term, state);
+          if (mapComprehension.TermLeft != null) {
+            mapComprehension.TermLeft = SimplifyExpression(mapComprehension.TermLeft, state);
+          }
+          mapComprehension.Bounds = SimplifyBounds(mapComprehension.Bounds, state);
+          if (TryMaterializeMapComprehension(mapComprehension, state, out var mapDisplay)) {
+            SetReplacement(mapComprehension, mapDisplay);
+          }
           return false;
         case LetExpr letExpr:
           for (var i = 0; i < letExpr.RHSs.Count; i++) {
@@ -1771,7 +1829,7 @@ internal sealed class PartialEvaluatorEngine {
                   allLiteral = false;
                   continue;
                 }
-                if (letExpr.RHSs[i] is LiteralExpr literal && ConstValue.TryCreate(literal, out var letConstValue)) {
+                if (ConstValue.TryCreate(letExpr.RHSs[i], out var letConstValue)) {
                   SetConst(boundVar, letConstValue);
                 } else {
                   allLiteral = false;
@@ -1793,6 +1851,16 @@ internal sealed class PartialEvaluatorEngine {
         case SeqDisplayExpr seqDisplayExpr:
           for (var i = 0; i < seqDisplayExpr.Elements.Count; i++) {
             seqDisplayExpr.Elements[i] = SimplifyExpression(seqDisplayExpr.Elements[i], state);
+          }
+          return false;
+        case StmtExpr stmtExpr:
+          EnterScope();
+          try {
+            Visit(stmtExpr.S, state);
+            stmtExpr.E = SimplifyExpression(stmtExpr.E, state);
+          }
+          finally {
+            ExitScope();
           }
           return false;
         case DatatypeValue datatypeValue:
@@ -1870,6 +1938,138 @@ internal sealed class PartialEvaluatorEngine {
         default:
           return false;
       }
+    }
+
+    private bool TryMaterializeMapComprehension(MapComprehension mapComprehension, PartialEvalState state, out MapDisplayExpr mapDisplayExpr) {
+      mapDisplayExpr = null;
+      if (!mapComprehension.Finite) {
+        return false;
+      }
+      if (mapComprehension.Bounds == null || mapComprehension.Bounds.Count != mapComprehension.BoundVars.Count) {
+        return false;
+      }
+
+      var unroller = engine.GetQuantifierUnroller();
+      var domains = new UnrollBoundedQuantifiersRewriter.UnrollEngine.ConcreteDomain[mapComprehension.BoundVars.Count];
+      for (var i = 0; i < mapComprehension.BoundVars.Count; i++) {
+        var bv = mapComprehension.BoundVars[i];
+        var bound = mapComprehension.Bounds[i];
+        if (!unroller.TryGetConcreteDomain(bv, bound, out var domain)) {
+          return false;
+        }
+        domains[i] = domain;
+      }
+
+      var cap = unroller.MaxInstances;
+      if (cap > 0) {
+        var size = BigInteger.One;
+        foreach (var domain in domains) {
+          size *= domain.Size;
+          if (size > cap) {
+            return false;
+          }
+        }
+      }
+
+      var entries = new List<MapDisplayEntry>();
+      var substMap = new Dictionary<IVariable, Expression>();
+      var typeMap = new Dictionary<TypeParameter, Type>();
+
+      var keyTemplate = mapComprehension.TermLeft;
+      if (keyTemplate == null) {
+        if (mapComprehension.BoundVars.Count != 1) {
+          return false;
+        }
+        keyTemplate = new IdentifierExpr(mapComprehension.Origin, mapComprehension.BoundVars[0].Name) {
+          Var = mapComprehension.BoundVars[0],
+          Type = mapComprehension.BoundVars[0].Type
+        };
+      }
+
+      bool Enumerate(int varIndex) {
+        if (varIndex == domains.Length) {
+          if (cap > 0 && entries.Count >= cap) {
+            return false;
+          }
+          var substituter = new Substituter(null, substMap, typeMap);
+          if (mapComprehension.Range != null) {
+            var rangeInst = SimplifyExpression(substituter.Substitute(mapComprehension.Range), state);
+            rangeInst = UnrollBoundedQuantifiersRewriter.UnrollEngine.StripConcreteSyntax(rangeInst);
+            if (!Expression.IsBoolLiteral(rangeInst, out var rangeValue)) {
+              return false;
+            }
+            if (!rangeValue) {
+              return true;
+            }
+          }
+
+          var keyExpr = SimplifyExpression(substituter.Substitute(keyTemplate), state);
+          keyExpr = UnrollBoundedQuantifiersRewriter.UnrollEngine.StripConcreteSyntax(keyExpr);
+          if (!IsLiteralLike(keyExpr)) {
+            return false;
+          }
+
+          var valueExpr = SimplifyExpression(substituter.Substitute(mapComprehension.Term), state);
+          valueExpr = UnrollBoundedQuantifiersRewriter.UnrollEngine.StripConcreteSyntax(valueExpr);
+
+          for (var i = 0; i < entries.Count; i++) {
+            if (AreLiteralExpressionsEqual(entries[i].A, keyExpr)) {
+              if (!AreLiteralExpressionsEqual(entries[i].B, valueExpr)) {
+                return false;
+              }
+              return true;
+            }
+          }
+
+          entries.Add(new MapDisplayEntry(keyExpr, valueExpr));
+          return true;
+        }
+
+        var bv = mapComprehension.BoundVars[varIndex];
+        foreach (var value in domains[varIndex].Enumerate()) {
+          if (cap > 0 && entries.Count >= cap) {
+            return false;
+          }
+          UnrollBoundedQuantifiersRewriter.UnrollEngine.EnsureExpressionType(value, bv.Type);
+          substMap[bv] = value;
+          if (!Enumerate(varIndex + 1)) {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      if (!Enumerate(0)) {
+        return false;
+      }
+
+      mapDisplayExpr = new MapDisplayExpr(mapComprehension.Origin, true, entries) { Type = mapComprehension.Type };
+      return true;
+    }
+
+    private static bool TrySimplifyArbitraryElement(FunctionCallExpr callExpr, out Expression simplified) {
+      simplified = null;
+      if (callExpr.Function == null || !string.Equals(callExpr.Function.Name, "ArbitraryElement", StringComparison.Ordinal)) {
+        return false;
+      }
+      if (callExpr.Args.Count != 1) {
+        return false;
+      }
+      if (!TryGetSetDisplayLiteral(callExpr.Args[0], out var setDisplay)) {
+        return false;
+      }
+      if (!AllElementsAreLiterals(setDisplay.Elements)) {
+        return false;
+      }
+      var distinct = DistinctLiteralElements(setDisplay.Elements);
+      if (distinct.Count != 1) {
+        return false;
+      }
+      simplified = distinct[0];
+      if (simplified.Type == null) {
+        simplified.Type = callExpr.Type;
+      }
+      return true;
     }
 
     private static bool TryGetSliceBounds(SeqSelectExpr expr, int length, out int start, out int end) {
@@ -1951,34 +2151,32 @@ internal sealed class PartialEvaluatorEngine {
       }
     }
 
-    private readonly record struct ConstValue(CachedLiteralKind Kind, BigInteger IntValue, bool BoolValue) {
-      public static bool TryCreate(LiteralExpr literal, out ConstValue cached) {
-        cached = default;
-        if (literal == null) {
-          return false;
-        }
+    private readonly record struct ConstValue {
+      private readonly Expression expr;
 
-        if (Expression.IsIntLiteral(literal, out var intValue)) {
-          cached = new ConstValue(CachedLiteralKind.Int, intValue, default);
-          return true;
-        }
-
-        if (Expression.IsBoolLiteral(literal, out var boolValue)) {
-          cached = new ConstValue(CachedLiteralKind.Bool, default, boolValue);
-          return true;
-        }
-
-        return false;
+      private ConstValue(Expression expr) {
+        this.expr = expr;
       }
 
-      public Expression CreateLiteral(IOrigin origin, Type type) {
-        // Preserve the resolved type from the original use site to avoid introducing null/incorrect types
-        // (for example, when the variable is a subset type).
-        return Kind switch {
-          CachedLiteralKind.Int => new LiteralExpr(origin, IntValue) { Type = type },
-          CachedLiteralKind.Bool => new LiteralExpr(origin, BoolValue) { Type = type },
-          _ => null
-        };
+      public static bool TryCreate(Expression expression, out ConstValue cached) {
+        cached = default;
+        if (expression == null) {
+          return false;
+        }
+        if (!IsLiteralLike(expression)) {
+          return false;
+        }
+        cached = new ConstValue(expression);
+        return true;
+      }
+
+      public Expression CreateExpression(Type type) {
+        var cloner = new Cloner(cloneResolvedFields: true);
+        var clone = cloner.CloneExpr(expr);
+        if (clone.Type == null) {
+          clone.Type = type;
+        }
+        return clone;
       }
     }
   }
