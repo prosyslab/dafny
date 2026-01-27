@@ -243,6 +243,23 @@ public class UnrollBoundedQuantifiersTest {
 
   private static object CreateUnrollEngine(Program program, uint maxInstances) {
     var rewriterType = typeof(UnrollBoundedQuantifiersRewriter);
+    var partialEvaluatorType = rewriterType.Assembly.GetType("Microsoft.Dafny.PartialEvaluatorEngine");
+    if (partialEvaluatorType == null) {
+      throw new InvalidOperationException("PartialEvaluatorEngine type not found via reflection.");
+    }
+    var partialEvaluatorCtor = partialEvaluatorType.GetConstructor(
+      BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+      binder: null,
+      new[] { typeof(DafnyOptions), typeof(ModuleDefinition), typeof(SystemModuleManager), typeof(uint) },
+      modifiers: null);
+    if (partialEvaluatorCtor == null) {
+      throw new InvalidOperationException("PartialEvaluatorEngine constructor not found via reflection.");
+    }
+    var inlineDepth = program.Options.Get(CommonOptionBag.PartialEvalInlineDepth);
+    var partialEvaluator = partialEvaluatorCtor.Invoke(new object[] {
+      program.Options, program.DefaultModuleDef, program.SystemModuleManager, inlineDepth
+    });
+
     var engineType = rewriterType
       .GetNestedType("UnrollEngine", BindingFlags.Public | BindingFlags.NonPublic)
       ?? rewriterType.Assembly.GetTypes()
@@ -254,12 +271,12 @@ public class UnrollBoundedQuantifiersTest {
     var ctor = resolvedEngineType.GetConstructor(
       BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
       binder: null,
-      new[] { typeof(SystemModuleManager), typeof(uint) },
+      new[] { typeof(SystemModuleManager), typeof(uint), partialEvaluatorType },
       modifiers: null);
     if (ctor == null) {
       throw new InvalidOperationException("UnrollEngine constructor not found via reflection.");
     }
-    return ctor.Invoke(new object[] { program.SystemModuleManager, maxInstances });
+    return ctor.Invoke(new object[] { program.SystemModuleManager, maxInstances, partialEvaluator });
   }
 
   private static Expression InvokeRewriteExpr(object engine, Expression expr) {

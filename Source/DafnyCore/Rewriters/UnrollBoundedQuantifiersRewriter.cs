@@ -35,13 +35,8 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
   internal sealed class UnrollEngine {
     private readonly SystemModuleManager systemModuleManager;
     private readonly uint maxInstances;
-    private readonly PartialEvaluatorEngine? partialEvaluator;
-
-    internal UnrollEngine(SystemModuleManager systemModuleManager, uint maxInstances) {
-      this.systemModuleManager = systemModuleManager ?? throw new ArgumentNullException(nameof(systemModuleManager));
-      this.maxInstances = maxInstances;
-      this.partialEvaluator = null;
-    }
+    private readonly PartialEvaluatorEngine partialEvaluator;
+    internal uint MaxInstances => maxInstances;
 
     internal UnrollEngine(SystemModuleManager systemModuleManager, uint maxInstances, PartialEvaluatorEngine partialEvaluator) {
       this.systemModuleManager = systemModuleManager ?? throw new ArgumentNullException(nameof(systemModuleManager));
@@ -481,7 +476,7 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
       return quantifierExpr;
     }
 
-    private bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, out Expression rewritten) {
+    internal bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, out Expression rewritten) {
       rewritten = quantifierExpr;
 
       if (quantifierExpr.SplitQuantifier != null || quantifierExpr.SplitQuantifierExpression != null) {
@@ -566,9 +561,7 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
         if (varIndex == domains.Length) {
           var substituter = new Substituter(null, substMap, typeMap);
           var inst = substituter.Substitute(logicalBody);
-          inst = partialEvaluator == null
-            ? PartialEvaluatorEngine.SimplifyBooleanExpression(inst)
-            : partialEvaluator.SimplifyExpression(inst);
+          inst = partialEvaluator.SimplifyExpression(inst);
           AddInstance(inst);
           return;
         }
@@ -591,7 +584,7 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
       return true;
     }
 
-    private sealed class ConcreteDomain {
+    internal sealed class ConcreteDomain {
       public BigInteger Size { get; }
       private readonly Func<IEnumerable<Expression>> enumeratorFactory;
 
@@ -603,13 +596,13 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
       public IEnumerable<Expression> Enumerate() => enumeratorFactory();
     }
 
-    private static void EnsureExpressionType(Expression expr, Type type) {
+    internal static void EnsureExpressionType(Expression expr, Type type) {
       if (expr.Type == null) {
         expr.Type = type;
       }
     }
 
-    private static Expression StripConcreteSyntax(Expression expr) {
+    internal static Expression StripConcreteSyntax(Expression expr) {
       if (expr is ConcreteSyntaxExpression concreteSyntaxExpression && concreteSyntaxExpression.ResolvedExpression != null) {
         return concreteSyntaxExpression.ResolvedExpression;
       }
@@ -635,7 +628,7 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
       }
     }
 
-    private bool TryGetConcreteDomain(BoundVar bv, BoundedPool? bound, out ConcreteDomain domain) {
+    internal bool TryGetConcreteDomain(BoundVar bv, BoundedPool? bound, out ConcreteDomain domain) {
       domain = null!;
 
       if (bound == null) {
@@ -738,7 +731,7 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
       current.RemoveAt(current.Count - 1);
     }
 
-    private bool TryMaterializeSetElements(Expression setExpr, uint? maxInstances, out List<Expression> elements) {
+    internal bool TryMaterializeSetElements(Expression setExpr, uint? maxInstances, out List<Expression> elements) {
       elements = null!;
 
       var resolved = StripConcreteSyntax(setExpr);
@@ -752,13 +745,13 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
       }
 
       if (resolved is SetComprehension setComprehension) {
-        return TryMaterializeSetComprehension(setComprehension, maxInstances, out elements);
+        return TryMaterializeSetComprehension(setComprehension, out elements);
       }
 
       return false;
     }
 
-    private bool TryMaterializeSetComprehension(SetComprehension setComprehension, uint? maxInstances, out List<Expression> elements) {
+    internal bool TryMaterializeSetComprehension(SetComprehension setComprehension, out List<Expression> elements) {
       elements = null!;
 
       if (!setComprehension.Finite) {
@@ -768,20 +761,24 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
         return false;
       }
 
-      if (maxInstances.HasValue && TryGetSetComprehensionUpperBound(setComprehension, out var upperBound)) {
-        if (upperBound > maxInstances.Value) {
-          return false;
-        }
-      }
-
-      var domains = new (BigInteger Lower, BigInteger Upper, Type VarType)[setComprehension.BoundVars.Count];
+      var domains = new ConcreteDomain[setComprehension.BoundVars.Count];
       for (var i = 0; i < setComprehension.BoundVars.Count; i++) {
         var bv = setComprehension.BoundVars[i];
         var bound = setComprehension.Bounds[i];
-        if (!TryGetConcreteIntDomain(bv, bound, out var lower, out var upper)) {
+        if (!TryGetConcreteDomain(bv, bound, out var domain)) {
           return false;
         }
-        domains[i] = (lower, upper, bv.Type);
+        domains[i] = domain;
+      }
+
+      if (maxInstances > 0) {
+        var size = BigInteger.One;
+        foreach (var domain in domains) {
+          size *= domain.Size;
+          if (size > maxInstances) {
+            return false;
+          }
+        }
       }
 
       var results = new List<Expression>();
@@ -792,7 +789,7 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
 
       bool Enumerate(int varIndex) {
         if (varIndex == domains.Length) {
-          if (maxInstances.HasValue && results.Count >= maxInstances.Value) {
+          if (maxInstances > 0 && results.Count >= maxInstances) {
             return false;
           }
           var substituter = new Substituter(null, substMap, typeMap);
@@ -807,15 +804,16 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
             }
           }
 
-          var termInst = StripConcreteSyntax(substituter.Substitute(term));
+          var termInst = SimplifyForMaterialization(substituter.Substitute(term));
+          termInst = StripConcreteSyntax(termInst);
           results.Add(termInst);
           return true;
         }
 
-        var (lower, upper, varType) = domains[varIndex];
         var bv = setComprehension.BoundVars[varIndex];
-        for (var v = lower; v < upper; v++) {
-          substMap[bv] = new LiteralExpr(bv.Origin, v) { Type = varType };
+        foreach (var value in domains[varIndex].Enumerate()) {
+          EnsureExpressionType(value, bv.Type);
+          substMap[bv] = value;
           if (!Enumerate(varIndex + 1)) {
             return false;
           }
@@ -838,9 +836,7 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
     }
 
     private Expression SimplifyForMaterialization(Expression expr) {
-      return partialEvaluator == null
-        ? PartialEvaluatorEngine.SimplifyBooleanExpression(expr)
-        : partialEvaluator.SimplifyExpression(expr);
+      return partialEvaluator.SimplifyExpression(expr);
     }
 
     private bool TryGetSetElementUpperBound(Expression setExpr, out BigInteger upperBound) {
