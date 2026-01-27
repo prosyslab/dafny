@@ -432,7 +432,7 @@ internal sealed partial class PartialEvaluatorEngine {
     return binary;
   }
 
-  private static Expression SimplifySeqEquality(BinaryExpr binary, bool isEq) {
+  private Expression SimplifySeqEquality(BinaryExpr binary, bool isEq) {
     if (TryGetStringLiteral(binary.E0, out var leftString, out _) && TryGetStringLiteral(binary.E1, out var rightString, out _)) {
       return CreateBoolLiteral(binary.Origin, isEq ? leftString == rightString : leftString != rightString);
     }
@@ -440,6 +440,12 @@ internal sealed partial class PartialEvaluatorEngine {
     if (TryGetSeqDisplayLiteral(binary.E0, out var leftSeq) && TryGetSeqDisplayLiteral(binary.E1, out var rightSeq) &&
         AllElementsAreLiterals(leftSeq) && AllElementsAreLiterals(rightSeq)) {
       var equal = SeqDisplayLiteralsEqual(leftSeq, rightSeq);
+      return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
+    }
+
+    if (TryGetCharSeqDisplayLiteral(binary.E0, out var leftChars) && TryGetUnescapedStringCharacters(binary.E1, out var rightChars) ||
+        TryGetUnescapedStringCharacters(binary.E0, out leftChars) && TryGetCharSeqDisplayLiteral(binary.E1, out rightChars)) {
+      var equal = CodePointSequencesEqual(leftChars, rightChars);
       return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
     }
 
@@ -1001,6 +1007,34 @@ internal sealed partial class PartialEvaluatorEngine {
     return display != null;
   }
 
+  private static bool TryGetCharSeqDisplayLiteral(Expression expr, out List<int> codePoints) {
+    codePoints = null;
+    if (!TryGetSeqDisplayLiteral(expr, out var display)) {
+      return false;
+    }
+
+    var result = new List<int>(display.Elements.Count);
+    foreach (var element in display.Elements) {
+      if (!TryGetCharLiteral(element, out var ch)) {
+        return false;
+      }
+      result.Add(ch);
+    }
+
+    codePoints = result;
+    return true;
+  }
+
+  private bool TryGetUnescapedStringCharacters(Expression expr, out List<int> codePoints) {
+    codePoints = null;
+    if (!TryGetStringLiteral(expr, out var value, out var isVerbatim)) {
+      return false;
+    }
+
+    codePoints = Util.UnescapedCharacters(options, value, isVerbatim).ToList();
+    return true;
+  }
+
   private static bool TryGetTupleLiteral(Expression expr, out DatatypeValue tuple) {
     tuple = expr as DatatypeValue;
     if (tuple == null) {
@@ -1100,6 +1134,18 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     for (var i = 0; i < left.Elements.Count; i++) {
       if (!AreLiteralExpressionsEqual(left.Elements[i], right.Elements[i])) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static bool CodePointSequencesEqual(IReadOnlyList<int> left, IReadOnlyList<int> right) {
+    if (left.Count != right.Count) {
+      return false;
+    }
+    for (var index = 0; index < left.Count; index++) {
+      if (left[index] != right[index]) {
         return false;
       }
     }
