@@ -368,42 +368,66 @@ method Entry() {
     var asserts = body.Body.OfType<AssertStmt>().ToList();
     Assert.Equal(9, asserts.Count);
 
-    var intQuantifier = Assert.IsType<ForallExpr>(asserts[0].Expr);
-    var intBound = Assert.Single(intQuantifier.Bounds);
-    if (intBound is IntBoundedPool intPool) {
-      Assert.True(Expression.IsIntLiteral(intPool.UpperBound, out var upper));
-      Assert.Equal(2, (int)upper);
+    if (asserts[0].Expr is ForallExpr intQuantifier) {
+      var intBound = Assert.Single(intQuantifier.Bounds);
+      if (intBound is IntBoundedPool intPool) {
+        Assert.True(Expression.IsIntLiteral(intPool.UpperBound, out var upper));
+        Assert.Equal(2, (int)upper);
+      } else {
+        var exactPool = Assert.IsType<ExactBoundedPool>(intBound);
+        Assert.IsNotType<FunctionCallExpr>(exactPool.E);
+      }
     } else {
-      var exactPool = Assert.IsType<ExactBoundedPool>(intBound);
-      Assert.IsNotType<FunctionCallExpr>(exactPool.E);
+      Assert.True(Expression.IsBoolLiteral(asserts[0].Expr, out _));
     }
 
-    var setQuantifier = Assert.IsType<ForallExpr>(asserts[1].Expr);
-    var setBound = Assert.IsType<SetBoundedPool>(Assert.Single(setQuantifier.Bounds));
-    Assert.IsNotType<FunctionCallExpr>(setBound.Set);
+    if (asserts[1].Expr is ForallExpr setQuantifier) {
+      var setBound = Assert.IsType<SetBoundedPool>(Assert.Single(setQuantifier.Bounds));
+      Assert.IsNotType<FunctionCallExpr>(setBound.Set);
+    } else {
+      Assert.True(Expression.IsBoolLiteral(asserts[1].Expr, out _));
+    }
 
-    var subsetQuantifier = Assert.IsType<ForallExpr>(asserts[2].Expr);
-    var subsetBound = Assert.IsType<SubSetBoundedPool>(Assert.Single(subsetQuantifier.Bounds));
-    Assert.IsNotType<FunctionCallExpr>(subsetBound.UpperBound);
+    if (asserts[2].Expr is ForallExpr subsetQuantifier) {
+      var subsetBound = Assert.IsType<SubSetBoundedPool>(Assert.Single(subsetQuantifier.Bounds));
+      Assert.IsNotType<FunctionCallExpr>(subsetBound.UpperBound);
+    } else {
+      Assert.True(Expression.IsBoolLiteral(asserts[2].Expr, out _));
+    }
 
-    var supersetQuantifier = Assert.IsType<ForallExpr>(asserts[3].Expr);
-    var supersetBound = Assert.IsType<SuperSetBoundedPool>(Assert.Single(supersetQuantifier.Bounds));
-    Assert.IsNotType<FunctionCallExpr>(supersetBound.LowerBound);
+    if (asserts[3].Expr is ForallExpr supersetQuantifier) {
+      var supersetBound = Assert.IsType<SuperSetBoundedPool>(Assert.Single(supersetQuantifier.Bounds));
+      Assert.IsNotType<FunctionCallExpr>(supersetBound.LowerBound);
+    } else {
+      Assert.True(Expression.IsBoolLiteral(asserts[3].Expr, out _));
+    }
 
-    var seqQuantifier = Assert.IsType<ForallExpr>(asserts[4].Expr);
-    var seqBound = Assert.IsType<SeqBoundedPool>(Assert.Single(seqQuantifier.Bounds));
-    Assert.IsNotType<FunctionCallExpr>(seqBound.Seq);
+    if (asserts[4].Expr is ForallExpr seqQuantifier) {
+      var seqBound = Assert.IsType<SeqBoundedPool>(Assert.Single(seqQuantifier.Bounds));
+      Assert.IsNotType<FunctionCallExpr>(seqBound.Seq);
+    } else {
+      Assert.True(Expression.IsBoolLiteral(asserts[4].Expr, out _));
+    }
 
-    var mapQuantifier = Assert.IsType<ForallExpr>(asserts[5].Expr);
-    var mapBound = Assert.IsType<MapBoundedPool>(Assert.Single(mapQuantifier.Bounds));
-    Assert.IsNotType<FunctionCallExpr>(mapBound.Map);
+    if (asserts[5].Expr is ForallExpr mapQuantifier) {
+      var mapBound = Assert.IsType<MapBoundedPool>(Assert.Single(mapQuantifier.Bounds));
+      Assert.IsNotType<FunctionCallExpr>(mapBound.Map);
+    } else {
+      Assert.True(Expression.IsBoolLiteral(asserts[5].Expr, out _));
+    }
 
-    var multiQuantifier = Assert.IsType<ForallExpr>(asserts[6].Expr);
-    var multiBound = Assert.IsType<MultiSetBoundedPool>(Assert.Single(multiQuantifier.Bounds));
-    Assert.IsNotType<FunctionCallExpr>(multiBound.MultiSet);
+    if (asserts[6].Expr is ForallExpr multiQuantifier) {
+      var multiBound = Assert.IsType<MultiSetBoundedPool>(Assert.Single(multiQuantifier.Bounds));
+      Assert.IsNotType<FunctionCallExpr>(multiBound.MultiSet);
+    } else {
+      Assert.True(Expression.IsBoolLiteral(asserts[6].Expr, out _));
+    }
 
-    var boolQuantifier = Assert.IsType<ForallExpr>(asserts[7].Expr);
-    Assert.IsType<ExactBoundedPool>(Assert.Single(boolQuantifier.Bounds));
+    if (asserts[7].Expr is ForallExpr boolQuantifier) {
+      Assert.IsType<ExactBoundedPool>(Assert.Single(boolQuantifier.Bounds));
+    } else {
+      Assert.True(Expression.IsBoolLiteral(asserts[7].Expr, out _));
+    }
 
     var unboundedQuantifier = Assert.IsType<ForallExpr>(asserts[8].Expr);
     Assert.NotNull(unboundedQuantifier.Bounds);
@@ -599,6 +623,51 @@ method Entry() {
     var assertStmt = DescendantStatements(entry.Body!).OfType<AssertStmt>().Single();
 
     Assert.True(Expression.IsBoolLiteral(assertStmt.Expr, out var value) && value);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_UnrollsStmtExprSetBoundedQuantifier() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert (var s := {1, 2, 3}; forall x :: x in s ==> x >= 0);
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmt = DescendantStatements(entry.Body!).OfType<AssertStmt>().Single();
+    var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+
+    Assert.Empty(assertExpr.DescendantsAndSelf.OfType<ForallExpr>());
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_MaterializesSubsetComprehensionAndUnrollsQuantifier() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert (var painters := {0, 1, 2};
+          var subsets := set H: set<int> | H <= painters && |H| == 1 :: |H|;
+          forall y :: y in subsets ==> y == 1);
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmt = DescendantStatements(entry.Body!).OfType<AssertStmt>().Single();
+    var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+
+    Assert.Empty(assertExpr.DescendantsAndSelf.OfType<SetComprehension>());
+    Assert.Empty(assertExpr.DescendantsAndSelf.OfType<ForallExpr>());
   }
 
   [Fact]
