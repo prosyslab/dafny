@@ -606,6 +606,29 @@ function Entry(): bool {
   }
 
   [Fact]
+  public async Task PartialEvaluation_FoldsMixedStringAndSeqCharEquality() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+function Entry(): bool {
+  ['N', 'O'] == ""NO"" &&
+  ['N', 'O'] != ""YES"" &&
+  ['\n'] == ""\n"" &&
+  ['\u000A'] == ""\n""
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Function>().Where(f => f.Name == "Entry"));
+    Assert.NotNull(entry.Body);
+
+    Assert.True(Expression.IsBoolLiteral(entry.Body!, out var value) && value);
+  }
+
+  [Fact]
   public async Task PartialEvaluation_FoldsNestedSeqDisplayOperations() {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
