@@ -763,7 +763,7 @@ internal sealed partial class PartialEvaluatorEngine {
 
     var allLiteralArgs = true;
     for (var i = 0; i < callExpr.Args.Count; i++) {
-      if (!IsLiteralLike(callExpr.Args[i])) {
+      if (!IsInlineableArgument(callExpr.Args[i])) {
         allLiteralArgs = false;
         break;
       }
@@ -1054,6 +1054,10 @@ internal sealed partial class PartialEvaluatorEngine {
       return AllElementsAreLiterals(tuple.Arguments);
     }
     return false;
+  }
+
+  private static bool IsInlineableArgument(Expression expr) {
+    return IsLiteralLike(expr) || expr is LambdaExpr;
   }
 
   private static bool AreLiteralExpressionsEqual(Expression left, Expression right) {
