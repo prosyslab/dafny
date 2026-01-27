@@ -470,6 +470,8 @@ internal sealed partial class PartialEvaluatorEngine {
           return SimplifyIteExpr(ite, state);
         case FunctionCallExpr callExpr:
           return SimplifyFunctionCallExpr(callExpr, state);
+        case ApplyExpr applyExpr:
+          return SimplifyApplyExpr(applyExpr, state);
         case MemberSelectExpr memberSelectExpr:
           return SimplifyMemberSelectExpr(memberSelectExpr, state);
         case QuantifierExpr quantifierExpr:
@@ -590,6 +592,38 @@ internal sealed partial class PartialEvaluatorEngine {
         SetReplacement(callExpr, inlined);
         return false;
       }
+      return false;
+    }
+
+    private bool SimplifyApplyExpr(ApplyExpr applyExpr, PartialEvalState state) {
+      applyExpr.Function = SimplifyExpression(applyExpr.Function, state);
+      for (var i = 0; i < applyExpr.Args.Count; i++) {
+        applyExpr.Args[i] = SimplifyExpression(applyExpr.Args[i], state);
+      }
+
+      if (applyExpr.Function is not LambdaExpr lambdaExpr) {
+        return false;
+      }
+
+      if (lambdaExpr.Range != null || lambdaExpr.BoundVars.Count != applyExpr.Args.Count) {
+        return false;
+      }
+
+      for (var i = 0; i < applyExpr.Args.Count; i++) {
+        if (!IsInlineableArgument(applyExpr.Args[i])) {
+          return false;
+        }
+      }
+
+      var substMap = new Dictionary<IVariable, Expression>(lambdaExpr.BoundVars.Count);
+      for (var i = 0; i < lambdaExpr.BoundVars.Count; i++) {
+        substMap[lambdaExpr.BoundVars[i]] = applyExpr.Args[i];
+      }
+
+      var substituter = new Substituter(null, substMap, null, null, engine.systemModuleManager);
+      var substituted = substituter.Substitute(lambdaExpr.Body);
+      var simplified = SimplifyExpression(substituted, state);
+      SetReplacement(applyExpr, simplified);
       return false;
     }
 
@@ -888,7 +922,7 @@ internal sealed partial class PartialEvaluatorEngine {
         if (expression == null) {
           return false;
         }
-        if (!IsLiteralLike(expression)) {
+        if (!IsInlineableArgument(expression)) {
           return false;
         }
         cached = new ConstValue(expression);
