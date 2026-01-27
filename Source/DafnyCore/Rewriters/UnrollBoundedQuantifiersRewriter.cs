@@ -483,7 +483,12 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
         return false;
       }
 
-      if (quantifierExpr.Bounds == null || quantifierExpr.Bounds.Count != quantifierExpr.BoundVars.Count) {
+      var bounds = quantifierExpr.Bounds;
+      if (bounds == null || bounds.Count != quantifierExpr.BoundVars.Count) {
+        var logicalBodyForBounds = quantifierExpr.LogicalBody(bypassSplitQuantifier: true);
+        bounds = ModuleResolver.DiscoverBestBounds_MultipleVars(quantifierExpr.BoundVars, logicalBodyForBounds, quantifierExpr is ExistsExpr);
+      }
+      if (bounds == null || bounds.Count != quantifierExpr.BoundVars.Count) {
         return false;
       }
 
@@ -495,13 +500,20 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
 
       // We only unroll when all bound variables range over concrete, finite domains.
       var domains = new ConcreteDomain[quantifierExpr.BoundVars.Count];
+      var allConcrete = true;
       for (var i = 0; i < quantifierExpr.BoundVars.Count; i++) {
         var bv = quantifierExpr.BoundVars[i];
-        var bound = quantifierExpr.Bounds[i];
+        var bound = bounds[i];
         if (!TryGetConcreteDomain(bv, bound, out var domain)) {
-          return false;
+          allConcrete = false;
+          break;
         }
         domains[i] = domain;
+      }
+      if (!allConcrete &&
+          !TryGetConcreteIntDomainsFromPools(quantifierExpr.BoundVars, bounds, out domains) &&
+          !TryGetConcreteIntDomainsFromLogicalBody(quantifierExpr, out domains)) {
+        return false;
       }
 
       // Domain product must be within cap.
@@ -626,6 +638,254 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
         default:
           return false;
       }
+    }
+
+    private readonly record struct IntBoundConstraint(int TargetIndex, int? SourceIndex, BigInteger Offset, bool IsLower);
+
+    private bool TryGetConcreteIntDomainsFromPools(IReadOnlyList<BoundVar> boundVars, IReadOnlyList<BoundedPool?> bounds,
+      out ConcreteDomain[] domains) {
+      domains = Array.Empty<ConcreteDomain>();
+      if (boundVars.Count != bounds.Count) {
+        return false;
+      }
+
+      var boundVarIndices = new Dictionary<BoundVar, int>();
+      var isNat = new bool[boundVars.Count];
+      for (var i = 0; i < boundVars.Count; i++) {
+        var bv = boundVars[i];
+        if (!TryGetIntOrNatType(bv, out var isNatType)) {
+          return false;
+        }
+        isNat[i] = isNatType;
+        boundVarIndices[bv] = i;
+      }
+
+      var constraints = new List<IntBoundConstraint>();
+      for (var i = 0; i < boundVars.Count; i++) {
+        if (bounds[i] is not IntBoundedPool intPool) {
+          return false;
+        }
+        if (intPool.LowerBound != null) {
+          if (!TryGetVarPlusConstant(intPool.LowerBound, boundVarIndices, out var sourceIndex, out var offset)) {
+            return false;
+          }
+          constraints.Add(new IntBoundConstraint(i, sourceIndex, offset, true));
+        }
+        if (intPool.UpperBound != null) {
+          if (!TryGetVarPlusConstant(intPool.UpperBound, boundVarIndices, out var sourceIndex, out var offset)) {
+            return false;
+          }
+          constraints.Add(new IntBoundConstraint(i, sourceIndex, offset, false));
+        }
+      }
+
+      return TryComputeConcreteIntDomains(boundVars, isNat, constraints, out domains);
+    }
+
+    private bool TryGetConcreteIntDomainsFromLogicalBody(QuantifierExpr quantifierExpr, out ConcreteDomain[] domains) {
+      domains = Array.Empty<ConcreteDomain>();
+      var boundVars = quantifierExpr.BoundVars;
+      var boundVarIndices = new Dictionary<BoundVar, int>();
+      var isNat = new bool[boundVars.Count];
+      for (var i = 0; i < boundVars.Count; i++) {
+        var bv = boundVars[i];
+        if (!TryGetIntOrNatType(bv, out var isNatType)) {
+          return false;
+        }
+        isNat[i] = isNatType;
+        boundVarIndices[bv] = i;
+      }
+
+      var logicalBody = quantifierExpr.LogicalBody(bypassSplitQuantifier: true);
+      Expression rangeExpr = logicalBody;
+      if (quantifierExpr is ForallExpr && logicalBody is BinaryExpr impExpr && IsImplication(impExpr)) {
+        rangeExpr = impExpr.E0;
+      }
+
+      var conjuncts = new List<Expression>();
+      CollectConjuncts(rangeExpr, conjuncts);
+
+      var constraints = new List<IntBoundConstraint>();
+      foreach (var conjunct in conjuncts) {
+        var resolved = NormalizeForLinearTerm(conjunct);
+        if (resolved is not BinaryExpr binaryExpr) {
+          continue;
+        }
+        var isLe = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Le || binaryExpr.Op == BinaryExpr.Opcode.Le;
+        var isLt = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Lt || binaryExpr.Op == BinaryExpr.Opcode.Lt;
+        if (!isLe && !isLt) {
+          continue;
+        }
+        if (!TryGetVarPlusConstant(binaryExpr.E0, boundVarIndices, out var leftIndex, out var leftConst) ||
+            !TryGetVarPlusConstant(binaryExpr.E1, boundVarIndices, out var rightIndex, out var rightConst)) {
+          continue;
+        }
+        var isStrict = isLt;
+        if (leftIndex.HasValue) {
+          var upperOffset = rightConst - leftConst + (isStrict ? 0 : 1);
+          constraints.Add(new IntBoundConstraint(leftIndex.Value, rightIndex, upperOffset, false));
+        }
+        if (rightIndex.HasValue) {
+          var lowerOffset = leftConst - rightConst + (isStrict ? 1 : 0);
+          constraints.Add(new IntBoundConstraint(rightIndex.Value, leftIndex, lowerOffset, true));
+        }
+      }
+
+      return TryComputeConcreteIntDomains(boundVars, isNat, constraints, out domains);
+    }
+
+    private static void CollectConjuncts(Expression expr, List<Expression> conjuncts) {
+      expr = NormalizeForLinearTerm(expr);
+      if (expr is BinaryExpr binaryExpr && IsConjunction(binaryExpr)) {
+        CollectConjuncts(binaryExpr.E0, conjuncts);
+        CollectConjuncts(binaryExpr.E1, conjuncts);
+        return;
+      }
+      conjuncts.Add(expr);
+    }
+
+    private bool TryComputeConcreteIntDomains(IReadOnlyList<BoundVar> boundVars, bool[] isNat,
+      List<IntBoundConstraint> constraints, out ConcreteDomain[] domains) {
+      var lowerBounds = new BigInteger?[boundVars.Count];
+      var upperBounds = new BigInteger?[boundVars.Count];
+      for (var i = 0; i < boundVars.Count; i++) {
+        if (isNat[i]) {
+          lowerBounds[i] = BigInteger.Zero;
+        }
+      }
+
+      var changed = true;
+      var passes = 0;
+      var maxPasses = boundVars.Count * boundVars.Count + 5;
+      while (changed && passes < maxPasses) {
+        changed = false;
+        passes++;
+        foreach (var constraint in constraints) {
+          if (constraint.IsLower) {
+            var sourceValue = constraint.SourceIndex.HasValue ? lowerBounds[constraint.SourceIndex.Value] : (BigInteger?)BigInteger.Zero;
+            if (sourceValue == null) {
+              continue;
+            }
+            var candidate = sourceValue.Value + constraint.Offset;
+            if (lowerBounds[constraint.TargetIndex] == null || candidate > lowerBounds[constraint.TargetIndex]!.Value) {
+              lowerBounds[constraint.TargetIndex] = candidate;
+              changed = true;
+            }
+          } else {
+            var sourceValue = constraint.SourceIndex.HasValue ? upperBounds[constraint.SourceIndex.Value] : (BigInteger?)BigInteger.Zero;
+            if (sourceValue == null) {
+              continue;
+            }
+            var candidate = sourceValue.Value + constraint.Offset;
+            if (upperBounds[constraint.TargetIndex] == null || candidate < upperBounds[constraint.TargetIndex]!.Value) {
+              upperBounds[constraint.TargetIndex] = candidate;
+              changed = true;
+            }
+          }
+        }
+      }
+
+      domains = new ConcreteDomain[boundVars.Count];
+      for (var i = 0; i < boundVars.Count; i++) {
+        if (lowerBounds[i] == null || upperBounds[i] == null) {
+          return false;
+        }
+        var lower = lowerBounds[i]!.Value;
+        var upper = upperBounds[i]!.Value;
+        if (isNat[i] && lower < 0) {
+          return false;
+        }
+        var bv = boundVars[i];
+        var size = upper - lower;
+        domains[i] = new ConcreteDomain(size, () => EnumerateIntRange(bv, lower, upper));
+      }
+
+      return true;
+    }
+
+    private bool TryGetIntOrNatType(BoundVar boundVar, out bool isNat) {
+      var subsetType = boundVar.Type.AsSubsetType;
+      isNat = subsetType == systemModuleManager.NatDecl;
+      var isInt = !isNat && boundVar.Type.NormalizeExpand() is IntType;
+      return isNat || isInt;
+    }
+
+    private static bool TryGetVarPlusConstant(Expression expr, IReadOnlyDictionary<BoundVar, int> boundVarIndices,
+      out int? varIndex, out BigInteger constant) {
+      expr = NormalizeForLinearTerm(expr);
+      if (Expression.IsIntLiteral(expr, out var literal)) {
+        varIndex = null;
+        constant = literal;
+        return true;
+      }
+      if (expr is IdentifierExpr identifierExpr && identifierExpr.Var is BoundVar boundVar &&
+          boundVarIndices.TryGetValue(boundVar, out var index)) {
+        varIndex = index;
+        constant = BigInteger.Zero;
+        return true;
+      }
+      if (expr is BinaryExpr binaryExpr) {
+        var isAdd = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Add || binaryExpr.Op == BinaryExpr.Opcode.Add;
+        var isSub = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Sub || binaryExpr.Op == BinaryExpr.Opcode.Sub;
+        if (!isAdd && !isSub) {
+          varIndex = null;
+          constant = default;
+          return false;
+        }
+        if (!TryGetVarPlusConstant(binaryExpr.E0, boundVarIndices, out var leftIndex, out var leftConst) ||
+            !TryGetVarPlusConstant(binaryExpr.E1, boundVarIndices, out var rightIndex, out var rightConst)) {
+          varIndex = null;
+          constant = default;
+          return false;
+        }
+        if (leftIndex.HasValue && rightIndex.HasValue) {
+          varIndex = null;
+          constant = default;
+          return false;
+        }
+        if (isAdd) {
+          varIndex = leftIndex ?? rightIndex;
+          constant = leftConst + rightConst;
+          return true;
+        }
+        if (rightIndex.HasValue) {
+          varIndex = null;
+          constant = default;
+          return false;
+        }
+        varIndex = leftIndex;
+        constant = leftConst - rightConst;
+        return true;
+      }
+      varIndex = null;
+      constant = default;
+      return false;
+    }
+
+    private static Expression NormalizeForLinearTerm(Expression expr) {
+      expr = StripConcreteSyntax(expr);
+      if (expr is ChainingExpression chainingExpression) {
+        expr = chainingExpression.E;
+      }
+      if (expr is ParensExpression parens && parens.ResolvedExpression != null) {
+        expr = parens.ResolvedExpression;
+      }
+      if (expr is ConversionExpr conversionExpr) {
+        var fromType = conversionExpr.E.Type?.NormalizeExpand();
+        var toType = conversionExpr.Type?.NormalizeExpand();
+        if (fromType != null && toType != null && fromType.Equals(toType)) {
+          expr = conversionExpr.E;
+        }
+      }
+      return expr;
+    }
+
+    private static bool IsConjunction(BinaryExpr binaryExpr) {
+      return binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.And || binaryExpr.Op == BinaryExpr.Opcode.And;
+    }
+
+    private static bool IsImplication(BinaryExpr binaryExpr) {
+      return binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Imp || binaryExpr.Op == BinaryExpr.Opcode.Imp;
     }
 
     internal bool TryGetConcreteDomain(BoundVar bv, BoundedPool? bound, out ConcreteDomain domain) {
