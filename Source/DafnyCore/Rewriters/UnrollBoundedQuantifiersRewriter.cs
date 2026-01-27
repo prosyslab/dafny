@@ -20,6 +20,9 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
   }
 
   internal override void PostResolveIntermediate(ModuleDefinition moduleDefinition) {
+    if (!Reporter.Options.Options.OptionArguments.ContainsKey(CommonOptionBag.UnrollBoundedQuantifiers)) {
+      return;
+    }
     var maxInstances = Reporter.Options.Get(CommonOptionBag.UnrollBoundedQuantifiers);
     var inlineDepth = Reporter.Options.Get(CommonOptionBag.PartialEvalInlineDepth);
     var partialEvaluator = new PartialEvaluatorEngine(Reporter.Options, moduleDefinition, program.SystemModuleManager, inlineDepth);
@@ -495,29 +498,28 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
         return false;
       }
 
-      // We only unroll when all bound variables range over finite, concrete integer intervals.
-      var domains = new (BigInteger Lower, BigInteger Upper, Type VarType)[quantifierExpr.BoundVars.Count];
+      // We only unroll when all bound variables range over concrete, finite domains.
+      var domains = new ConcreteDomain[quantifierExpr.BoundVars.Count];
       for (var i = 0; i < quantifierExpr.BoundVars.Count; i++) {
         var bv = quantifierExpr.BoundVars[i];
         var bound = quantifierExpr.Bounds[i];
-        if (!TryGetConcreteIntDomain(bv, bound, out var lower, out var upper)) {
+        if (!TryGetConcreteDomain(bv, bound, out var domain)) {
           return false;
         }
-        domains[i] = (lower, upper, bv.Type);
+        domains[i] = domain;
       }
 
       // Domain product must be within cap.
       var size = BigInteger.One;
       for (var i = 0; i < domains.Length; i++) {
-        var (lower, upper, _) = domains[i];
-        var width = upper - lower;
-        if (width <= BigInteger.Zero) {
+        var domainSize = domains[i].Size;
+        if (domainSize <= BigInteger.Zero) {
           rewritten = Expression.CreateBoolLiteral(quantifierExpr.Origin, isForall);
           rewritten.Type = Type.Bool;
           return true;
         }
 
-        size *= width;
+        size *= domainSize;
         if (maxInstances > 0 && size > maxInstances) {
           return false;
         }
@@ -571,14 +573,14 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
           return;
         }
 
-        var (lower, upper, varType) = domains[varIndex];
         var bv = quantifierExpr.BoundVars[varIndex];
-        for (var v = lower; v < upper; v++) {
+        foreach (var value in domains[varIndex].Enumerate()) {
           if (IsShortCircuited()) {
             return;
           }
 
-          substMap[bv] = new LiteralExpr(bv.Origin, v) { Type = varType };
+          EnsureExpressionType(value, bv.Type);
+          substMap[bv] = value;
           Enumerate(varIndex + 1);
         }
       }
@@ -587,6 +589,315 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
 
       rewritten = accumulator;
       return true;
+    }
+
+    private sealed class ConcreteDomain {
+      public BigInteger Size { get; }
+      private readonly Func<IEnumerable<Expression>> enumeratorFactory;
+
+      public ConcreteDomain(BigInteger size, Func<IEnumerable<Expression>> enumeratorFactory) {
+        Size = size;
+        this.enumeratorFactory = enumeratorFactory ?? throw new ArgumentNullException(nameof(enumeratorFactory));
+      }
+
+      public IEnumerable<Expression> Enumerate() => enumeratorFactory();
+    }
+
+    private static void EnsureExpressionType(Expression expr, Type type) {
+      if (expr.Type == null) {
+        expr.Type = type;
+      }
+    }
+
+    private static Expression StripConcreteSyntax(Expression expr) {
+      if (expr is ConcreteSyntaxExpression concreteSyntaxExpression && concreteSyntaxExpression.ResolvedExpression != null) {
+        return concreteSyntaxExpression.ResolvedExpression;
+      }
+      if (expr is ParensExpression parens && parens.ResolvedExpression != null) {
+        return parens.ResolvedExpression;
+      }
+      return expr;
+    }
+
+    private static bool IsLiteralExpression(Expression expr) {
+      expr = StripConcreteSyntax(expr);
+      switch (expr) {
+        case LiteralExpr:
+          return true;
+        case DisplayExpression displayExpression:
+          return displayExpression.Elements.All(IsLiteralExpression);
+        case MapDisplayExpr mapDisplayExpr:
+          return mapDisplayExpr.Elements.All(entry => IsLiteralExpression(entry.A) && IsLiteralExpression(entry.B));
+        case DatatypeValue datatypeValue:
+          return datatypeValue.Arguments.All(IsLiteralExpression);
+        default:
+          return false;
+      }
+    }
+
+    private bool TryGetConcreteDomain(BoundVar bv, BoundedPool? bound, out ConcreteDomain domain) {
+      domain = null!;
+
+      if (bound == null) {
+        return false;
+      }
+
+      if (TryGetConcreteIntDomain(bv, bound, out var lower, out var upper)) {
+        var size = upper - lower;
+        domain = new ConcreteDomain(size, () => EnumerateIntRange(bv, lower, upper));
+        return true;
+      }
+
+      if (bound is ExactBoundedPool exactBoundedPool) {
+        var value = StripConcreteSyntax(exactBoundedPool.E);
+        if (!IsLiteralExpression(value)) {
+          return false;
+        }
+        domain = new ConcreteDomain(BigInteger.One, () => new[] { value });
+        return true;
+      }
+
+      if (bound is SetBoundedPool setPool) {
+        if (!setPool.IsFiniteCollection) {
+          return false;
+        }
+        var materializationCap = maxInstances == 0 ? (uint?)null : maxInstances;
+        if (!TryMaterializeSetElements(setPool.Set, materializationCap, out var elements)) {
+          return false;
+        }
+        var size = new BigInteger(elements.Count);
+        domain = new ConcreteDomain(size, () => EnumerateSetElements(elements, bv.Type));
+        return true;
+      }
+
+      if (bound is SubSetBoundedPool subSetPool) {
+        if (!subSetPool.IsFiniteCollection) {
+          return false;
+        }
+        if (maxInstances > 0 && TryGetSetElementUpperBound(subSetPool.UpperBound, out var elementUpperBound)) {
+          var maxElements = MaxSubsetElementCount(maxInstances);
+          if (elementUpperBound > maxElements) {
+            return false;
+          }
+        }
+        var materializationCap = maxInstances == 0 ? (uint?)null : maxInstances;
+        if (!TryMaterializeSetElements(subSetPool.UpperBound, materializationCap, out var elements)) {
+          return false;
+        }
+        var setType = bv.Type.NormalizeExpand().AsSetType;
+        if (setType == null) {
+          return false;
+        }
+        var size = BigInteger.One << elements.Count;
+        domain = new ConcreteDomain(size, () => EnumerateSubsets(bv.Origin, elements, setType));
+        return true;
+      }
+
+      return false;
+    }
+
+    private IEnumerable<Expression> EnumerateIntRange(BoundVar bv, BigInteger lower, BigInteger upper) {
+      for (var v = lower; v < upper; v++) {
+        yield return new LiteralExpr(bv.Origin, v) { Type = bv.Type };
+      }
+    }
+
+    private IEnumerable<Expression> EnumerateSetElements(List<Expression> elements, Type elementType) {
+      foreach (var element in elements) {
+        EnsureExpressionType(element, elementType);
+        yield return element;
+      }
+    }
+
+    private IEnumerable<Expression> EnumerateSubsets(IOrigin origin, List<Expression> elements, SetType setType) {
+      var current = new List<Expression>();
+      foreach (var subset in EnumerateSubsetsRecursive(origin, elements, setType, 0, current)) {
+        yield return subset;
+      }
+    }
+
+    private IEnumerable<Expression> EnumerateSubsetsRecursive(IOrigin origin, List<Expression> elements, SetType setType, int index, List<Expression> current) {
+      if (index == elements.Count) {
+        var subsetElements = new List<Expression>(current);
+        foreach (var element in subsetElements) {
+          EnsureExpressionType(element, setType.Arg);
+        }
+        var subsetExpr = new SetDisplayExpr(origin, setType.Finite, subsetElements) { Type = setType };
+        yield return subsetExpr;
+        yield break;
+      }
+
+      foreach (var subset in EnumerateSubsetsRecursive(origin, elements, setType, index + 1, current)) {
+        yield return subset;
+      }
+
+      current.Add(elements[index]);
+      foreach (var subset in EnumerateSubsetsRecursive(origin, elements, setType, index + 1, current)) {
+        yield return subset;
+      }
+      current.RemoveAt(current.Count - 1);
+    }
+
+    private bool TryMaterializeSetElements(Expression setExpr, uint? maxInstances, out List<Expression> elements) {
+      elements = null!;
+
+      var resolved = StripConcreteSyntax(setExpr);
+
+      if (resolved is SetDisplayExpr setDisplay) {
+        if (maxInstances.HasValue && setDisplay.Elements.Count > maxInstances.Value) {
+          return false;
+        }
+        elements = setDisplay.Elements.ToList();
+        return true;
+      }
+
+      if (resolved is SetComprehension setComprehension) {
+        return TryMaterializeSetComprehension(setComprehension, maxInstances, out elements);
+      }
+
+      return false;
+    }
+
+    private bool TryMaterializeSetComprehension(SetComprehension setComprehension, uint? maxInstances, out List<Expression> elements) {
+      elements = null!;
+
+      if (!setComprehension.Finite) {
+        return false;
+      }
+      if (setComprehension.Bounds == null || setComprehension.Bounds.Count != setComprehension.BoundVars.Count) {
+        return false;
+      }
+
+      if (maxInstances.HasValue && TryGetSetComprehensionUpperBound(setComprehension, out var upperBound)) {
+        if (upperBound > maxInstances.Value) {
+          return false;
+        }
+      }
+
+      var domains = new (BigInteger Lower, BigInteger Upper, Type VarType)[setComprehension.BoundVars.Count];
+      for (var i = 0; i < setComprehension.BoundVars.Count; i++) {
+        var bv = setComprehension.BoundVars[i];
+        var bound = setComprehension.Bounds[i];
+        if (!TryGetConcreteIntDomain(bv, bound, out var lower, out var upper)) {
+          return false;
+        }
+        domains[i] = (lower, upper, bv.Type);
+      }
+
+      var results = new List<Expression>();
+      var substMap = new Dictionary<IVariable, Expression>();
+      var typeMap = new Dictionary<TypeParameter, Type>();
+      var range = setComprehension.Range;
+      var term = setComprehension.Term;
+
+      bool Enumerate(int varIndex) {
+        if (varIndex == domains.Length) {
+          if (maxInstances.HasValue && results.Count >= maxInstances.Value) {
+            return false;
+          }
+          var substituter = new Substituter(null, substMap, typeMap);
+          if (range != null) {
+            var rangeInst = SimplifyForMaterialization(substituter.Substitute(range));
+            rangeInst = StripConcreteSyntax(rangeInst);
+            if (!Expression.IsBoolLiteral(rangeInst, out var rangeValue)) {
+              return false;
+            }
+            if (!rangeValue) {
+              return true;
+            }
+          }
+
+          var termInst = StripConcreteSyntax(substituter.Substitute(term));
+          results.Add(termInst);
+          return true;
+        }
+
+        var (lower, upper, varType) = domains[varIndex];
+        var bv = setComprehension.BoundVars[varIndex];
+        for (var v = lower; v < upper; v++) {
+          substMap[bv] = new LiteralExpr(bv.Origin, v) { Type = varType };
+          if (!Enumerate(varIndex + 1)) {
+            return false;
+          }
+        }
+        return true;
+      }
+
+      if (!Enumerate(0)) {
+        return false;
+      }
+
+      var elementType = setComprehension.Type.NormalizeExpand().AsSetType?.Arg;
+      if (elementType != null) {
+        foreach (var element in results) {
+          EnsureExpressionType(element, elementType);
+        }
+      }
+      elements = results;
+      return true;
+    }
+
+    private Expression SimplifyForMaterialization(Expression expr) {
+      return partialEvaluator == null
+        ? PartialEvaluatorEngine.SimplifyBooleanExpression(expr)
+        : partialEvaluator.SimplifyExpression(expr);
+    }
+
+    private bool TryGetSetElementUpperBound(Expression setExpr, out BigInteger upperBound) {
+      upperBound = default;
+      var resolved = StripConcreteSyntax(setExpr);
+
+      if (resolved is SetDisplayExpr setDisplay) {
+        upperBound = setDisplay.Elements.Count;
+        return true;
+      }
+
+      if (resolved is SetComprehension setComprehension) {
+        return TryGetSetComprehensionUpperBound(setComprehension, out upperBound);
+      }
+
+      return false;
+    }
+
+    private bool TryGetSetComprehensionUpperBound(SetComprehension setComprehension, out BigInteger upperBound) {
+      upperBound = default;
+      if (!setComprehension.Finite) {
+        return false;
+      }
+      if (setComprehension.Bounds == null || setComprehension.Bounds.Count != setComprehension.BoundVars.Count) {
+        return false;
+      }
+
+      var product = BigInteger.One;
+      for (var i = 0; i < setComprehension.BoundVars.Count; i++) {
+        var bv = setComprehension.BoundVars[i];
+        var bound = setComprehension.Bounds[i];
+        if (!TryGetConcreteIntDomain(bv, bound, out var lower, out var upper)) {
+          return false;
+        }
+        var width = upper - lower;
+        if (width <= BigInteger.Zero) {
+          upperBound = BigInteger.Zero;
+          return true;
+        }
+        product *= width;
+      }
+
+      upperBound = product;
+      return true;
+    }
+
+    private static BigInteger MaxSubsetElementCount(uint maxInstances) {
+      if (maxInstances == 0) {
+        return BigInteger.Zero;
+      }
+      var value = maxInstances;
+      var count = 0;
+      while (value > 1) {
+        value >>= 1;
+        count++;
+      }
+      return new BigInteger(count);
     }
 
     private bool TryGetConcreteIntDomain(BoundVar bv, BoundedPool? bound, out BigInteger lower, out BigInteger upper) {
@@ -599,21 +910,32 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
 
       var subsetType = bv.Type.AsSubsetType;
       var isNat = subsetType == systemModuleManager.NatDecl;
+      // NormalizeExpand includes subset types that ultimately resolve to int/nat.
       var isInt = !isNat && bv.Type.NormalizeExpand() is IntType;
       if (!isNat && !isInt) {
         return false;
       }
 
-      if (intPool.UpperBound == null || !Expression.IsIntLiteral(intPool.UpperBound, out upper)) {
+      Expression upperBound = intPool.UpperBound;
+      if (upperBound != null) {
+        upperBound = StripConcreteSyntax(upperBound);
+      }
+
+      if (upperBound == null || !Expression.IsIntLiteral(upperBound, out upper)) {
         return false;
       }
 
-      if (intPool.LowerBound == null) {
+      Expression lowerBound = intPool.LowerBound;
+      if (lowerBound != null) {
+        lowerBound = StripConcreteSyntax(lowerBound);
+      }
+
+      if (lowerBound == null) {
         if (!isNat) {
           return false;
         }
         lower = BigInteger.Zero;
-      } else if (!Expression.IsIntLiteral(intPool.LowerBound, out lower)) {
+      } else if (!Expression.IsIntLiteral(lowerBound, out lower)) {
         return false;
       }
 
