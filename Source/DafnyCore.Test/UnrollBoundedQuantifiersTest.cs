@@ -322,7 +322,7 @@ public class UnrollBoundedQuantifiersTest {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Induction = 0;
-    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 10U);
+    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 100U);
 
     var impl = await TranslateSingleImplementation(@"
 method SingleVar() {
@@ -440,6 +440,27 @@ method MultiVar() {
     var asserts = AssertStatementAsserts(impl).ToList();
     Assert.NotEmpty(asserts);
     Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
+  }
+
+  // Objective: unroll chained inter-variable bounds within the cap.
+  [Fact]
+  public async Task ChainedBoundsForall_IsUnrolled_WhenWithinMaxInstances() {
+    var options = CreateOptions(100);
+    var program = await ParseAndResolve(@"
+method ChainedBounds() {
+  assert forall start, end :: 0 <= start <= end < 6 ==> start + end >= 0;
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var method = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "ChainedBounds"));
+    Assert.NotNull(method.Body);
+
+    var engine = CreateUnrollEngine(program, options.Get(CommonOptionBag.UnrollBoundedQuantifiers));
+    InvokeRewriteCallable(engine, method);
+
+    var assertStmt = Assert.Single(DescendantStatements(method.Body!).OfType<AssertStmt>());
+    Assert.DoesNotContain(assertStmt.Expr.DescendantsAndSelf, e => e is QuantifierExpr);
   }
 
   // Objective: unroll a simple bounded exists within the instance cap.
