@@ -499,6 +499,30 @@ function Entry(): int {
   }
 
   [Fact]
+  public async Task PartialEvaluation_InlinesLambdaApplication() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 10U);
+
+    var program = await ParseAndResolve(@"
+function SumRange(start: int, end: int, f: int -> int): int {
+  if start > end then 0 else f(start) + SumRange(start + 1, end, f)
+}
+
+method Entry() {
+  assert SumRange(1, 3, (i: int) => i + 1) == 9;
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmt = DescendantStatements(entry.Body!).OfType<AssertStmt>().Single();
+
+    Assert.True(Expression.IsBoolLiteral(assertStmt.Expr, out var value) && value);
+  }
+
+  [Fact]
   public async Task PartialEvaluation_UnfoldsRecursiveLiteralCalls() {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
