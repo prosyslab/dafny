@@ -506,6 +506,102 @@ method NoCap() {
     Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
   }
 
+  // Objective: unroll bounded foralls over concrete sets.
+  [Fact]
+  public async Task SetBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    var options = CreateOptions(10);
+
+    var impl = await TranslateSingleImplementation(@"
+method SetForall() {
+  assert forall x :: x in {1, 2, 3} ==> x >= 0;
+}
+", options, "SetForall");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
+  }
+
+  // Objective: keep forall when set-comprehension domain exceeds the cap.
+  [Fact]
+  public async Task SetComprehensionBoundedForall_IsNotUnrolled_WhenExceedingMaxInstances() {
+    var options = CreateOptions(10);
+
+    var impl = await TranslateSingleImplementation(@"
+method SetComprehensionExceedsCap() {
+  assert forall x :: x in (set i | 0 <= i < 100 :: i) ==> x >= 0;
+}
+", options, "SetComprehensionExceedsCap");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.Contains(asserts, a => ContainsForall(a.Expr));
+  }
+
+  // Objective: unroll bounded exists over concrete sets.
+  [Fact]
+  public async Task SetBoundedExists_IsUnrolled_WhenWithinMaxInstances() {
+    var options = CreateOptions(10);
+
+    var impl = await TranslateSingleImplementation(@"
+method SetExists() {
+  assert exists x :: x in {1, 2, 3} && x == 2;
+}
+", options, "SetExists");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.All(asserts, a => Assert.False(ContainsAnyQuantifier(a.Expr)));
+  }
+
+  // Objective: unroll bounded foralls over subset domains with set comprehension upper bounds.
+  [Fact]
+  public async Task SubSetBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    var options = CreateOptions(10);
+
+    var impl = await TranslateSingleImplementation(@"
+method SubsetComprehension() {
+  assert forall H: set<int> :: H <= (set i | 0 <= i < 3 :: i) ==> |H| >= 0;
+}
+", options, "SubsetComprehension");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
+  }
+
+  // Objective: keep forall when subset-domain size exceeds the cap.
+  [Fact]
+  public async Task SubSetBoundedForall_IsNotUnrolled_WhenExceedingMaxInstances() {
+    var options = CreateOptions(10);
+
+    var impl = await TranslateSingleImplementation(@"
+method SubsetExceedsCap() {
+  assert forall H: set<int> :: H <= {1, 2, 3, 4} ==> |H| >= 0;
+}
+", options, "SubsetExceedsCap");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.Contains(asserts, a => ContainsForall(a.Expr));
+  }
+
+  // Objective: keep forall when subset comprehension domain exceeds the cap.
+  [Fact]
+  public async Task SubSetBoundedForall_Comprehension_IsNotUnrolled_WhenExceedingMaxInstances() {
+    var options = CreateOptions(10);
+
+    var impl = await TranslateSingleImplementation(@"
+method SubsetComprehensionExceedsCap() {
+  assert forall H: set<int> :: H <= (set i | 0 <= i < 100 :: i) ==> |H| >= 0;
+}
+", options, "SubsetComprehensionExceedsCap");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.Contains(asserts, a => ContainsForall(a.Expr));
+  }
+
   // Objective: traverse diverse statement kinds without skipping any.
   [Fact]
   public async Task Rewriter_Traverses_DiverseStatements() {
