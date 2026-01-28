@@ -640,6 +640,63 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
       }
     }
 
+    private static bool LiteralStructuralEquals(Expression left, Expression right) {
+      left = StripConcreteSyntax(left);
+      right = StripConcreteSyntax(right);
+      if (ReferenceEquals(left, right)) {
+        return true;
+      }
+      switch (left) {
+        case LiteralExpr leftLiteral when right is LiteralExpr rightLiteral:
+          return leftLiteral.GetType() == rightLiteral.GetType() && Equals(leftLiteral.Value, rightLiteral.Value);
+        case DisplayExpression leftDisplay when right is DisplayExpression rightDisplay:
+          if (leftDisplay.GetType() != rightDisplay.GetType() || leftDisplay.Elements.Count != rightDisplay.Elements.Count) {
+            return false;
+          }
+          for (var i = 0; i < leftDisplay.Elements.Count; i++) {
+            if (!LiteralStructuralEquals(leftDisplay.Elements[i], rightDisplay.Elements[i])) {
+              return false;
+            }
+          }
+          return true;
+        case MapDisplayExpr leftMap when right is MapDisplayExpr rightMap:
+          if (leftMap.Finite != rightMap.Finite || leftMap.Elements.Count != rightMap.Elements.Count) {
+            return false;
+          }
+          for (var i = 0; i < leftMap.Elements.Count; i++) {
+            var leftEntry = leftMap.Elements[i];
+            var rightEntry = rightMap.Elements[i];
+            if (!LiteralStructuralEquals(leftEntry.A, rightEntry.A) || !LiteralStructuralEquals(leftEntry.B, rightEntry.B)) {
+              return false;
+            }
+          }
+          return true;
+        case DatatypeValue leftDatatype when right is DatatypeValue rightDatatype:
+          if (leftDatatype.DatatypeName != rightDatatype.DatatypeName ||
+              leftDatatype.MemberName != rightDatatype.MemberName ||
+              leftDatatype.Arguments.Count != rightDatatype.Arguments.Count) {
+            return false;
+          }
+          for (var i = 0; i < leftDatatype.Arguments.Count; i++) {
+            if (!LiteralStructuralEquals(leftDatatype.Arguments[i], rightDatatype.Arguments[i])) {
+              return false;
+            }
+          }
+          return true;
+        default:
+          return false;
+      }
+    }
+
+    private static bool ContainsLiteral(List<Expression> elements, Expression candidate) {
+      foreach (var element in elements) {
+        if (LiteralStructuralEquals(element, candidate)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
     private readonly record struct IntBoundConstraint(int TargetIndex, int? SourceIndex, BigInteger Offset, bool IsLower);
 
     private bool TryGetConcreteIntDomainsFromPools(IReadOnlyList<BoundVar> boundVars, IReadOnlyList<BoundedPool?> bounds,
@@ -921,6 +978,177 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
         var size = new BigInteger(elements.Count);
         domain = new ConcreteDomain(size, () => EnumerateSetElements(elements, bv.Type));
         return true;
+      }
+
+      if (bound is SeqBoundedPool seqPool) {
+        var resolved = StripConcreteSyntax(seqPool.Seq);
+        if (resolved is SeqDisplayExpr seqDisplay) {
+          var elements = new List<Expression>();
+          foreach (var element in seqDisplay.Elements) {
+            var value = StripConcreteSyntax(element);
+            if (!IsLiteralExpression(value)) {
+              return false;
+            }
+            if (!ContainsLiteral(elements, value)) {
+              elements.Add(value);
+              if (maxInstances > 0 && elements.Count > maxInstances) {
+                return false;
+              }
+            }
+          }
+          var size = new BigInteger(elements.Count);
+          domain = new ConcreteDomain(size, () => EnumerateSetElements(elements, bv.Type));
+          return true;
+        }
+      }
+
+      if (bound is MultiSetBoundedPool multisetPool) {
+        var resolved = StripConcreteSyntax(multisetPool.MultiSet);
+        if (resolved is MultiSetDisplayExpr multisetDisplay) {
+          var elements = new List<Expression>();
+          foreach (var element in multisetDisplay.Elements) {
+            var value = StripConcreteSyntax(element);
+            if (!IsLiteralExpression(value)) {
+              return false;
+            }
+            if (!ContainsLiteral(elements, value)) {
+              elements.Add(value);
+              if (maxInstances > 0 && elements.Count > maxInstances) {
+                return false;
+              }
+            }
+          }
+          var size = new BigInteger(elements.Count);
+          domain = new ConcreteDomain(size, () => EnumerateSetElements(elements, bv.Type));
+          return true;
+        }
+      }
+
+      if (bound is MapBoundedPool mapPool) {
+        if (!mapPool.IsFiniteCollection) {
+          return false;
+        }
+        var resolved = StripConcreteSyntax(mapPool.Map);
+        if (resolved is MapDisplayExpr mapDisplay) {
+          if (!mapDisplay.Finite) {
+            return false;
+          }
+          var keys = new List<Expression>();
+          foreach (var entry in mapDisplay.Elements) {
+            var key = StripConcreteSyntax(entry.A);
+            var value = StripConcreteSyntax(entry.B);
+            if (!IsLiteralExpression(key) || !IsLiteralExpression(value)) {
+              return false;
+            }
+            if (!ContainsLiteral(keys, key)) {
+              keys.Add(key);
+              if (maxInstances > 0 && keys.Count > maxInstances) {
+                return false;
+              }
+            }
+          }
+          var size = new BigInteger(keys.Count);
+          domain = new ConcreteDomain(size, () => EnumerateSetElements(keys, bv.Type));
+          return true;
+        }
+
+        if (resolved is MapComprehension mapComprehension) {
+          if (!mapComprehension.Finite) {
+            return false;
+          }
+          var bounds = mapComprehension.Bounds;
+          if (bounds == null || bounds.Count != mapComprehension.BoundVars.Count) {
+            if (mapComprehension.Range == null) {
+              return false;
+            }
+            bounds = ModuleResolver.DiscoverBestBounds_MultipleVars(mapComprehension.BoundVars, mapComprehension.Range, true);
+          }
+          if (bounds == null || bounds.Count != mapComprehension.BoundVars.Count) {
+            return false;
+          }
+
+          var domains = new ConcreteDomain[mapComprehension.BoundVars.Count];
+          for (var i = 0; i < mapComprehension.BoundVars.Count; i++) {
+            var boundVar = mapComprehension.BoundVars[i];
+            var boundPool = bounds[i];
+            if (!TryGetConcreteDomain(boundVar, boundPool, out var concreteDomain)) {
+              return false;
+            }
+            domains[i] = concreteDomain;
+          }
+
+          if (maxInstances > 0) {
+            var product = BigInteger.One;
+            foreach (var concreteDomain in domains) {
+              product *= concreteDomain.Size;
+              if (product > maxInstances) {
+                return false;
+              }
+            }
+          }
+
+          Expression keyTemplate;
+          if (mapComprehension.TermLeft != null) {
+            keyTemplate = mapComprehension.TermLeft;
+          } else if (mapComprehension.BoundVars.Count == 1) {
+            var boundVar = mapComprehension.BoundVars[0];
+            keyTemplate = new IdentifierExpr(boundVar.Origin, boundVar) { Type = boundVar.Type };
+          } else {
+            return false;
+          }
+
+          var keys = new List<Expression>();
+          var substMap = new Dictionary<IVariable, Expression>();
+          var typeMap = new Dictionary<TypeParameter, Type>();
+          var range = mapComprehension.Range;
+
+          bool Enumerate(int varIndex) {
+            if (varIndex == domains.Length) {
+              var substituter = new Substituter(null, substMap, typeMap);
+              if (range != null) {
+                var rangeInst = SimplifyForMaterialization(substituter.Substitute(range));
+                rangeInst = StripConcreteSyntax(rangeInst);
+                if (!Expression.IsBoolLiteral(rangeInst, out var rangeValue)) {
+                  return false;
+                }
+                if (!rangeValue) {
+                  return true;
+                }
+              }
+
+              var keyInst = SimplifyForMaterialization(substituter.Substitute(keyTemplate));
+              keyInst = StripConcreteSyntax(keyInst);
+              if (!IsLiteralExpression(keyInst)) {
+                return false;
+              }
+              if (!ContainsLiteral(keys, keyInst)) {
+                keys.Add(keyInst);
+                if (maxInstances > 0 && keys.Count > maxInstances) {
+                  return false;
+                }
+              }
+              return true;
+            }
+
+            var boundVar = mapComprehension.BoundVars[varIndex];
+            foreach (var value in domains[varIndex].Enumerate()) {
+              EnsureExpressionType(value, boundVar.Type);
+              substMap[boundVar] = value;
+              if (!Enumerate(varIndex + 1)) {
+                return false;
+              }
+            }
+            return true;
+          }
+
+          if (!Enumerate(0)) {
+            return false;
+          }
+
+          var size = new BigInteger(keys.Count);
+          domain = new ConcreteDomain(size, () => EnumerateSetElements(keys, bv.Type));
+          return true;
+        }
       }
 
       if (bound is SubSetBoundedPool subSetPool) {

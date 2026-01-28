@@ -1038,5 +1038,149 @@ iterator Iter(n: int) yields (y: int)
     var natRewrite = InvokeRewriteExpr(engine, natForall);
     Assert.True(Expression.IsBoolLiteral(natRewrite, out var natValue) && !natValue);
   }
+
+  // Objective: unroll bounded foralls over sequence literals.
+  [Fact]
+  public async Task SeqLiteralBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    var options = CreateOptions(10);
+
+    var impl = await TranslateSingleImplementation(@"
+method SeqLiteralForall() {
+  assert forall x :: x in [6] ==> x >= 0;
+}
+", options, "SeqLiteralForall");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
+  }
+
+  // Objective: unroll bounded foralls over multiset literals.
+  [Fact]
+  public async Task MultisetLiteralBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    var options = CreateOptions(10);
+
+    var impl = await TranslateSingleImplementation(@"
+method MultisetLiteralForall() {
+  assert forall x :: x in multiset{1, 2, 3} ==> x >= 0;
+}
+", options, "MultisetLiteralForall");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
+  }
+
+  // Objective: unroll bounded foralls over map literal keys.
+  [Fact]
+  public async Task MapLiteralBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    var options = CreateOptions(10);
+
+    var impl = await TranslateSingleImplementation(@"
+method MapLiteralForall() {
+  assert forall k :: k in map[1 := 10, 2 := 20, 3 := 30] ==> k >= 0;
+}
+", options, "MapLiteralForall");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
+  }
+
+  // Objective: unroll bounded foralls over finite MapComprehension.
+  [Fact]
+  public async Task MapComprehensionBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    var options = CreateOptions(10);
+
+    var impl = await TranslateSingleImplementation(@"
+method MapComprehensionForall() {
+  assert forall k :: k in (map i | 0 <= i < 3 :: i := i) ==> k >= 0;
+}
+", options, "MapComprehensionForall");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
+  }
+
+  // Objective: verify deduplication works for sequence literals under tight cap.
+  [Fact]
+  public async Task SeqLiteralBoundedForall_DedupWorks_WhenTightCap() {
+    var options = CreateOptions(2); // Tight cap to force deduplication
+
+    var impl = await TranslateSingleImplementation(@"
+method SeqLiteralDedup() {
+  assert forall x :: x in [1, 1, 2] ==> x >= 0;
+}
+", options, "SeqLiteralDedup");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
+  }
+
+  // Objective: verify deduplication works for multiset literals under tight cap.
+  [Fact]
+  public async Task MultisetLiteralBoundedForall_DedupWorks_WhenTightCap() {
+    var options = CreateOptions(2); // Tight cap to force deduplication
+
+    var impl = await TranslateSingleImplementation(@"
+method MultisetLiteralDedup() {
+  assert forall x :: x in multiset{1, 1, 2} ==> x >= 0;
+}
+", options, "MultisetLiteralDedup");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
+  }
+
+  // Objective: keep forall when seq literal domain exceeds the cap.
+  [Fact]
+  public async Task SeqLiteralBoundedForall_IsNotUnrolled_WhenExceedingMaxInstances() {
+    var options = CreateOptions(1); // Cap of 1, but seq has 2 elements
+
+    var impl = await TranslateSingleImplementation(@"
+method SeqLiteralExceedsCap() {
+  assert forall x :: x in [1, 2] ==> x >= 0;
+}
+", options, "SeqLiteralExceedsCap");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.Contains(asserts, a => ContainsForall(a.Expr));
+  }
+
+  // Objective: keep forall when multiset literal domain exceeds the cap.
+  [Fact]
+  public async Task MultisetLiteralBoundedForall_IsNotUnrolled_WhenExceedingMaxInstances() {
+    var options = CreateOptions(1); // Cap of 1, but multiset has 2 elements
+
+    var impl = await TranslateSingleImplementation(@"
+method MultisetLiteralExceedsCap() {
+  assert forall x :: x in multiset{1, 2} ==> x >= 0;
+}
+", options, "MultisetLiteralExceedsCap");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.Contains(asserts, a => ContainsForall(a.Expr));
+  }
+
+  // Objective: keep forall when map literal domain exceeds the cap.
+  [Fact]
+  public async Task MapLiteralBoundedForall_IsNotUnrolled_WhenExceedingMaxInstances() {
+    var options = CreateOptions(1); // Cap of 1, but map has 2 keys
+
+    var impl = await TranslateSingleImplementation(@"
+method MapLiteralExceedsCap() {
+  assert forall k :: k in map[1 := 10, 2 := 20] ==> k >= 0;
+}
+", options, "MapLiteralExceedsCap");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.Contains(asserts, a => ContainsForall(a.Expr));
+  }
 }
 
