@@ -280,6 +280,10 @@ internal sealed partial class PartialEvaluatorEngine {
         return SimplifyMultiSetIntersection(binary);
       case BinaryExpr.ResolvedOpcode.MultiSetDifference:
         return SimplifyMultiSetDifference(binary);
+      case BinaryExpr.ResolvedOpcode.InSeq:
+        return SimplifySeqMembership(binary, true);
+      case BinaryExpr.ResolvedOpcode.NotInSeq:
+        return SimplifySeqMembership(binary, false);
       default:
         return binary;
     }
@@ -616,6 +620,16 @@ internal sealed partial class PartialEvaluatorEngine {
         IsLiteralLike(binary.E0)) {
       var counts = BuildMultisetCounts(multiSetDisplay.Elements);
       var contains = counts.Any(entry => AreLiteralExpressionsEqual(entry.Element, binary.E0) && entry.Count > 0);
+      return CreateBoolLiteral(binary.Origin, isIn ? contains : !contains);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifySeqMembership(BinaryExpr binary, bool isIn) {
+    if (TryGetSeqDisplayLiteral(binary.E1, out var seqDisplay) &&
+        AllElementsAreLiterals(seqDisplay.Elements) &&
+        IsLiteralLike(binary.E0)) {
+      var contains = ContainsLiteralElement(seqDisplay.Elements, binary.E0);
       return CreateBoolLiteral(binary.Origin, isIn ? contains : !contains);
     }
     return binary;
