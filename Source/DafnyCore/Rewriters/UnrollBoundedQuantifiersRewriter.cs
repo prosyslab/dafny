@@ -77,28 +77,15 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
     }
 
     private static void RewriteExprInPlaceList(IList<Expression>? exprs, Func<Expression, Expression> rewriter) {
-      if (exprs == null) {
-        return;
-      }
-      for (var i = 0; i < exprs.Count; i++) {
-        exprs[i] = rewriter(exprs[i]);
-      }
+      ExpressionRewriteUtil.RewriteExprInPlaceList(exprs, rewriter);
     }
 
     private static void RewriteFrameExprsInPlace(IList<FrameExpression>? exprs, Func<Expression, Expression> rewriter) {
-      if (exprs == null) {
-        return;
-      }
-      for (var i = 0; i < exprs.Count; i++) {
-        // FrameExpression.E is derived (read-only). Mutate DesugaredExpression to affect E.
-        exprs[i].DesugaredExpression = rewriter(exprs[i].E);
-      }
+      ExpressionRewriteUtil.RewriteFrameExprsInPlace(exprs, rewriter);
     }
 
     private static void RewriteAttributedExprsInPlace(IEnumerable<AttributedExpression> exprs, Func<Expression, Expression> rewriter) {
-      foreach (var expr in exprs) {
-        expr.E = rewriter(expr.E);
-      }
+      ExpressionRewriteUtil.RewriteAttributedExprsInPlace(exprs, rewriter);
     }
 
     private void RewriteStmt(Statement stmt) {
@@ -609,19 +596,11 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
     }
 
     internal static void EnsureExpressionType(Expression expr, Type type) {
-      if (expr.Type == null) {
-        expr.Type = type;
-      }
+      ExpressionRewriteUtil.EnsureExpressionType(expr, type);
     }
 
     internal static Expression StripConcreteSyntax(Expression expr) {
-      if (expr is ConcreteSyntaxExpression concreteSyntaxExpression && concreteSyntaxExpression.ResolvedExpression != null) {
-        return concreteSyntaxExpression.ResolvedExpression;
-      }
-      if (expr is ParensExpression parens && parens.ResolvedExpression != null) {
-        return parens.ResolvedExpression;
-      }
-      return expr;
+      return ExpressionRewriteUtil.StripConcreteSyntax(expr);
     }
 
     private static bool IsLiteralExpression(Expression expr) {
