@@ -133,7 +133,7 @@ internal sealed partial class PartialEvaluatorEngine {
         var substituter = new Substituter(null, substMap, typeMap);
         if (mapComprehension.Range != null) {
           var rangeInst = simplifyExpression(substituter.Substitute(mapComprehension.Range), state);
-          rangeInst = UnrollBoundedQuantifiersRewriter.UnrollEngine.StripConcreteSyntax(rangeInst);
+          rangeInst = ExpressionRewriteUtil.StripConcreteSyntax(rangeInst);
           if (!Expression.IsBoolLiteral(rangeInst, out var rangeValue)) {
             return false;
           }
@@ -143,13 +143,13 @@ internal sealed partial class PartialEvaluatorEngine {
         }
 
         var keyExpr = simplifyExpression(substituter.Substitute(keyTemplate), state);
-        keyExpr = UnrollBoundedQuantifiersRewriter.UnrollEngine.StripConcreteSyntax(keyExpr);
+        keyExpr = ExpressionRewriteUtil.StripConcreteSyntax(keyExpr);
         if (!IsLiteralLike(keyExpr)) {
           return false;
         }
 
         var valueExpr = simplifyExpression(substituter.Substitute(mapComprehension.Term), state);
-        valueExpr = UnrollBoundedQuantifiersRewriter.UnrollEngine.StripConcreteSyntax(valueExpr);
+        valueExpr = ExpressionRewriteUtil.StripConcreteSyntax(valueExpr);
 
         for (var i = 0; i < entries.Count; i++) {
           if (AreLiteralExpressionsEqual(entries[i].A, keyExpr)) {
@@ -169,7 +169,7 @@ internal sealed partial class PartialEvaluatorEngine {
         if (cap > 0 && entries.Count >= cap) {
           return false;
         }
-        UnrollBoundedQuantifiersRewriter.UnrollEngine.EnsureExpressionType(value, bv.Type);
+        ExpressionRewriteUtil.EnsureExpressionType(value, bv.Type);
         substMap[bv] = value;
         if (!Enumerate(varIndex + 1)) {
           return false;
