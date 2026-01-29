@@ -15,7 +15,7 @@ internal sealed partial class PartialEvaluatorEngine {
   private readonly SystemModuleManager systemModuleManager;
   private readonly uint inlineDepth;
   private readonly Dictionary<string, CachedLiteral> inlineCallCache = new(StringComparer.Ordinal);
-  private UnrollBoundedQuantifiersRewriter.UnrollEngine boundedQuantifierUnroller;
+  private QuantifierBounds quantifierBounds;
 
   public PartialEvaluatorEngine(DafnyOptions options, ModuleDefinition module, SystemModuleManager systemModuleManager, uint inlineDepth) {
     this.options = options;
@@ -49,17 +49,16 @@ internal sealed partial class PartialEvaluatorEngine {
       : DefaultPartialEvalUnrollCap;
   }
 
-  private UnrollBoundedQuantifiersRewriter.UnrollEngine GetQuantifierUnroller() {
-    if (boundedQuantifierUnroller != null) {
-      return boundedQuantifierUnroller;
+  private QuantifierBounds GetQuantifierBounds() {
+    if (quantifierBounds != null) {
+      return quantifierBounds;
     }
-    var maxInstances = GetPartialEvalUnrollCap();
-    boundedQuantifierUnroller = new UnrollBoundedQuantifiersRewriter.UnrollEngine(systemModuleManager, maxInstances, this);
-    return boundedQuantifierUnroller;
+    quantifierBounds = new QuantifierBounds(systemModuleManager, GetPartialEvalUnrollCap());
+    return quantifierBounds;
   }
 
   internal bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, out Expression rewritten) {
-    return GetQuantifierUnroller().TryUnrollQuantifier(quantifierExpr, out rewritten);
+    return GetQuantifierBounds().TryUnrollQuantifier(quantifierExpr, SimplifyExpression, out rewritten);
   }
 
   internal bool TryMaterializeSetComprehension(SetComprehension setComprehension, out SetDisplayExpr displayExpr) {
@@ -67,8 +66,7 @@ internal sealed partial class PartialEvaluatorEngine {
     if (!setComprehension.Finite) {
       return false;
     }
-    var unroller = GetQuantifierUnroller();
-    if (!unroller.TryMaterializeSetComprehension(setComprehension, out var elements)) {
+    if (!GetQuantifierBounds().TryMaterializeSetComprehension(setComprehension, SimplifyExpression, out var elements)) {
       return false;
     }
     displayExpr = new SetDisplayExpr(setComprehension.Origin, true, elements) { Type = setComprehension.Type };
@@ -84,101 +82,10 @@ internal sealed partial class PartialEvaluatorEngine {
     if (!mapComprehension.Finite) {
       return false;
     }
-    if (mapComprehension.Bounds == null || mapComprehension.Bounds.Count != mapComprehension.BoundVars.Count) {
-      return false;
-    }
-
-    var unroller = GetQuantifierUnroller();
-    var domains = new UnrollBoundedQuantifiersRewriter.UnrollEngine.ConcreteDomain[mapComprehension.BoundVars.Count];
-    for (var i = 0; i < mapComprehension.BoundVars.Count; i++) {
-      var bv = mapComprehension.BoundVars[i];
-      var bound = mapComprehension.Bounds[i];
-      if (!unroller.TryGetConcreteDomain(bv, bound, out var domain)) {
-        return false;
-      }
-      domains[i] = domain;
-    }
-
-    var cap = unroller.MaxInstances;
-    if (cap > 0) {
-      var size = BigInteger.One;
-      foreach (var domain in domains) {
-        size *= domain.Size;
-        if (size > cap) {
-          return false;
-        }
-      }
-    }
-
-    var entries = new List<MapDisplayEntry>();
-    var substMap = new Dictionary<IVariable, Expression>();
-    var typeMap = new Dictionary<TypeParameter, Type>();
-
-    var keyTemplate = mapComprehension.TermLeft;
-    if (keyTemplate == null) {
-      if (mapComprehension.BoundVars.Count != 1) {
-        return false;
-      }
-      keyTemplate = new IdentifierExpr(mapComprehension.Origin, mapComprehension.BoundVars[0].Name) {
-        Var = mapComprehension.BoundVars[0],
-        Type = mapComprehension.BoundVars[0].Type
-      };
-    }
-
-    bool Enumerate(int varIndex) {
-      if (varIndex == domains.Length) {
-        if (cap > 0 && entries.Count >= cap) {
-          return false;
-        }
-        var substituter = new Substituter(null, substMap, typeMap);
-        if (mapComprehension.Range != null) {
-          var rangeInst = simplifyExpression(substituter.Substitute(mapComprehension.Range), state);
-          rangeInst = ExpressionRewriteUtil.StripConcreteSyntax(rangeInst);
-          if (!Expression.IsBoolLiteral(rangeInst, out var rangeValue)) {
-            return false;
-          }
-          if (!rangeValue) {
-            return true;
-          }
-        }
-
-        var keyExpr = simplifyExpression(substituter.Substitute(keyTemplate), state);
-        keyExpr = ExpressionRewriteUtil.StripConcreteSyntax(keyExpr);
-        if (!IsLiteralLike(keyExpr)) {
-          return false;
-        }
-
-        var valueExpr = simplifyExpression(substituter.Substitute(mapComprehension.Term), state);
-        valueExpr = ExpressionRewriteUtil.StripConcreteSyntax(valueExpr);
-
-        for (var i = 0; i < entries.Count; i++) {
-          if (AreLiteralExpressionsEqual(entries[i].A, keyExpr)) {
-            if (!AreLiteralExpressionsEqual(entries[i].B, valueExpr)) {
-              return false;
-            }
-            return true;
-          }
-        }
-
-        entries.Add(new MapDisplayEntry(keyExpr, valueExpr));
-        return true;
-      }
-
-      var bv = mapComprehension.BoundVars[varIndex];
-      foreach (var value in domains[varIndex].Enumerate()) {
-        if (cap > 0 && entries.Count >= cap) {
-          return false;
-        }
-        ExpressionRewriteUtil.EnsureExpressionType(value, bv.Type);
-        substMap[bv] = value;
-        if (!Enumerate(varIndex + 1)) {
-          return false;
-        }
-      }
-      return true;
-    }
-
-    if (!Enumerate(0)) {
+    if (!GetQuantifierBounds().TryMaterializeMapComprehension(
+          mapComprehension,
+          expr => simplifyExpression(expr, state),
+          out var entries)) {
       return false;
     }
 
@@ -211,13 +118,21 @@ internal sealed partial class PartialEvaluatorEngine {
       case BinaryExpr.ResolvedOpcode.Mod:
         return SimplifyIntBinary(binary, (a, b) => b == 0 ? null : a % b);
       case BinaryExpr.ResolvedOpcode.Lt:
-        return SimplifyIntComparison(binary, (a, b) => a < b);
+        return SimplifyOrderedComparison(binary, (a, b) => a < b, (a, b) => a < b);
+      case BinaryExpr.ResolvedOpcode.LtChar:
+        return SimplifyOrderedComparison(binary, (a, b) => a < b, (a, b) => a < b);
       case BinaryExpr.ResolvedOpcode.Le:
-        return SimplifyIntComparison(binary, (a, b) => a <= b);
+        return SimplifyOrderedComparison(binary, (a, b) => a <= b, (a, b) => a <= b);
+      case BinaryExpr.ResolvedOpcode.LeChar:
+        return SimplifyOrderedComparison(binary, (a, b) => a <= b, (a, b) => a <= b);
       case BinaryExpr.ResolvedOpcode.Gt:
-        return SimplifyIntComparison(binary, (a, b) => a > b);
+        return SimplifyOrderedComparison(binary, (a, b) => a > b, (a, b) => a > b);
+      case BinaryExpr.ResolvedOpcode.GtChar:
+        return SimplifyOrderedComparison(binary, (a, b) => a > b, (a, b) => a > b);
       case BinaryExpr.ResolvedOpcode.Ge:
-        return SimplifyIntComparison(binary, (a, b) => a >= b);
+        return SimplifyOrderedComparison(binary, (a, b) => a >= b, (a, b) => a >= b);
+      case BinaryExpr.ResolvedOpcode.GeChar:
+        return SimplifyOrderedComparison(binary, (a, b) => a >= b, (a, b) => a >= b);
       case BinaryExpr.ResolvedOpcode.EqCommon:
         return SimplifyEquality(binary, true);
       case BinaryExpr.ResolvedOpcode.NeqCommon:
@@ -380,11 +295,38 @@ internal sealed partial class PartialEvaluatorEngine {
     return binary;
   }
 
-  private Expression SimplifyIntComparison(BinaryExpr binary, Func<BigInteger, BigInteger, bool> op) {
-    if (Expression.IsIntLiteral(binary.E0, out var left) && Expression.IsIntLiteral(binary.E1, out var right)) {
-      return Expression.CreateBoolLiteral(binary.Origin, op(left, right));
+  private Expression SimplifyOrderedComparison(BinaryExpr binary, Func<BigInteger, BigInteger, bool> intOp,
+    Func<char, char, bool> charOp) {
+    if (TryGetIntLiteralOrCharLiteral(binary.E0, out var left) &&
+        TryGetIntLiteralOrCharLiteral(binary.E1, out var right)) {
+      return Expression.CreateBoolLiteral(binary.Origin, intOp(left, right));
+    }
+    if (TryGetCharLiteral(binary.E0, out var leftChar) && TryGetCharLiteral(binary.E1, out var rightChar)) {
+      return Expression.CreateBoolLiteral(binary.Origin, charOp(leftChar, rightChar));
     }
     return binary;
+  }
+
+  private static bool TryGetIntLiteralOrCharLiteral(Expression expr, out BigInteger value) {
+    value = default;
+    if (Expression.IsIntLiteral(expr, out var intLiteral)) {
+      value = intLiteral;
+      return true;
+    }
+    if (TryGetCharLiteral(expr, out var charLiteral)) {
+      value = charLiteral;
+      return true;
+    }
+    if (expr is ConversionExpr conversionExpr) {
+      var fromType = conversionExpr.E.Type?.NormalizeExpand();
+      var toType = conversionExpr.Type?.NormalizeExpand();
+      if (fromType != null && toType is IntType && fromType.IsCharType &&
+          TryGetCharLiteral(conversionExpr.E, out var convertedChar)) {
+        value = convertedChar;
+        return true;
+      }
+    }
+    return false;
   }
 
   private static Expression SimplifyEquality(BinaryExpr binary, bool isEq) {
