@@ -164,6 +164,123 @@ method Entry() {
   }
 
   [Fact]
+  public async Task PartialEvaluation_MaterializesCharSetComprehension() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 2U);
+    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 50U);
+
+    var program = await ParseAndResolve(@"
+function ValidColors(): set<char> {
+  set c | 'A' <= c <= 'C' :: c
+}
+
+method Entry() {
+  assert forall c | c in ValidColors() :: c == c;
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmt = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .Single();
+    var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+
+    var calls = assertExpr.DescendantsAndSelf.OfType<FunctionCallExpr>()
+      .Select(call => call.Function.Name)
+      .ToList();
+    Assert.DoesNotContain("ValidColors", calls);
+
+    Assert.Empty(assertExpr.DescendantsAndSelf.OfType<SetComprehension>());
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_SimplifiesDivisibilityExists() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert exists k :: k >= 1 && 99 == 9 * k;
+  assert !(exists k :: k >= 1 && 99 == 8 * k);
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmts = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .ToList();
+    Assert.Equal(2, assertStmts.Count);
+
+    Assert.All(assertStmts, stmt => {
+      var assertExpr = stmt.Expr.Resolved ?? stmt.Expr;
+      Assert.True(Expression.IsBoolLiteral(assertExpr, out var result));
+      Assert.True(result);
+    });
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_SimplifiesStringExistentialDomain() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 2U);
+    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 50U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert exists s: string ::
+    |s| == 2 &&
+    (forall i | 0 <= i < 2 :: s[i] in {'L', 'R'}) &&
+    s == ""LR"";
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmt = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .Single();
+    var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+
+    Assert.True(Expression.IsBoolLiteral(assertExpr, out var result));
+    Assert.True(result);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_SimplifiesSeqExistentialDomain() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 2U);
+    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 50U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert exists s: seq<int> ::
+    |s| == 3 &&
+    (forall i | 0 <= i < 3 :: 0 <= s[i] < 2) &&
+    s == [1, 0, 1];
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmt = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .Single();
+    var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+
+    Assert.True(Expression.IsBoolLiteral(assertExpr, out var result));
+    Assert.True(result);
+  }
+
+  [Fact]
   public async Task PartialEvaluation_NoEntryConfiguredRunsWithoutWarnings() {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
