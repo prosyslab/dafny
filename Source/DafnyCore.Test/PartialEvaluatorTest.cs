@@ -616,6 +616,35 @@ function Entry(): int {
   }
 
   [Fact]
+  public async Task PartialEvaluation_InlinesWhenSomeArgumentsAreConstants() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+function Sum(a: int, b: int): int { a + b }
+
+function Entry(x: int): int {
+  Sum(x, 2)
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Function>().Where(f => f.Name == "Entry"));
+    Assert.NotNull(entry.Body);
+
+    var add = Assert.IsType<BinaryExpr>(entry.Body!);
+    Assert.Equal(BinaryExpr.ResolvedOpcode.Add, add.ResolvedOp);
+    var leftIsLiteral = Expression.IsIntLiteral(add.E0, out var leftValue) && (int)leftValue == 2;
+    var rightIsLiteral = Expression.IsIntLiteral(add.E1, out var rightValue) && (int)rightValue == 2;
+    Assert.True(leftIsLiteral || rightIsLiteral);
+    var other = leftIsLiteral ? add.E1 : add.E0;
+    var identifier = Assert.IsType<IdentifierExpr>(other);
+    Assert.Equal("x", identifier.Name);
+  }
+
+  [Fact]
   public async Task PartialEvaluation_InlinesLambdaApplication() {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();

@@ -389,8 +389,8 @@ internal sealed partial class PartialEvaluatorEngine {
       return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
     }
 
-    if (TryGetCharSeqDisplayLiteral(binary.E0, out var leftChars) && TryGetUnescapedStringCharacters(binary.E1, out var rightChars) ||
-        TryGetUnescapedStringCharacters(binary.E0, out leftChars) && TryGetCharSeqDisplayLiteral(binary.E1, out rightChars)) {
+    if ((TryGetCharSeqDisplayLiteral(binary.E0, out var leftChars) && TryGetUnescapedStringCharacters(binary.E1, out var rightChars)) ||
+        (TryGetUnescapedStringCharacters(binary.E0, out leftChars) && TryGetCharSeqDisplayLiteral(binary.E1, out rightChars))) {
       var equal = CodePointSequencesEqual(leftChars, rightChars);
       return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
     }
@@ -723,14 +723,14 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
-    var allLiteralArgs = true;
+    var hasInlineableArgument = callExpr.Args.Count == 0;
     for (var i = 0; i < callExpr.Args.Count; i++) {
-      if (!IsInlineableArgument(callExpr.Args[i])) {
-        allLiteralArgs = false;
+      if (IsInlineableArgument(callExpr.Args[i])) {
+        hasInlineableArgument = true;
         break;
       }
     }
-    if (!allLiteralArgs) {
+    if (!hasInlineableArgument) {
       return false;
     }
 
