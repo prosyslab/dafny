@@ -114,6 +114,7 @@ public static class RewriterAstPrinter {
     TextWriter fallbackWriter) {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.AllowDecreasesStarOnFunctionsAndLemmas, true);
 
     if (!string.IsNullOrEmpty(entryName)) {
       options.Set(CommonOptionBag.PartialEvalEntry, entryName);
