@@ -34,6 +34,7 @@ internal sealed class QuantifierBounds {
     public IEnumerable<Expression> Enumerate() => enumeratorFactory();
   }
 
+  // === Expression normalization & pattern helpers ===
   internal static void EnsureExpressionType(Expression expr, Type type) {
     ExpressionRewriteUtil.EnsureExpressionType(expr, type);
   }
@@ -97,6 +98,7 @@ internal sealed class QuantifierBounds {
     return binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Imp || binaryExpr.Op == BinaryExpr.Opcode.Imp;
   }
 
+  // === Literal helpers (structural equality, dedup) ===
   private static bool IsLiteralExpression(Expression expr) {
     expr = StripConcreteSyntax(expr);
     switch (expr) {
@@ -161,17 +163,38 @@ internal sealed class QuantifierBounds {
     }
   }
 
-  private static bool ContainsLiteral(List<Expression> elements, Expression candidate) {
-    foreach (var element in elements) {
-      if (LiteralStructuralEquals(element, candidate)) {
-        return true;
-      }
+  private static bool AddUniqueLiteral(List<Expression> uniques, Expression candidate) {
+    var normalized = StripConcreteSyntax(candidate);
+    if (uniques.Any(existing => LiteralStructuralEquals(existing, normalized))) {
+      return false;
     }
-    return false;
+    uniques.Add(normalized);
+    return true;
   }
 
-  private readonly record struct IntBoundConstraint(int TargetIndex, int? SourceIndex, BigInteger Offset, bool IsLower);
+  private bool TryAddUniqueLiteral(List<Expression> uniques, Expression candidate, uint? cap) {
+    if (AddUniqueLiteral(uniques, candidate)) {
+      if (cap.HasValue && uniques.Count > cap.Value) {
+        return false;
+      }
+    }
+    return true;
+  }
 
+  private static List<Expression> DeduplicateLiterals(List<Expression> elements) {
+    var results = new List<Expression>();
+    foreach (var element in elements) {
+      AddUniqueLiteral(results, element);
+    }
+    return results;
+  }
+
+  // === Public/Internal entrypoints ===
+  /// <summary>
+  /// Unroll a quantifier into a boolean expression when all bound variables have concrete, finite domains.
+  /// Returns false if any bound is non-concrete, the domain product exceeds the instance cap, or the
+  /// quantifier is split/unsupported.
+  /// </summary>
   internal bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, Func<Expression, Expression> simplifyAfterSubst, out Expression rewritten) {
     rewritten = quantifierExpr;
 
@@ -290,6 +313,10 @@ internal sealed class QuantifierBounds {
     return true;
   }
 
+  /// <summary>
+  /// Materialize a finite set expression into its elements, honoring the optional cap.
+  /// Returns false when the set is non-finite, non-materializable, or exceeds the cap.
+  /// </summary>
   internal bool TryMaterializeSetElements(Expression setExpr, uint? materializationCap, Func<Expression, Expression> simplify,
     out List<Expression> elements) {
     elements = null!;
@@ -310,6 +337,10 @@ internal sealed class QuantifierBounds {
     return false;
   }
 
+  /// <summary>
+  /// Materialize a finite set comprehension into its elements when all bound variables have concrete domains.
+  /// Returns false if bounds are missing, range is non-boolean, or the enumeration exceeds the instance cap.
+  /// </summary>
   internal bool TryMaterializeSetComprehension(SetComprehension setComprehension, Func<Expression, Expression> simplify,
     out List<Expression> elements) {
     elements = null!;
@@ -348,14 +379,8 @@ internal sealed class QuantifierBounds {
       domains[i] = domain;
     }
 
-    if (maxInstances > 0) {
-      var size = BigInteger.One;
-      foreach (var domain in domains) {
-        size *= domain.Size;
-        if (size > maxInstances) {
-          return false;
-        }
-      }
+    if (!IsDomainProductWithinMaxInstances(domains)) {
+      return false;
     }
 
     var results = new List<Expression>();
@@ -364,41 +389,24 @@ internal sealed class QuantifierBounds {
     var range = setComprehension.Range;
     var term = setComprehension.Term;
 
-    bool Enumerate(int varIndex) {
-      if (varIndex == domains.Length) {
-        if (maxInstances > 0 && results.Count >= maxInstances) {
-          return false;
-        }
-        var substituter = new Substituter(null, substMap, typeMap);
-        if (range != null) {
-          var rangeInst = simplify(substituter.Substitute(range));
-          rangeInst = StripConcreteSyntax(rangeInst);
-          if (!Expression.IsBoolLiteral(rangeInst, out var rangeValue)) {
-            return false;
-          }
-          if (!rangeValue) {
-            return true;
-          }
-        }
-
-        var termInst = simplify(substituter.Substitute(term));
-        termInst = StripConcreteSyntax(termInst);
-        results.Add(termInst);
+    bool HandleInstance(Substituter substituter) {
+      if (maxInstances > 0 && results.Count >= maxInstances) {
+        return false;
+      }
+      if (!TryEvaluateRangeToBool(range, substituter, simplify, out var rangeValue)) {
+        return false;
+      }
+      if (!rangeValue) {
         return true;
       }
 
-      var bv = setComprehension.BoundVars[varIndex];
-      foreach (var value in domains[varIndex].Enumerate()) {
-        EnsureExpressionType(value, bv.Type);
-        substMap[bv] = value;
-        if (!Enumerate(varIndex + 1)) {
-          return false;
-        }
-      }
+      var termInst = simplify(substituter.Substitute(term));
+      termInst = StripConcreteSyntax(termInst);
+      results.Add(termInst);
       return true;
     }
 
-    if (!Enumerate(0)) {
+    if (!TryEnumerateAssignments(setComprehension.BoundVars, domains, substMap, typeMap, HandleInstance)) {
       return false;
     }
 
@@ -412,6 +420,10 @@ internal sealed class QuantifierBounds {
     return true;
   }
 
+  /// <summary>
+  /// Materialize a finite map comprehension into display entries when all bound variables have concrete domains.
+  /// Returns false if keys are non-literal, ranges are non-boolean, or enumeration exceeds the instance cap.
+  /// </summary>
   internal bool TryMaterializeMapComprehension(MapComprehension mapComprehension, Func<Expression, Expression> simplify,
     out List<MapDisplayEntry> entries) {
     entries = null!;
@@ -435,14 +447,8 @@ internal sealed class QuantifierBounds {
       domains[i] = domain;
     }
 
-    if (maxInstances > 0) {
-      var size = BigInteger.One;
-      foreach (var domain in domains) {
-        size *= domain.Size;
-        if (size > maxInstances) {
-          return false;
-        }
-      }
+    if (!IsDomainProductWithinMaxInstances(domains)) {
+      return false;
     }
 
     var resultEntries = new List<MapDisplayEntry>();
@@ -460,60 +466,40 @@ internal sealed class QuantifierBounds {
       };
     }
 
-    bool Enumerate(int varIndex) {
-      if (varIndex == domains.Length) {
-        if (maxInstances > 0 && resultEntries.Count >= maxInstances) {
-          return false;
-        }
-        var substituter = new Substituter(null, substMap, typeMap);
-        if (mapComprehension.Range != null) {
-          var rangeInst = simplify(substituter.Substitute(mapComprehension.Range));
-          rangeInst = StripConcreteSyntax(rangeInst);
-          if (!Expression.IsBoolLiteral(rangeInst, out var rangeValue)) {
-            return false;
-          }
-          if (!rangeValue) {
-            return true;
-          }
-        }
-
-        var keyExpr = simplify(substituter.Substitute(keyTemplate));
-        keyExpr = StripConcreteSyntax(keyExpr);
-        if (!IsLiteralExpression(keyExpr)) {
-          return false;
-        }
-
-        var valueExpr = simplify(substituter.Substitute(mapComprehension.Term));
-        valueExpr = StripConcreteSyntax(valueExpr);
-
-        for (var i = 0; i < resultEntries.Count; i++) {
-          if (LiteralStructuralEquals(resultEntries[i].A, keyExpr)) {
-            if (!LiteralStructuralEquals(resultEntries[i].B, valueExpr)) {
-              return false;
-            }
-            return true;
-          }
-        }
-
-        resultEntries.Add(new MapDisplayEntry(keyExpr, valueExpr));
+    bool HandleInstance(Substituter substituter) {
+      if (maxInstances > 0 && resultEntries.Count >= maxInstances) {
+        return false;
+      }
+      if (!TryEvaluateRangeToBool(mapComprehension.Range, substituter, simplify, out var rangeValue)) {
+        return false;
+      }
+      if (!rangeValue) {
         return true;
       }
 
-      var bv = mapComprehension.BoundVars[varIndex];
-      foreach (var value in domains[varIndex].Enumerate()) {
-        if (maxInstances > 0 && resultEntries.Count >= maxInstances) {
-          return false;
-        }
-        EnsureExpressionType(value, bv.Type);
-        substMap[bv] = value;
-        if (!Enumerate(varIndex + 1)) {
-          return false;
+      var keyExpr = simplify(substituter.Substitute(keyTemplate));
+      keyExpr = StripConcreteSyntax(keyExpr);
+      if (!IsLiteralExpression(keyExpr)) {
+        return false;
+      }
+
+      var valueExpr = simplify(substituter.Substitute(mapComprehension.Term));
+      valueExpr = StripConcreteSyntax(valueExpr);
+
+      for (var i = 0; i < resultEntries.Count; i++) {
+        if (LiteralStructuralEquals(resultEntries[i].A, keyExpr)) {
+          if (!LiteralStructuralEquals(resultEntries[i].B, valueExpr)) {
+            return false;
+          }
+          return true;
         }
       }
+
+      resultEntries.Add(new MapDisplayEntry(keyExpr, valueExpr));
       return true;
     }
 
-    if (!Enumerate(0)) {
+    if (!TryEnumerateAssignments(mapComprehension.BoundVars, domains, substMap, typeMap, HandleInstance)) {
       return false;
     }
 
@@ -521,6 +507,78 @@ internal sealed class QuantifierBounds {
     return true;
   }
 
+  /// <summary>
+  /// Materialize the key set of a finite map comprehension when all bound variables have concrete domains.
+  /// Returns false if key expressions are non-literal, range is non-boolean, or enumeration exceeds the instance cap.
+  /// </summary>
+  private bool TryMaterializeMapComprehensionKeys(MapComprehension mapComprehension, Func<Expression, Expression> simplify,
+    out List<Expression> keys) {
+    keys = null!;
+    var bounds = TryGetBoundsOrDiscover(mapComprehension.BoundVars, mapComprehension.Bounds,
+      () => mapComprehension.Range, polarity: true);
+    if (bounds == null || bounds.Count != mapComprehension.BoundVars.Count) {
+      return false;
+    }
+
+    var domains = new ConcreteDomain[mapComprehension.BoundVars.Count];
+    for (var i = 0; i < mapComprehension.BoundVars.Count; i++) {
+      var boundVar = mapComprehension.BoundVars[i];
+      var boundPool = bounds[i];
+      if (!TryGetConcreteDomain(boundVar, boundPool, simplify, out var concreteDomain)) {
+        return false;
+      }
+      domains[i] = concreteDomain;
+    }
+
+    if (!IsDomainProductWithinMaxInstances(domains)) {
+      return false;
+    }
+
+    Expression keyTemplate;
+    if (mapComprehension.TermLeft != null) {
+      keyTemplate = mapComprehension.TermLeft;
+    } else if (mapComprehension.BoundVars.Count == 1) {
+      var boundVar = mapComprehension.BoundVars[0];
+      keyTemplate = new IdentifierExpr(boundVar.Origin, boundVar) { Type = boundVar.Type };
+    } else {
+      return false;
+    }
+
+    var resultKeys = new List<Expression>();
+    var substMap = new Dictionary<IVariable, Expression>();
+    var typeMap = new Dictionary<TypeParameter, Type>();
+    var range = mapComprehension.Range;
+
+    bool HandleInstance(Substituter substituter) {
+      if (!TryEvaluateRangeToBool(range, substituter, simplify, out var rangeValue)) {
+        return false;
+      }
+      if (!rangeValue) {
+        return true;
+      }
+
+      var keyInst = simplify(substituter.Substitute(keyTemplate));
+      keyInst = StripConcreteSyntax(keyInst);
+      if (!IsLiteralExpression(keyInst)) {
+        return false;
+      }
+      var cap = maxInstances == 0 ? (uint?)null : maxInstances;
+      return TryAddUniqueLiteral(resultKeys, keyInst, cap);
+    }
+
+    if (!TryEnumerateAssignments(mapComprehension.BoundVars, domains, substMap, typeMap, HandleInstance)) {
+      return false;
+    }
+
+    keys = resultKeys;
+    return true;
+  }
+
+  // === Seq domain extraction entrypoints ===
+  /// <summary>
+  /// Detect a constraint of the form |seqVar| == N with a non-negative int literal.
+  /// Returns false when the expression is not an equality or the length is not a concrete int literal.
+  /// </summary>
   internal bool TryGetSeqLengthConstraint(Expression expr, BoundVar seqVar, out int length) {
     length = default;
     expr = NormalizeForPattern(expr);
@@ -547,6 +605,10 @@ internal sealed class QuantifierBounds {
     return false;
   }
 
+  /// <summary>
+  /// Try to infer a concrete element domain for seqVar based on a forall index range and term constraints.
+  /// Returns false when the pattern does not match or the domain is not concrete.
+  /// </summary>
   internal bool TryGetElementDomainConstraint(ForallExpr forallExpr, BoundVar seqVar, int length, out List<Expression> domain) {
     domain = null!;
     if (forallExpr.BoundVars.Count != 1) {
@@ -572,6 +634,7 @@ internal sealed class QuantifierBounds {
     return false;
   }
 
+  // === Seq domain extraction helpers ===
   private static bool TryGetSeqLength(Expression expr, BoundVar seqVar, out bool matched) {
     matched = false;
     expr = NormalizeForPattern(expr);
@@ -771,15 +834,66 @@ internal sealed class QuantifierBounds {
     return domain.Count > 0;
   }
 
-  private static List<Expression> DeduplicateLiterals(List<Expression> elements) {
-    var results = new List<Expression>();
-    foreach (var element in elements) {
-      var normalized = NormalizeForPattern(element);
-      if (!results.Any(existing => LiteralStructuralEquals(existing, normalized))) {
-        results.Add(normalized);
+  // === Quantifier/comprehension enumeration helpers ===
+  private bool IsDomainProductWithinMaxInstances(ConcreteDomain[] domains) {
+    if (maxInstances == 0) {
+      return true;
+    }
+    var size = BigInteger.One;
+    foreach (var domain in domains) {
+      size *= domain.Size;
+      if (size > maxInstances) {
+        return false;
       }
     }
-    return results;
+    return true;
+  }
+
+  private static bool TryEvaluateRangeToBool(Expression? range, Substituter substituter,
+    Func<Expression, Expression> simplify, out bool value) {
+    value = true;
+    if (range == null) {
+      return true;
+    }
+
+    var rangeInst = simplify(substituter.Substitute(range));
+    rangeInst = StripConcreteSyntax(rangeInst);
+    return Expression.IsBoolLiteral(rangeInst, out value);
+  }
+
+  private bool TryEnumerateAssignments(IReadOnlyList<BoundVar> boundVars, ConcreteDomain[] domains,
+    Dictionary<IVariable, Expression> substMap, Dictionary<TypeParameter, Type> typeMap,
+    Func<Substituter, bool> onComplete, Func<bool>? shouldStopEarly = null) {
+    bool Enumerate(int varIndex) {
+      if (shouldStopEarly?.Invoke() == true) {
+        return true;
+      }
+
+      if (varIndex == domains.Length) {
+        var substituter = new Substituter(null, substMap, typeMap);
+        return onComplete(substituter);
+      }
+
+      var boundVar = boundVars[varIndex];
+      foreach (var value in domains[varIndex].Enumerate()) {
+        if (shouldStopEarly?.Invoke() == true) {
+          return true;
+        }
+
+        EnsureExpressionType(value, boundVar.Type);
+        substMap[boundVar] = value;
+        if (!Enumerate(varIndex + 1)) {
+          return false;
+        }
+
+        if (shouldStopEarly?.Invoke() == true) {
+          return true;
+        }
+      }
+      return true;
+    }
+
+    return Enumerate(0);
   }
 
   private static bool TryGetSeqSelect(Expression expr, BoundVar seqVar, BoundVar indexVar, out SeqSelectExpr selectExpr) {
@@ -797,6 +911,9 @@ internal sealed class QuantifierBounds {
     }
     return false;
   }
+
+  // === Concrete domain inference (int/char) ===
+  private readonly record struct IntBoundConstraint(int TargetIndex, int? SourceIndex, BigInteger Offset, bool IsLower);
 
   private bool TryGetConcreteIntDomainsFromPools(IReadOnlyList<BoundVar> boundVars, IReadOnlyList<BoundedPool?> bounds,
     out ConcreteDomain[] domains) {
@@ -917,6 +1034,10 @@ internal sealed class QuantifierBounds {
     return true;
   }
 
+  /// <summary>
+  /// Build a concrete character domain from a disjunction of range constraints.
+  /// Returns false if the range cannot be parsed into finite char bounds or exceeds the instance cap.
+  /// </summary>
   private bool TryGetConcreteCharDomainFromRange(Expression rangeExpr, BoundVar boundVar, out ConcreteDomain domain) {
     domain = null!;
     if (rangeExpr == null) {
@@ -1330,6 +1451,11 @@ internal sealed class QuantifierBounds {
     return false;
   }
 
+  // === Concrete domain inference entrypoints ===
+  /// <summary>
+  /// Try to compute a concrete, finite domain for a bound variable based on its bounded pool.
+  /// Returns false when the pool is non-finite, non-literal, or exceeds the instance cap.
+  /// </summary>
   internal bool TryGetConcreteDomain(BoundVar bv, BoundedPool? bound, Func<Expression, Expression> simplify,
     out ConcreteDomain domain) {
     domain = null!;
@@ -1370,16 +1496,14 @@ internal sealed class QuantifierBounds {
       var resolved = StripConcreteSyntax(seqPool.Seq);
       if (resolved is SeqDisplayExpr seqDisplay) {
         var elements = new List<Expression>();
+        var cap = maxInstances == 0 ? (uint?)null : maxInstances;
         foreach (var element in seqDisplay.Elements) {
           var value = StripConcreteSyntax(element);
           if (!IsLiteralExpression(value)) {
             return false;
           }
-          if (!ContainsLiteral(elements, value)) {
-            elements.Add(value);
-            if (maxInstances > 0 && elements.Count > maxInstances) {
-              return false;
-            }
+          if (!TryAddUniqueLiteral(elements, value, cap)) {
+            return false;
           }
         }
         var size = new BigInteger(elements.Count);
@@ -1392,16 +1516,14 @@ internal sealed class QuantifierBounds {
       var resolved = StripConcreteSyntax(multisetPool.MultiSet);
       if (resolved is MultiSetDisplayExpr multisetDisplay) {
         var elements = new List<Expression>();
+        var cap = maxInstances == 0 ? (uint?)null : maxInstances;
         foreach (var element in multisetDisplay.Elements) {
           var value = StripConcreteSyntax(element);
           if (!IsLiteralExpression(value)) {
             return false;
           }
-          if (!ContainsLiteral(elements, value)) {
-            elements.Add(value);
-            if (maxInstances > 0 && elements.Count > maxInstances) {
-              return false;
-            }
+          if (!TryAddUniqueLiteral(elements, value, cap)) {
+            return false;
           }
         }
         var size = new BigInteger(elements.Count);
@@ -1420,17 +1542,15 @@ internal sealed class QuantifierBounds {
           return false;
         }
         var keys = new List<Expression>();
+        var cap = maxInstances == 0 ? (uint?)null : maxInstances;
         foreach (var entry in mapDisplay.Elements) {
           var key = StripConcreteSyntax(entry.A);
           var value = StripConcreteSyntax(entry.B);
           if (!IsLiteralExpression(key) || !IsLiteralExpression(value)) {
             return false;
           }
-          if (!ContainsLiteral(keys, key)) {
-            keys.Add(key);
-            if (maxInstances > 0 && keys.Count > maxInstances) {
-              return false;
-            }
+          if (!TryAddUniqueLiteral(keys, key, cap)) {
+            return false;
           }
         }
         var size = new BigInteger(keys.Count);
@@ -1479,102 +1599,7 @@ internal sealed class QuantifierBounds {
     return false;
   }
 
-  private bool TryMaterializeMapComprehensionKeys(MapComprehension mapComprehension, Func<Expression, Expression> simplify,
-    out List<Expression> keys) {
-    keys = null!;
-    var bounds = mapComprehension.Bounds;
-    if (bounds == null || bounds.Count != mapComprehension.BoundVars.Count) {
-      if (mapComprehension.Range == null) {
-        return false;
-      }
-      bounds = ModuleResolver.DiscoverBestBounds_MultipleVars(mapComprehension.BoundVars, mapComprehension.Range, true);
-    }
-    if (bounds == null || bounds.Count != mapComprehension.BoundVars.Count) {
-      return false;
-    }
-
-    var domains = new ConcreteDomain[mapComprehension.BoundVars.Count];
-    for (var i = 0; i < mapComprehension.BoundVars.Count; i++) {
-      var boundVar = mapComprehension.BoundVars[i];
-      var boundPool = bounds[i];
-      if (!TryGetConcreteDomain(boundVar, boundPool, simplify, out var concreteDomain)) {
-        return false;
-      }
-      domains[i] = concreteDomain;
-    }
-
-    if (maxInstances > 0) {
-      var product = BigInteger.One;
-      foreach (var concreteDomain in domains) {
-        product *= concreteDomain.Size;
-        if (product > maxInstances) {
-          return false;
-        }
-      }
-    }
-
-    Expression keyTemplate;
-    if (mapComprehension.TermLeft != null) {
-      keyTemplate = mapComprehension.TermLeft;
-    } else if (mapComprehension.BoundVars.Count == 1) {
-      var boundVar = mapComprehension.BoundVars[0];
-      keyTemplate = new IdentifierExpr(boundVar.Origin, boundVar) { Type = boundVar.Type };
-    } else {
-      return false;
-    }
-
-    var resultKeys = new List<Expression>();
-    var substMap = new Dictionary<IVariable, Expression>();
-    var typeMap = new Dictionary<TypeParameter, Type>();
-    var range = mapComprehension.Range;
-
-    bool Enumerate(int varIndex) {
-      if (varIndex == domains.Length) {
-        var substituter = new Substituter(null, substMap, typeMap);
-        if (range != null) {
-          var rangeInst = simplify(substituter.Substitute(range));
-          rangeInst = StripConcreteSyntax(rangeInst);
-          if (!Expression.IsBoolLiteral(rangeInst, out var rangeValue)) {
-            return false;
-          }
-          if (!rangeValue) {
-            return true;
-          }
-        }
-
-        var keyInst = simplify(substituter.Substitute(keyTemplate));
-        keyInst = StripConcreteSyntax(keyInst);
-        if (!IsLiteralExpression(keyInst)) {
-          return false;
-        }
-        if (!ContainsLiteral(resultKeys, keyInst)) {
-          resultKeys.Add(keyInst);
-          if (maxInstances > 0 && resultKeys.Count > maxInstances) {
-            return false;
-          }
-        }
-        return true;
-      }
-
-      var boundVar = mapComprehension.BoundVars[varIndex];
-      foreach (var value in domains[varIndex].Enumerate()) {
-        EnsureExpressionType(value, boundVar.Type);
-        substMap[boundVar] = value;
-        if (!Enumerate(varIndex + 1)) {
-          return false;
-        }
-      }
-      return true;
-    }
-
-    if (!Enumerate(0)) {
-      return false;
-    }
-
-    keys = resultKeys;
-    return true;
-  }
-
+  // === Enumerators & small utilities ===
   private IEnumerable<Expression> EnumerateIntRange(BoundVar bv, BigInteger lower, BigInteger upper) {
     for (var v = lower; v < upper; v++) {
       yield return new LiteralExpr(bv.Origin, v) { Type = bv.Type };
@@ -1719,6 +1744,7 @@ internal sealed class QuantifierBounds {
     return true;
   }
 
+  // === Bounds discovery helpers ===
   private static List<BoundedPool?>? TryGetBoundsOrDiscover(
     List<BoundVar> boundVars,
     List<BoundedPool?>? existingBounds,
