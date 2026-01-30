@@ -26,13 +26,18 @@ internal sealed partial class PartialEvaluatorEngine {
   private sealed class PartialEvaluatorVisitor : TopDownVisitor<PartialEvalState> {
     private readonly PartialEvaluatorEngine engine;
     private readonly Dictionary<Expression, Expression> replacements = new();
-    private List<Dictionary<IVariable, ConstValue>> constScopes = [];
+    private List<Dictionary<IVariable, ConstValue>> constScopes = new() { new Dictionary<IVariable, ConstValue>() };
 
     public PartialEvaluatorVisitor(PartialEvaluatorEngine engine) {
       this.engine = engine;
-      constScopes.Add(new Dictionary<IVariable, ConstValue>());
     }
 
+    // ------------------- Public entry point -------------------
+
+    /// <summary>
+    /// Simplifies an expression by recursively rewriting its sub-expressions and by opportunistically
+    /// evaluating side-effect-free fragments (for example, literals, finite comprehensions, and safe inlining).
+    /// </summary>
     public Expression SimplifyExpression(Expression expr, PartialEvalState state) {
       if (expr == null) {
         return null;
@@ -54,6 +59,8 @@ internal sealed partial class PartialEvaluatorEngine {
       return result;
     }
 
+    // ------------------- Replacement tracking -------------------
+
     private Expression GetReplacement(Expression expr) {
       return replacements.TryGetValue(expr, out var replacement) ? replacement : expr;
     }
@@ -63,6 +70,8 @@ internal sealed partial class PartialEvaluatorEngine {
         replacements[original] = replacement;
       }
     }
+
+    // ------------------- Constant propagation (scoped locals) -------------------
 
     private void EnterScope() {
       constScopes.Add(new Dictionary<IVariable, ConstValue>());
@@ -113,12 +122,16 @@ internal sealed partial class PartialEvaluatorEngine {
       }
     }
 
-    private List<Dictionary<IVariable, ConstValue>> CloneConstScopes() {
-      var snapshot = new List<Dictionary<IVariable, ConstValue>>(constScopes.Count);
-      foreach (var scope in constScopes) {
+    private static List<Dictionary<IVariable, ConstValue>> CloneConstScopes(List<Dictionary<IVariable, ConstValue>> scopes) {
+      var snapshot = new List<Dictionary<IVariable, ConstValue>>(scopes.Count);
+      foreach (var scope in scopes) {
         snapshot.Add(new Dictionary<IVariable, ConstValue>(scope));
       }
       return snapshot;
+    }
+
+    private List<Dictionary<IVariable, ConstValue>> CloneConstScopes() {
+      return CloneConstScopes(constScopes);
     }
 
     private static HashSet<IVariable> CollectAssignedLocalsDeep(Statement root) {
@@ -180,6 +193,185 @@ internal sealed partial class PartialEvaluatorEngine {
         SetConst(identifierExpr.Var, constValue);
       }
     }
+
+    // ------------------- Statement rewriting -------------------
+
+    protected override bool VisitOneStmt(Statement stmt, ref PartialEvalState state) {
+      switch (stmt) {
+        case BlockStmt block:
+          VisitBlock(block, state);
+          break;
+        case IfStmt ifStmt:
+          VisitIf(ifStmt, state);
+          break;
+        case WhileStmt whileStmt:
+          VisitWhile(whileStmt, state);
+          break;
+        case AssertStmt assertStmt:
+          assertStmt.Expr = SimplifyExpression(assertStmt.Expr, state);
+          break;
+        case AssumeStmt assumeStmt:
+          assumeStmt.Expr = SimplifyExpression(assumeStmt.Expr, state);
+          break;
+        case ExpectStmt expectStmt:
+          expectStmt.Expr = SimplifyExpression(expectStmt.Expr, state);
+          if (expectStmt.Message != null) {
+            expectStmt.Message = SimplifyExpression(expectStmt.Message, state);
+          }
+          break;
+        case SingleAssignStmt assignStmt:
+          SimplifySingleAssign(assignStmt, state);
+          break;
+        case CallStmt callStmt:
+          SimplifyCallStmt(callStmt, state);
+          break;
+        case VarDeclStmt varDeclStmt:
+          SimplifyVarDeclStmt(varDeclStmt, state);
+          break;
+        case AssignSuchThatStmt assignSuchThatStmt:
+          assignSuchThatStmt.Expr = SimplifyExpression(assignSuchThatStmt.Expr, state);
+          InvalidateAssignedLocals(assignSuchThatStmt);
+          break;
+        case ReturnStmt returnStmt:
+          SimplifyReturnStmt(returnStmt, state);
+          break;
+        case HideRevealStmt hideRevealStmt:
+          SimplifyHideRevealStmt(hideRevealStmt, state);
+          break;
+        default:
+          VisitSubStatements(stmt, state);
+          break;
+      }
+      return false;
+    }
+
+    // ------------------- Statement rewriting: blocks and control flow -------------------
+
+    private void VisitBlock(BlockStmt block, PartialEvalState state) {
+      EnterScope();
+      foreach (var statement in block.Body) {
+        Visit(statement, state);
+      }
+      ExitScope();
+    }
+
+    private void VisitIf(IfStmt ifStmt, PartialEvalState state) {
+      ifStmt.Guard = SimplifyExpression(ifStmt.Guard, state);
+      if (Expression.IsBoolLiteral(ifStmt.Guard, out var cond)) {
+        if (cond) {
+          Visit(ifStmt.Thn, state);
+        } else if (ifStmt.Els != null) {
+          Visit(ifStmt.Els, state);
+        }
+        return;
+      }
+
+      VisitBranchesWithIsolatedScopes(ifStmt.Thn, ifStmt.Els, state);
+    }
+
+    /// <summary>
+    /// Visits both branches starting from the same incoming constant environment.
+    /// After visiting, any local assigned in either branch is invalidated, since its value is no longer stable.
+    /// </summary>
+    private void VisitBranchesWithIsolatedScopes(Statement thenBranch, Statement elseBranch, PartialEvalState state) {
+      // Take a deep snapshot of the current constant environment. Each branch runs on its own clone so that
+      // branch-local propagation cannot leak across branches or back into the incoming environment.
+      var incoming = CloneConstScopes();
+
+      constScopes = CloneConstScopes(incoming);
+      Visit(thenBranch, state);
+
+      if (elseBranch != null) {
+        constScopes = CloneConstScopes(incoming);
+        Visit(elseBranch, state);
+      }
+
+      constScopes = incoming;
+      var assigned = CollectAssignedLocalsDeep(thenBranch);
+      if (elseBranch != null) {
+        assigned.UnionWith(CollectAssignedLocalsDeep(elseBranch));
+      }
+      InvalidateConsts(assigned);
+    }
+
+    private void VisitWhile(WhileStmt whileStmt, PartialEvalState state) {
+      whileStmt.Guard = SimplifyExpression(whileStmt.Guard, state);
+      foreach (var inv in whileStmt.Invariants) {
+        inv.E = SimplifyExpression(inv.E, state);
+      }
+      if (whileStmt.Decreases?.Expressions != null) {
+        for (var i = 0; i < whileStmt.Decreases.Expressions.Count; i++) {
+          whileStmt.Decreases.Expressions[i] = SimplifyExpression(whileStmt.Decreases.Expressions[i], state);
+        }
+      }
+      Visit(whileStmt.Body, state);
+      InvalidateAssignedLocalsDeep(whileStmt.Body);
+    }
+
+    private void InvalidateAssignedLocalsDeep(Statement statement) {
+      if (statement == null) {
+        return;
+      }
+      InvalidateConsts(CollectAssignedLocalsDeep(statement));
+    }
+
+    // ------------------- Statement rewriting: assignments and calls -------------------
+
+    private void SimplifySingleAssign(SingleAssignStmt assignStmt, PartialEvalState state) {
+      if (assignStmt.Rhs is ExprRhs exprRhs) {
+        exprRhs.Expr = SimplifyExpression(exprRhs.Expr, state);
+      }
+      InvalidateAssignedLocals(assignStmt);
+    }
+
+    private void SimplifyCallStmt(CallStmt callStmt, PartialEvalState state) {
+      callStmt.MethodSelect.Obj = SimplifyExpression(callStmt.MethodSelect.Obj, state);
+      for (var i = 0; i < callStmt.Args.Count; i++) {
+        callStmt.Args[i] = SimplifyExpression(callStmt.Args[i], state);
+      }
+      InvalidateAssignedLocals(callStmt);
+    }
+
+    private void SimplifyVarDeclStmt(VarDeclStmt varDeclStmt, PartialEvalState state) {
+      if (varDeclStmt.Assign != null) {
+        Visit(varDeclStmt.Assign, state);
+      }
+      TryRecordLiteralLocalInitializers(varDeclStmt);
+    }
+
+    // ------------------- Statement rewriting: misc -------------------
+
+    private void SimplifyReturnStmt(ReturnStmt returnStmt, PartialEvalState state) {
+      if (returnStmt.Rhss == null) {
+        return;
+      }
+      foreach (var rhs in returnStmt.Rhss) {
+        if (rhs is ExprRhs returnExprRhs) {
+          returnExprRhs.Expr = SimplifyExpression(returnExprRhs.Expr, state);
+        }
+      }
+    }
+
+    private void SimplifyHideRevealStmt(HideRevealStmt hideRevealStmt, PartialEvalState state) {
+      if (hideRevealStmt.Exprs == null) {
+        return;
+      }
+      for (var i = 0; i < hideRevealStmt.Exprs.Count; i++) {
+        var exprToSimplify = hideRevealStmt.Exprs[i];
+        if (exprToSimplify == null || !exprToSimplify.WasResolved()) {
+          continue;
+        }
+        hideRevealStmt.Exprs[i] = SimplifyExpression(exprToSimplify, state);
+      }
+    }
+
+    private void VisitSubStatements(Statement stmt, PartialEvalState state) {
+      foreach (var sub in stmt.SubStatements) {
+        Visit(sub, state);
+      }
+    }
+
+    // ------------------- String and character literal helpers -------------------
 
     private static IEnumerable<string> TokenizeStringLiteral(string value, bool isVerbatim) {
       if (!isVerbatim) {
@@ -291,169 +483,7 @@ internal sealed partial class PartialEvaluatorEngine {
       return $"\\U{{{codePoint:X4}}}";
     }
 
-    protected override bool VisitOneStmt(Statement stmt, ref PartialEvalState state) {
-      switch (stmt) {
-        case BlockStmt block:
-          VisitBlock(block, state);
-          break;
-        case IfStmt ifStmt:
-          VisitIf(ifStmt, state);
-          break;
-        case WhileStmt whileStmt:
-          VisitWhile(whileStmt, state);
-          break;
-        case AssertStmt assertStmt:
-          assertStmt.Expr = SimplifyExpression(assertStmt.Expr, state);
-          break;
-        case AssumeStmt assumeStmt:
-          assumeStmt.Expr = SimplifyExpression(assumeStmt.Expr, state);
-          break;
-        case ExpectStmt expectStmt:
-          expectStmt.Expr = SimplifyExpression(expectStmt.Expr, state);
-          if (expectStmt.Message != null) {
-            expectStmt.Message = SimplifyExpression(expectStmt.Message, state);
-          }
-          break;
-        case SingleAssignStmt assignStmt:
-          SimplifySingleAssign(assignStmt, state);
-          break;
-        case CallStmt callStmt:
-          SimplifyCallStmt(callStmt, state);
-          break;
-        case VarDeclStmt varDeclStmt:
-          SimplifyVarDeclStmt(varDeclStmt, state);
-          break;
-        case AssignSuchThatStmt assignSuchThatStmt:
-          assignSuchThatStmt.Expr = SimplifyExpression(assignSuchThatStmt.Expr, state);
-          InvalidateAssignedLocals(assignSuchThatStmt);
-          break;
-        case ReturnStmt returnStmt:
-          SimplifyReturnStmt(returnStmt, state);
-          break;
-        case HideRevealStmt hideRevealStmt:
-          SimplifyHideRevealStmt(hideRevealStmt, state);
-          break;
-        default:
-          VisitSubStatements(stmt, state);
-          break;
-      }
-      return false;
-    }
-
-    private void VisitBlock(BlockStmt block, PartialEvalState state) {
-      EnterScope();
-      foreach (var statement in block.Body) {
-        Visit(statement, state);
-      }
-      ExitScope();
-    }
-
-    private void VisitIf(IfStmt ifStmt, PartialEvalState state) {
-      ifStmt.Guard = SimplifyExpression(ifStmt.Guard, state);
-      if (Expression.IsBoolLiteral(ifStmt.Guard, out var cond)) {
-        if (cond) {
-          Visit(ifStmt.Thn, state);
-        } else if (ifStmt.Els != null) {
-          Visit(ifStmt.Els, state);
-        }
-        return;
-      }
-
-      VisitBranchesWithIsolatedScopes(ifStmt.Thn, ifStmt.Els, state);
-    }
-
-    private void VisitBranchesWithIsolatedScopes(Statement thenBranch, Statement elseBranch, PartialEvalState state) {
-      var incoming = CloneConstScopes();
-
-      constScopes = CloneConstScopes();
-      Visit(thenBranch, state);
-
-      constScopes = incoming;
-      if (elseBranch != null) {
-        constScopes = CloneConstScopes();
-        Visit(elseBranch, state);
-      }
-
-      constScopes = incoming;
-      var assigned = CollectAssignedLocalsDeep(thenBranch);
-      if (elseBranch != null) {
-        assigned.UnionWith(CollectAssignedLocalsDeep(elseBranch));
-      }
-      InvalidateConsts(assigned);
-    }
-
-    private void VisitWhile(WhileStmt whileStmt, PartialEvalState state) {
-      whileStmt.Guard = SimplifyExpression(whileStmt.Guard, state);
-      foreach (var inv in whileStmt.Invariants) {
-        inv.E = SimplifyExpression(inv.E, state);
-      }
-      if (whileStmt.Decreases?.Expressions != null) {
-        for (var i = 0; i < whileStmt.Decreases.Expressions.Count; i++) {
-          whileStmt.Decreases.Expressions[i] = SimplifyExpression(whileStmt.Decreases.Expressions[i], state);
-        }
-      }
-      Visit(whileStmt.Body, state);
-      InvalidateAssignedLocalsDeep(whileStmt.Body);
-    }
-
-    private void InvalidateAssignedLocalsDeep(Statement statement) {
-      if (statement == null) {
-        return;
-      }
-      InvalidateConsts(CollectAssignedLocalsDeep(statement));
-    }
-
-    private void SimplifySingleAssign(SingleAssignStmt assignStmt, PartialEvalState state) {
-      if (assignStmt.Rhs is ExprRhs exprRhs) {
-        exprRhs.Expr = SimplifyExpression(exprRhs.Expr, state);
-      }
-      InvalidateAssignedLocals(assignStmt);
-    }
-
-    private void SimplifyCallStmt(CallStmt callStmt, PartialEvalState state) {
-      callStmt.MethodSelect.Obj = SimplifyExpression(callStmt.MethodSelect.Obj, state);
-      for (var i = 0; i < callStmt.Args.Count; i++) {
-        callStmt.Args[i] = SimplifyExpression(callStmt.Args[i], state);
-      }
-      InvalidateAssignedLocals(callStmt);
-    }
-
-    private void SimplifyVarDeclStmt(VarDeclStmt varDeclStmt, PartialEvalState state) {
-      if (varDeclStmt.Assign != null) {
-        Visit(varDeclStmt.Assign, state);
-      }
-      TryRecordLiteralLocalInitializers(varDeclStmt);
-    }
-
-    private void SimplifyReturnStmt(ReturnStmt returnStmt, PartialEvalState state) {
-      if (returnStmt.Rhss == null) {
-        return;
-      }
-      foreach (var rhs in returnStmt.Rhss) {
-        if (rhs is ExprRhs returnExprRhs) {
-          returnExprRhs.Expr = SimplifyExpression(returnExprRhs.Expr, state);
-        }
-      }
-    }
-
-    private void SimplifyHideRevealStmt(HideRevealStmt hideRevealStmt, PartialEvalState state) {
-      if (hideRevealStmt.Exprs == null) {
-        return;
-      }
-      for (var i = 0; i < hideRevealStmt.Exprs.Count; i++) {
-        var exprToSimplify = hideRevealStmt.Exprs[i];
-        if (exprToSimplify == null || !exprToSimplify.WasResolved()) {
-          continue;
-        }
-        hideRevealStmt.Exprs[i] = SimplifyExpression(exprToSimplify, state);
-      }
-    }
-
-    private void VisitSubStatements(Statement stmt, PartialEvalState state) {
-      foreach (var sub in stmt.SubStatements) {
-        Visit(sub, state);
-      }
-    }
+    // ------------------- Expression rewriting -------------------
 
     protected override bool VisitOneExpr(Expression expr, ref PartialEvalState state) {
       switch (expr) {
@@ -502,6 +532,8 @@ internal sealed partial class PartialEvaluatorEngine {
       }
     }
 
+    // ------------------- Expression rewriting: atoms and identifiers -------------------
+
     private bool SimplifyParensExpr(ParensExpression parens, PartialEvalState state) {
       var result = SimplifyExpression(parens.E, state);
       SetReplacement(parens, result);
@@ -515,6 +547,8 @@ internal sealed partial class PartialEvaluatorEngine {
       }
       return false;
     }
+
+    // ------------------- Expression rewriting: operators and conditionals -------------------
 
     private bool SimplifyUnaryExpr(UnaryOpExpr unary, PartialEvalState state) {
       unary.E = SimplifyExpression(unary.E, state);
@@ -575,6 +609,8 @@ internal sealed partial class PartialEvaluatorEngine {
       ite.Els = SimplifyExpression(ite.Els, state);
       return false;
     }
+
+    // ------------------- Expression rewriting: calls and selection -------------------
 
     private bool SimplifyFunctionCallExpr(FunctionCallExpr callExpr, PartialEvalState state) {
       callExpr.Receiver = SimplifyExpression(callExpr.Receiver, state);
@@ -639,6 +675,8 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
+    // ------------------- Expression rewriting: quantifiers -------------------
+
     private bool SimplifyQuantifierExpr(QuantifierExpr quantifierExpr, PartialEvalState state) {
       quantifierExpr.Range = quantifierExpr.Range == null ? null : SimplifyExpression(quantifierExpr.Range, state);
       quantifierExpr.Term = SimplifyExpression(quantifierExpr.Term, state);
@@ -659,6 +697,10 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
+    /// <summary>
+    /// Recognizes a small arithmetic pattern inside <c>exists</c> and evaluates it to a boolean literal.
+    /// This avoids expensive downstream reasoning for a few common "divisibility + lower bound" idioms.
+    /// </summary>
     private bool TrySimplifyExistsArithmetic(ExistsExpr existsExpr, out Expression replacement) {
       replacement = null;
       if (existsExpr.BoundVars.Count != 1) {
@@ -799,6 +841,11 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
+    /// <summary>
+    /// Recognizes a bounded <c>exists</c> over sequences/strings and tries to decide it by enumerating all
+    /// candidates up to the configured unroll cap. If evaluation becomes unknown for a candidate, we stop
+    /// early and keep the quantifier unchanged.
+    /// </summary>
     private bool TrySimplifyExistsSequence(ExistsExpr existsExpr, PartialEvalState state, out Expression replacement) {
       replacement = null;
       if (existsExpr.BoundVars.Count != 1) {
@@ -950,6 +997,8 @@ internal sealed partial class PartialEvaluatorEngine {
       return true;
     }
 
+    // ------------------- Expression rewriting: quantifier helpers -------------------
+
     private static Expression CombineConjuncts(List<Expression> conjuncts, IOrigin origin) {
       if (conjuncts == null || conjuncts.Count == 0) {
         var literal = Expression.CreateBoolLiteral(origin, true);
@@ -966,6 +1015,8 @@ internal sealed partial class PartialEvaluatorEngine {
       }
       return current;
     }
+
+    // ------------------- Expression rewriting: comprehensions -------------------
 
     private bool SimplifySetComprehension(SetComprehension setComprehension, PartialEvalState state) {
       setComprehension.Range = SimplifyExpression(setComprehension.Range, state);
@@ -989,6 +1040,8 @@ internal sealed partial class PartialEvaluatorEngine {
       }
       return false;
     }
+
+    // ------------------- Expression rewriting: let and local statement expressions -------------------
 
     private bool SimplifyLetExpr(LetExpr letExpr, PartialEvalState state) {
       for (var i = 0; i < letExpr.RHSs.Count; i++) {
@@ -1024,6 +1077,8 @@ internal sealed partial class PartialEvaluatorEngine {
       }
       return false;
     }
+
+    // ------------------- Expression rewriting: collection literals -------------------
 
     private bool SimplifySeqDisplayExpr(SeqDisplayExpr seqDisplayExpr, PartialEvalState state) {
       for (var i = 0; i < seqDisplayExpr.Elements.Count; i++) {
@@ -1068,6 +1123,8 @@ internal sealed partial class PartialEvaluatorEngine {
       }
       return false;
     }
+
+    // ------------------- Expression rewriting: sequence operations -------------------
 
     private bool SimplifySeqSelectExpr(SeqSelectExpr seqSelectExpr, PartialEvalState state) {
       Expression result;
@@ -1125,6 +1182,8 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
+    // ------------------- Expression rewriting: special-case intrinsics -------------------
+
     private static bool TrySimplifyArbitraryElement(FunctionCallExpr callExpr, out Expression simplified) {
       simplified = null;
       if (callExpr.Function == null || !string.Equals(callExpr.Function.Name, "ArbitraryElement", StringComparison.Ordinal)) {
@@ -1161,6 +1220,8 @@ internal sealed partial class PartialEvaluatorEngine {
       }
       return 0 <= start && start <= end && end <= length;
     }
+
+    // ------------------- Quantifier bound rewriting -------------------
 
     private List<BoundedPool> SimplifyBounds(List<BoundedPool> bounds, PartialEvalState state) {
       if (bounds == null) {
@@ -1228,6 +1289,8 @@ internal sealed partial class PartialEvaluatorEngine {
           return bound;
       }
     }
+
+    // ------------------- Constant value snapshot -------------------
 
     private readonly record struct ConstValue {
       private readonly Expression expr;
