@@ -17,6 +17,8 @@ internal sealed partial class PartialEvaluatorEngine {
   private readonly Dictionary<string, CachedLiteral> inlineCallCache = new(StringComparer.Ordinal);
   private QuantifierBounds quantifierBounds;
 
+  // ------------------- Construction and entry points -------------------
+
   public PartialEvaluatorEngine(DafnyOptions options, ModuleDefinition module, SystemModuleManager systemModuleManager, uint inlineDepth) {
     this.options = options;
     this.module = module;
@@ -24,9 +26,22 @@ internal sealed partial class PartialEvaluatorEngine {
     this.inlineDepth = inlineDepth;
   }
 
+  private PartialEvalState CreateInitialState() {
+    // This state is shared across the traversal to limit inlining depth and detect inlining cycles.
+    return new PartialEvalState((int)inlineDepth, new HashSet<Function>(), new HashSet<string>(StringComparer.Ordinal));
+  }
+
+  private PartialEvaluatorVisitor CreateVisitor() {
+    return new PartialEvaluatorVisitor(this);
+  }
+
+  /// <summary>
+  /// Runs partial evaluation on a resolved callable. This is invoked by the rewriter, and it mutates
+  /// the callable body in-place to simplify expressions and statements.
+  /// </summary>
   public void PartialEvalEntry(ICallable callable) {
-    var state = new PartialEvalState((int)inlineDepth, new HashSet<Function>(), new HashSet<string>(StringComparer.Ordinal));
-    var visitor = new PartialEvaluatorVisitor(this);
+    var state = CreateInitialState();
+    var visitor = CreateVisitor();
     switch (callable) {
       case Function function when function.Body != null:
         function.Body = visitor.SimplifyExpression(function.Body, state);
@@ -38,10 +53,12 @@ internal sealed partial class PartialEvaluatorEngine {
   }
 
   internal Expression SimplifyExpression(Expression expr) {
-    var state = new PartialEvalState((int)inlineDepth, new HashSet<Function>(), new HashSet<string>(StringComparer.Ordinal));
-    var visitor = new PartialEvaluatorVisitor(this);
+    var state = CreateInitialState();
+    var visitor = CreateVisitor();
     return visitor.SimplifyExpression(expr, state);
   }
+
+  // ------------------- Quantifier bounds / finite materialization -------------------
 
   private uint GetPartialEvalUnrollCap() {
     return options.Options.OptionArguments.ContainsKey(CommonOptionBag.UnrollBoundedQuantifiers)
@@ -57,10 +74,16 @@ internal sealed partial class PartialEvaluatorEngine {
     return quantifierBounds;
   }
 
+  /// <summary>
+  /// Attempts to unroll a bounded quantifier into a finite boolean expression under the configured cap.
+  /// </summary>
   internal bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, out Expression rewritten) {
     return GetQuantifierBounds().TryUnrollQuantifier(quantifierExpr, SimplifyExpression, out rewritten);
   }
 
+  /// <summary>
+  /// If a finite set comprehension can be fully materialized under the configured cap, rewrite it to a set display.
+  /// </summary>
   internal bool TryMaterializeSetComprehension(SetComprehension setComprehension, out SetDisplayExpr displayExpr) {
     displayExpr = null;
     if (!setComprehension.Finite) {
@@ -73,6 +96,9 @@ internal sealed partial class PartialEvaluatorEngine {
     return true;
   }
 
+  /// <summary>
+  /// If a finite map comprehension can be fully materialized under the configured cap, rewrite it to a map display.
+  /// </summary>
   private bool TryMaterializeMapComprehension(
     MapComprehension mapComprehension,
     PartialEvalState state,
@@ -100,6 +126,10 @@ internal sealed partial class PartialEvaluatorEngine {
     Contract.Assert(expr.Type != null, "PartialEvaluator produced an expression with null Type");
   }
 
+  /// <summary>
+  /// Simplifies a resolved binary expression after its operands have already been simplified.
+  /// This method is intentionally local: it only performs folds that are obviously semantics-preserving.
+  /// </summary>
   private Expression SimplifyBinary(BinaryExpr binary) {
     switch (binary.ResolvedOp) {
       case BinaryExpr.ResolvedOpcode.And:
@@ -118,21 +148,17 @@ internal sealed partial class PartialEvaluatorEngine {
       case BinaryExpr.ResolvedOpcode.Mod:
         return SimplifyIntBinary(binary, (a, b) => b == 0 ? null : a % b);
       case BinaryExpr.ResolvedOpcode.Lt:
-        return SimplifyOrderedComparison(binary, (a, b) => a < b, (a, b) => a < b);
       case BinaryExpr.ResolvedOpcode.LtChar:
-        return SimplifyOrderedComparison(binary, (a, b) => a < b, (a, b) => a < b);
+        return SimplifyOrderedComparison(binary, (a, b) => a < b);
       case BinaryExpr.ResolvedOpcode.Le:
-        return SimplifyOrderedComparison(binary, (a, b) => a <= b, (a, b) => a <= b);
       case BinaryExpr.ResolvedOpcode.LeChar:
-        return SimplifyOrderedComparison(binary, (a, b) => a <= b, (a, b) => a <= b);
+        return SimplifyOrderedComparison(binary, (a, b) => a <= b);
       case BinaryExpr.ResolvedOpcode.Gt:
-        return SimplifyOrderedComparison(binary, (a, b) => a > b, (a, b) => a > b);
       case BinaryExpr.ResolvedOpcode.GtChar:
-        return SimplifyOrderedComparison(binary, (a, b) => a > b, (a, b) => a > b);
+        return SimplifyOrderedComparison(binary, (a, b) => a > b);
       case BinaryExpr.ResolvedOpcode.Ge:
-        return SimplifyOrderedComparison(binary, (a, b) => a >= b, (a, b) => a >= b);
       case BinaryExpr.ResolvedOpcode.GeChar:
-        return SimplifyOrderedComparison(binary, (a, b) => a >= b, (a, b) => a >= b);
+        return SimplifyOrderedComparison(binary, (a, b) => a >= b);
       case BinaryExpr.ResolvedOpcode.EqCommon:
         return SimplifyEquality(binary, true);
       case BinaryExpr.ResolvedOpcode.NeqCommon:
@@ -203,6 +229,8 @@ internal sealed partial class PartialEvaluatorEngine {
         return binary;
     }
   }
+
+  // ------------------- Binary folding helpers -------------------
 
   private static Expression CreateBoolLiteral(IOrigin origin, bool value) {
     var literal = Expression.CreateBoolLiteral(origin, value);
@@ -295,14 +323,10 @@ internal sealed partial class PartialEvaluatorEngine {
     return binary;
   }
 
-  private Expression SimplifyOrderedComparison(BinaryExpr binary, Func<BigInteger, BigInteger, bool> intOp,
-    Func<char, char, bool> charOp) {
+  private Expression SimplifyOrderedComparison(BinaryExpr binary, Func<BigInteger, BigInteger, bool> op) {
     if (TryGetIntLiteralOrCharLiteral(binary.E0, out var left) &&
         TryGetIntLiteralOrCharLiteral(binary.E1, out var right)) {
-      return Expression.CreateBoolLiteral(binary.Origin, intOp(left, right));
-    }
-    if (TryGetCharLiteral(binary.E0, out var leftChar) && TryGetCharLiteral(binary.E1, out var rightChar)) {
-      return Expression.CreateBoolLiteral(binary.Origin, charOp(leftChar, rightChar));
+      return Expression.CreateBoolLiteral(binary.Origin, op(left, right));
     }
     return binary;
   }
@@ -708,6 +732,15 @@ internal sealed partial class PartialEvaluatorEngine {
     return elements;
   }
 
+  // ------------------- Inlining and caching -------------------
+
+  /// <summary>
+  /// Attempts to inline a function call into its body and then simplify the result.
+  /// The inliner is intentionally conservative:
+  /// - only side-effect-free functions (no reads, not opaque, revealed in scope)
+  /// - bounded by depth, and guarded against cycles via an inlining call stack
+  /// - caches static calls that fold to a literal to avoid repeated work
+  /// </summary>
   private bool TryInlineCall(FunctionCallExpr callExpr, PartialEvalState state, PartialEvaluatorVisitor visitor, out Expression inlined) {
     inlined = null;
     var function = callExpr.Function;
@@ -755,7 +788,7 @@ internal sealed partial class PartialEvaluatorEngine {
       var substituter = new Substituter(receiverReplacement, substMap, typeMap, null, systemModuleManager);
       var body = substituter.Substitute(function.Body);
       inlined = visitor.SimplifyExpression(body, state.WithDepth(state.Depth - 1));
-      var postVisitor = new PartialEvaluatorVisitor(this);
+      var postVisitor = CreateVisitor();
       inlined = postVisitor.SimplifyExpression(inlined, state.WithDepth(0));
 
       if (inlined is LiteralExpr literal) {
@@ -771,6 +804,8 @@ internal sealed partial class PartialEvaluatorEngine {
       state.InlineCallStack.Remove(callKey);
     }
   }
+
+  // ------------------- Inlined-literal cache -------------------
 
   private bool TryGetCachedInlinedLiteral(FunctionCallExpr callExpr, PartialEvalState state, out Expression inlined) {
     inlined = null;
@@ -805,6 +840,8 @@ internal sealed partial class PartialEvaluatorEngine {
       inlineCallCache.TryAdd(key, cached);
     }
   }
+
+  // ------------------- Inlining cache keys -------------------
 
   private static bool TryBuildInlineCallCacheKey(FunctionCallExpr callExpr, PartialEvalState state, out string key) {
     key = null;
@@ -849,16 +886,14 @@ internal sealed partial class PartialEvaluatorEngine {
     return string.Join(",", ids);
   }
 
+  // ------------------- Literal constructors -------------------
+
   private static LiteralExpr CreateIntLiteral(IOrigin origin, BigInteger value) {
     return new LiteralExpr(origin, value) { Type = Type.Int };
   }
 
   private static LiteralExpr CreateIntLiteral(IOrigin origin, BigInteger value, Type type) {
     return new LiteralExpr(origin, value) { Type = type };
-  }
-
-  private static LiteralExpr CreateCharLiteral(IOrigin origin, char value, Type type) {
-    return new CharLiteralExpr(origin, value.ToString()) { Type = type };
   }
 
   private static LiteralExpr CreateCharLiteral(IOrigin origin, string value, Type type) {
@@ -881,6 +916,8 @@ internal sealed partial class PartialEvaluatorEngine {
   private static MultiSetDisplayExpr CreateMultiSetDisplayLiteral(IOrigin origin, List<Expression> elements, Type type) {
     return new MultiSetDisplayExpr(origin, elements) { Type = type };
   }
+
+  // ------------------- Literal extraction / parsing -------------------
 
   private static bool TryGetStringLiteral(Expression expr, out string value, out bool isVerbatim) {
     value = null;
@@ -1002,6 +1039,8 @@ internal sealed partial class PartialEvaluatorEngine {
     return tuple.MemberName.StartsWith(SystemModuleManager.TupleTypeCtorNamePrefix, StringComparison.Ordinal);
   }
 
+  // ------------------- Literal classification helpers -------------------
+
   private static bool AllElementsAreLiterals(SeqDisplayExpr display) {
     return AllElementsAreLiterals(display.Elements);
   }
@@ -1046,9 +1085,13 @@ internal sealed partial class PartialEvaluatorEngine {
     return false;
   }
 
+  // ------------------- Inlineability -------------------
+
   private static bool IsInlineableArgument(Expression expr) {
     return IsLiteralLike(expr) || expr is LambdaExpr;
   }
+
+  // ------------------- Literal equality helpers -------------------
 
   private static bool AreLiteralExpressionsEqual(Expression left, Expression right) {
     if (TryGetCharLiteral(left, out var leftChar) && TryGetCharLiteral(right, out var rightChar)) {
@@ -1177,6 +1220,8 @@ internal sealed partial class PartialEvaluatorEngine {
     return false;
   }
 
+  // ------------------- Multiset element counting -------------------
+
   private sealed class MultisetElementCount {
     public MultisetElementCount(Expression element) {
       Element = element;
@@ -1213,6 +1258,8 @@ internal sealed partial class PartialEvaluatorEngine {
     return true;
   }
 
+  // ------------------- Inlining cycle keys and cached literals -------------------
+
   private static string BuildInlineCallCycleKey(FunctionCallExpr callExpr) {
     var builder = new StringBuilder();
     builder.Append(RuntimeHelpers.GetHashCode(callExpr.Function));
@@ -1244,6 +1291,8 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     return builder.ToString();
   }
+
+  // ------------------- Cached literal representation -------------------
 
   private enum CachedLiteralKind {
     Int,
