@@ -115,6 +115,13 @@ Common patterns seen in the codebase:
 - Cancellation:
   - Pass `CancellationToken` through async APIs and use `ThrowIfCancellationRequested()` where appropriate.
 
+## Rewriters: AST transformation notes
+- Rewriters hook into resolution phases via `IRewriter` (prefer `PreResolve` or `PostResolveIntermediate` for AST changes).
+- Two main transformation styles:
+  - In-place mutation: add/modify members, specs, or bodies directly (fast, simple, but beware shared nodes).
+  - Cloner-based rewrite: override `Cloner.CloneExpr/CloneStmt` to replace specific nodes while preserving the rest (safer for localized changes, higher overhead).
+- Use in-place updates for structural additions like contracts or members; use a cloner for targeted expression/statement rewrites.
+
 ### Dafny (.dfy)
 Conventions (documented in DafnyRef) and observed in this repo:
 - No tabs; 2-space indentation.
