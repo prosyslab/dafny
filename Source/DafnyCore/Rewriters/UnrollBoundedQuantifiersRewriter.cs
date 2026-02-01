@@ -91,13 +91,51 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
     // NOTE: This method is invoked via reflection in tests (BindingFlags.NonPublic).
     private Statement RewriteStmt(Statement stmt) {
       ArgumentNullException.ThrowIfNull(stmt);
+      if (!ContainsQuantifier(stmt)) {
+        return stmt;
+      }
       return cloner.CloneStmt(stmt, isReference: false);
     }
 
     // NOTE: This method is invoked via reflection in tests (BindingFlags.NonPublic).
     private Expression RewriteExpr(Expression expr) {
       ArgumentNullException.ThrowIfNull(expr);
+      if (!ContainsQuantifier(expr)) {
+        return expr;
+      }
       return cloner.CloneExpr(expr);
+    }
+
+    private static bool ContainsQuantifier(Statement stmt) {
+      if (stmt == null) {
+        return false;
+      }
+      foreach (var expr in stmt.SubExpressions) {
+        if (ContainsQuantifier(expr)) {
+          return true;
+        }
+      }
+      foreach (var nested in stmt.SubStatements) {
+        if (ContainsQuantifier(nested)) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    private static bool ContainsQuantifier(Expression expr) {
+      if (expr == null) {
+        return false;
+      }
+      if (expr is QuantifierExpr) {
+        return true;
+      }
+      foreach (var subExpr in expr.SubExpressions) {
+        if (ContainsQuantifier(subExpr)) {
+          return true;
+        }
+      }
+      return false;
     }
 
     internal bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, out Expression rewritten) {
@@ -152,7 +190,7 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
           if (rewritten == null) {
             return expr;
           }
-          return CloneExpr(rewritten);
+          return rewritten;
         }
 
         // Some internal/translation expressions do not implement ICloneable<Expression>.
