@@ -12,6 +12,7 @@ namespace Microsoft.Dafny;
 /// set/map comprehensions for bounded quantifier unrolling and partial evaluation.
 /// </summary>
 internal sealed class QuantifierBounds {
+  private const string PartialUnrollMarkerAttributeName = "_partial_unroll";
   private readonly SystemModuleManager systemModuleManager;
   private readonly uint maxInstances;
 
@@ -192,13 +193,17 @@ internal sealed class QuantifierBounds {
   // === Public/Internal entrypoints ===
   /// <summary>
   /// Unroll a quantifier into a boolean expression when all bound variables have concrete, finite domains.
-  /// Returns false if any bound is non-concrete, the domain product exceeds the instance cap, or the
-  /// quantifier is split/unsupported.
+  /// Returns false if any bound is non-concrete or the quantifier is split/unsupported. When the
+  /// domain product exceeds the instance cap, partially unroll up to the cap and keep the original
+  /// quantifier to cover the remaining domain.
   /// </summary>
   internal bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, Func<Expression, Expression> simplifyAfterSubst, out Expression rewritten) {
     rewritten = quantifierExpr;
 
     if (quantifierExpr.SplitQuantifier != null || quantifierExpr.SplitQuantifierExpression != null) {
+      return false;
+    }
+    if (Attributes.Contains(quantifierExpr.Attributes, PartialUnrollMarkerAttributeName)) {
       return false;
     }
 
@@ -234,7 +239,8 @@ internal sealed class QuantifierBounds {
       return false;
     }
 
-    // Domain product must be within cap.
+    // Domain product within cap means full unroll; otherwise we partially unroll up to the cap.
+    var exceedsMaxInstances = false;
     var size = BigInteger.One;
     for (var i = 0; i < domains.Length; i++) {
       var domainSize = domains[i].Size;
@@ -244,9 +250,11 @@ internal sealed class QuantifierBounds {
         return true;
       }
 
-      size *= domainSize;
-      if (maxInstances > 0 && size > maxInstances) {
-        return false;
+      if (!exceedsMaxInstances) {
+        size *= domainSize;
+        if (maxInstances > 0 && size > maxInstances) {
+          exceedsMaxInstances = true;
+        }
       }
     }
 
@@ -283,8 +291,11 @@ internal sealed class QuantifierBounds {
     bool IsShortCircuited() =>
       Expression.IsBoolLiteral(accumulator, out var b) && ((isForall && !b) || (isExists && b));
 
+    uint instanceCount = 0;
+    bool reachedInstanceCap = false;
+
     void Enumerate(int varIndex) {
-      if (IsShortCircuited()) {
+      if (IsShortCircuited() || reachedInstanceCap) {
         return;
       }
 
@@ -293,12 +304,15 @@ internal sealed class QuantifierBounds {
         var inst = substituter.Substitute(logicalBody);
         inst = simplifyAfterSubst(inst);
         AddInstance(inst);
+        if (maxInstances > 0 && ++instanceCount >= maxInstances) {
+          reachedInstanceCap = true;
+        }
         return;
       }
 
       var bv = quantifierExpr.BoundVars[varIndex];
       foreach (var value in domains[varIndex].Enumerate()) {
-        if (IsShortCircuited()) {
+        if (IsShortCircuited() || reachedInstanceCap) {
           return;
         }
 
@@ -309,8 +323,28 @@ internal sealed class QuantifierBounds {
     }
 
     Enumerate(0);
+    if (exceedsMaxInstances && !IsShortCircuited()) {
+      MarkQuantifierAsPartiallyUnrolled(quantifierExpr);
+      rewritten = isForall
+        ? Expression.CreateAnd(accumulator, quantifierExpr)
+        : Expression.CreateOr(accumulator, quantifierExpr);
+      rewritten.Type = Type.Bool;
+      return true;
+    }
+
     rewritten = accumulator;
     return true;
+  }
+
+  private static void MarkQuantifierAsPartiallyUnrolled(QuantifierExpr quantifierExpr) {
+    if (Attributes.Contains(quantifierExpr.Attributes, PartialUnrollMarkerAttributeName)) {
+      return;
+    }
+    quantifierExpr.Attributes = new Attributes(
+      quantifierExpr.Origin,
+      PartialUnrollMarkerAttributeName,
+      new List<Expression>(),
+      quantifierExpr.Attributes);
   }
 
   /// <summary>
