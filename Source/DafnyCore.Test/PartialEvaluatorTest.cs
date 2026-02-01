@@ -49,6 +49,10 @@ public class PartialEvaluatorTest {
 
   [Fact]
   public async Task PartialEvaluation_InlinesEntryAndPropagatesConstants() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert false;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -71,20 +75,10 @@ method Entry() {
     var assertStmt = DescendantStatements(entry.Body!)
       .OfType<AssertStmt>()
       .Single();
-    var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+        var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
 
-    var forallExpr = Assert.IsType<ForallExpr>(assertExpr);
-    Assert.NotNull(forallExpr.Bounds);
-    Assert.Single(forallExpr.Bounds);
-    var bound = Assert.IsType<IntBoundedPool>(forallExpr.Bounds![0]);
-
-    Assert.NotNull(bound.UpperBound);
-    Assert.True(Expression.IsIntLiteral(bound.UpperBound, out var upper));
-    Assert.Equal(5, (int)upper);
-
-    Assert.NotNull(bound.LowerBound);
-    Assert.True(Expression.IsIntLiteral(bound.LowerBound, out var lower));
-    Assert.Equal(1, (int)lower);
+    Assert.True(Expression.IsBoolLiteral(assertExpr, out var literal));
+    Assert.False(literal);
 
     var calls = assertExpr.DescendantsAndSelf.OfType<FunctionCallExpr>()
       .Select(call => call.Function.Name)
@@ -95,6 +89,10 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_InlinesSeqDisplayLiteralArguments() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert true;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -128,6 +126,12 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_InlinesNestedCollectionLiteralArguments() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -165,6 +169,11 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_MaterializesCharSetComprehension() {
+    // EXPECTED:
+    // function ValidColors(): set<char> { {'A', 'B', 'C'} }
+    // method Entry() {
+    //   assert forall c | c in {'A', 'B', 'C'} :: c == c;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -198,6 +207,11 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_SimplifiesDivisibilityExists() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert true;
+    //   assert true;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -226,6 +240,10 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_SimplifiesStringExistentialDomain() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert true;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -254,6 +272,10 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_SimplifiesSeqExistentialDomain() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert true;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -282,6 +304,10 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_NoEntryConfiguredRunsWithoutWarnings() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert true;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
 
@@ -297,6 +323,10 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_WarnsWhenEntryIsMissing() {
+    // EXPECTED:
+    // method ActualEntry() {
+    //   assert true;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "MissingEntry");
@@ -316,6 +346,13 @@ method ActualEntry() {
 
   [Fact]
   public async Task PartialEvaluation_WarnsOnMultipleEntries() {
+    // EXPECTED:
+    // class A {
+    //   method Entry() { }
+    // }
+    // class B {
+    //   method Entry() { }
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -339,6 +376,35 @@ class B {
 
   [Fact]
   public async Task PartialEvaluation_SimplifiesStatementsAndOperators() {
+    // EXPECTED:
+    // method Entry(x: int, b: bool) returns (r: int) {
+    //   var y := x;
+    //   if b { } else { }
+    //   while true
+    //     invariant true
+    //     decreases 3
+    //   { }
+    //   assert b;
+    //   assert b;
+    //   assert b;
+    //   assert true;
+    //   assert b;
+    //   assert !b;
+    //   assert b;
+    //   assert !b;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert false;
+    //   assert false;
+    //   assert y == y;
+    //   assert true;
+    //   forall i | 0 <= i < 2 {
+    //     assert true;
+    //   }
+    //   return 2;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -453,6 +519,18 @@ method Entry(x: int, b: bool) returns (r: int) {
 
   [Fact]
   public async Task PartialEvaluation_SimplifiesQuantifierBounds() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert forall i | 0 < i < 2 :: i != 0;
+    //   assert forall x | x in {1} :: true;
+    //   assert forall s: set<int> | s <= {1, 2} :: true;
+    //   assert forall s: set<int> | {1, 2} <= s :: true;
+    //   assert forall x | x in [1, 2] :: true;
+    //   assert forall k | k in map[1 := 2] :: true;
+    //   assert forall x | x in multiset{1, 1} :: true;
+    //   assert forall b: bool | b == true :: true;
+    //   assert forall u: int :: true;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -553,6 +631,10 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_InliningGuardsAndDepthAreRespected() {
+    // EXPECTED:
+    // function Entry(n: int, c: C): int {
+    //   Square(2) + Square(n) + Hidden() + c.Read() + Inner(1) + Rec(1)
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -594,6 +676,8 @@ function Entry(n: int, c: C): int {
 
   [Fact]
   public async Task PartialEvaluation_InlinesAfterArgumentSimplification() {
+    // EXPECTED:
+    // function Entry(): int { 2 }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -617,6 +701,8 @@ function Entry(): int {
 
   [Fact]
   public async Task PartialEvaluation_InlinesWhenSomeArgumentsAreConstants() {
+    // EXPECTED:
+    // function Entry(x: int): int { x + 2 }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -646,6 +732,10 @@ function Entry(x: int): int {
 
   [Fact]
   public async Task PartialEvaluation_InlinesLambdaApplication() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert true;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -670,6 +760,10 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_UnfoldsRecursiveLiteralCalls() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert true;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -695,6 +789,8 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_FoldsStringOperations() {
+    // EXPECTED:
+    // function Entry(): bool { true }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -726,6 +822,8 @@ function Entry(): bool {
 
   [Fact]
   public async Task PartialEvaluation_FoldsSeqDisplayOperations() {
+    // EXPECTED:
+    // function Entry(): bool { true }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -753,6 +851,8 @@ function Entry(): bool {
 
   [Fact]
   public async Task PartialEvaluation_FoldsMixedStringAndSeqCharEquality() {
+    // EXPECTED:
+    // function Entry(): bool { true }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -776,6 +876,8 @@ function Entry(): bool {
 
   [Fact]
   public async Task PartialEvaluation_FoldsNestedSeqDisplayOperations() {
+    // EXPECTED:
+    // function Entry(): bool { true }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -800,6 +902,10 @@ function Entry(): bool {
 
   [Fact]
   public async Task PartialEvaluation_SimplifiesExactLetExpr() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert true;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -820,6 +926,10 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_UnrollsStmtExprSetBoundedQuantifier() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert 1 >= 0 && 2 >= 0 && 3 >= 0;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -841,6 +951,10 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_MaterializesSubsetComprehensionAndUnrollsQuantifier() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert 1 == 1;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -865,6 +979,8 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_CacheDoesNotCrossInliningDepthBoundaries() {
+    // EXPECTED:
+    // function Entry(): int { 1 + G() }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -895,6 +1011,10 @@ function Entry(): int {
 
   [Fact]
   public async Task PartialEvaluation_SubstitutesLiteralInitializedLocals() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert false;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -924,6 +1044,13 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_ReassignmentCancelsLocalSubstitution() {
+    // EXPECTED:
+    // method Entry() {
+    //   var a := 1;
+    //   assert true;
+    //   a := 2;
+    //   assert a == 2;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -953,6 +1080,12 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_NestedBlocksRespectConstScopes() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -986,6 +1119,22 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_SimplifiesSetDomainOps() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -1020,6 +1169,20 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_SimplifiesMultiSetDomainOps_NestedCollections() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    //   assert true;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
@@ -1052,6 +1215,8 @@ method Entry() {
 
   [Fact]
   public async Task PartialEvaluation_FoldsTupleOperations_NestedCollections() {
+    // EXPECTED:
+    // function Entry(): bool { true }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.PartialEvalEntry, "Entry");

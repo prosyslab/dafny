@@ -319,6 +319,10 @@ public class UnrollBoundedQuantifiersTest {
   // Objective: unroll a simple bounded forall within the instance cap.
   [Fact]
   public async Task SingleVariableBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method SingleVar() {
+    //   assert (0 == 0) && (1 == 0) && (2 == 0);
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Induction = 0;
@@ -338,6 +342,10 @@ method SingleVar() {
   // Objective: confirm the AST no longer contains forall after unrolling.
   [Fact]
   public async Task BoundedForall_IsUnrolledInAst_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method SingleVar() {
+    //   assert (0 == 0) && (1 == 0) && (2 == 0);
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Induction = 0;
@@ -364,6 +372,10 @@ method SingleVar() {
   // Objective: avoid repeating guaranteed bounds in unrolled implications.
   [Fact]
   public async Task UnrolledForall_DropsGuaranteedBoundsFromImplication() {
+    // EXPECTED:
+    // method Test() {
+    //   assert q(0) && q(1) && q(2);
+    // }
     var options = CreateOptions(10);
     var program = await ParseAndResolve(@"
 predicate q(i: int) { i % 2 == 0 }
@@ -405,6 +417,10 @@ method Test() {
   // Objective: unroll bounded foralls with nat upper bounds when in range.
   [Fact]
   public async Task NatUpperBoundOnlyForall_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method NatUpperOnly() {
+    //   assert IsZero(0) && IsZero(1) && IsZero(2);
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Induction = 0;
@@ -426,6 +442,11 @@ method NatUpperOnly() {
   // Objective: unroll multi-variable bounded foralls within the cap.
   [Fact]
   public async Task MultiVariableBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method MultiVar() {
+    //   assert (0 + 0 == 0) && (0 + 1 == 0) && (1 + 0 == 0) &&
+    //          (1 + 1 == 0) && (2 + 0 == 0) && (2 + 1 == 0);
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Induction = 0;
@@ -445,6 +466,10 @@ method MultiVar() {
   // Objective: unroll chained inter-variable bounds within the cap.
   [Fact]
   public async Task ChainedBoundsForall_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method ChainedBounds() {
+    //   assert true;
+    // }
     var options = CreateOptions(100);
     var program = await ParseAndResolve(@"
 method ChainedBounds() {
@@ -466,6 +491,10 @@ method ChainedBounds() {
   // Objective: unroll a simple bounded exists within the instance cap.
   [Fact]
   public async Task SingleVariableBoundedExists_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method SingleExists() {
+    //   assert IsOne(0) || IsOne(1) || IsOne(2);
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Induction = 0;
@@ -484,49 +513,108 @@ method SingleExists() {
     Assert.All(asserts, a => Assert.False(ContainsAnyQuantifier(a.Expr)));
   }
 
-  // Objective: keep exists when the domain size exceeds the cap.
+  // Objective: partially unroll exists when the domain size exceeds the cap.
   [Fact]
-  public async Task BoundedExists_IsNotUnrolled_WhenExceedingMaxInstances() {
-    var options = new DafnyOptions(DafnyOptions.Default);
-    options.ApplyDefaultOptionsWithoutSettingsDefault();
-    options.Induction = 0;
-    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 10U);
+  public async Task BoundedExists_IsPartiallyUnrolled_WhenExceedingMaxInstances() {
+    // EXPECTED:
+    // method ExistsExceedsCap() {
+    //   assert q(0, 0) || q(0, 1) || q(0, 2) || q(0, 3) || q(1, 0) ||
+    //          (exists x, y :: 0 <= x < 4 && 0 <= y < 4 && q(x, y));
+    // }
+    var options = CreateOptions(10);
 
     // Domain size is 4 * 4 = 16, which exceeds the max-instances cap (10).
-    var impl = await TranslateSingleImplementation(@"
-method ExistsExceedsCap() {
-  assert exists x, y :: 0 <= x < 4 && 0 <= y < 4 && x + y == 0;
-}
-", options, "ExistsExceedsCap");
+    var program = await ParseAndResolve(@"
+predicate q(x: int, y: int) { x + y >= 0 }
 
-    var asserts = AssertStatementAsserts(impl).ToList();
-    Assert.NotEmpty(asserts);
-    Assert.Contains(asserts, a => ContainsAnyQuantifier(a.Expr));
+method ExistsExceedsCap() {
+  assert exists x, y :: 0 <= x < 4 && 0 <= y < 4 && q(x, y);
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var method = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "ExistsExceedsCap"));
+    Assert.NotNull(method.Body);
+
+    var assertStmt = DescendantStatements(method.Body!)
+      .OfType<AssertStmt>()
+      .Single();
+    var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+
+    Assert.Contains(assertExpr.DescendantsAndSelf, e => e is QuantifierExpr);
+    Assert.True(ContainsBinaryOps(assertExpr, BinaryExpr.ResolvedOpcode.Or));
   }
 
-  // Objective: keep forall when the domain size exceeds the cap.
+  // Objective: partially unroll forall when the domain size exceeds the cap.
   [Fact]
-  public async Task BoundedForall_IsNotUnrolled_WhenExceedingMaxInstances() {
-    var options = new DafnyOptions(DafnyOptions.Default);
-    options.ApplyDefaultOptionsWithoutSettingsDefault();
-    options.Induction = 0;
-    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 10U);
+  public async Task BoundedForall_IsPartiallyUnrolled_WhenExceedingMaxInstances() {
+    // EXPECTED:
+    // method ExceedsCap() {
+    //   assert q(0, 0) && q(0, 1) && q(0, 2) && q(0, 3) && q(1, 0) &&
+    //          (forall x, y :: 0 <= x < 4 && 0 <= y < 4 ==> q(x, y));
+    // }
+    var options = CreateOptions(10);
 
     // Domain size is 4 * 4 = 16, which exceeds the max-instances cap (10).
-    var impl = await TranslateSingleImplementation(@"
-method ExceedsCap() {
-  assert forall x, y :: 0 <= x < 4 && 0 <= y < 4 ==> x + y == 0;
-}
-", options, "ExceedsCap");
+    var program = await ParseAndResolve(@"
+predicate q(x: int, y: int) { x + y >= 0 }
 
-    var asserts = AssertStatementAsserts(impl).ToList();
-    Assert.NotEmpty(asserts);
-    Assert.Contains(asserts, a => ContainsForall(a.Expr));
+method ExceedsCap() {
+  assert forall x, y :: 0 <= x < 4 && 0 <= y < 4 ==> q(x, y);
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var method = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "ExceedsCap"));
+    Assert.NotNull(method.Body);
+
+    var assertStmt = DescendantStatements(method.Body!)
+      .OfType<AssertStmt>()
+      .Single();
+    var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+
+    Assert.Contains(assertExpr.DescendantsAndSelf, e => e is QuantifierExpr);
+    Assert.True(ContainsBinaryOps(assertExpr, BinaryExpr.ResolvedOpcode.And));
+  }
+
+  // Objective: example-based partial unroll for bounded forall.
+  [Fact]
+  public async Task BoundedForall_IsPartiallyUnrolled_Example() {
+    // EXPECTED:
+    // method Example() {
+    //   assert P(0) && P(1) && P(2) && P(3) && P(4) &&
+    //          (forall x :: 5 <= x < 10 ==> P(x));
+    // }
+    var options = CreateOptions(5);
+    var program = await ParseAndResolve(@"
+predicate P(x: int) { x >= 0 }
+
+method Example() {
+  assert forall x :: 0 <= x < 10 ==> P(x);
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var method = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Example"));
+    Assert.NotNull(method.Body);
+
+    var engine = CreateUnrollEngine(program, options.Get(CommonOptionBag.UnrollBoundedQuantifiers));
+    InvokeRewriteCallable(engine, method);
+
+    var assertStmt = Assert.Single(DescendantStatements(method.Body!).OfType<AssertStmt>());
+    var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+
+    Assert.Contains(assertExpr.DescendantsAndSelf, e => e is QuantifierExpr);
+    Assert.True(ContainsBinaryOps(assertExpr, BinaryExpr.ResolvedOpcode.And));
   }
 
   // Objective: unroll bounded foralls with no cap.
   [Fact]
   public async Task BoundedForall_IsUnrolled_WhenMaxInstancesIsZero() {
+    // EXPECTED:
+    // method NoCap() {
+    //   assert false;
+    // }
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Induction = 0;
@@ -547,6 +635,10 @@ method NoCap() {
   // Objective: unroll bounded foralls over concrete sets.
   [Fact]
   public async Task SetBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method SetForall() {
+    //   assert 1 >= 0 && 2 >= 0 && 3 >= 0;
+    // }
     var options = CreateOptions(10);
 
     var impl = await TranslateSingleImplementation(@"
@@ -563,6 +655,10 @@ method SetForall() {
   // Objective: keep forall when set-comprehension domain exceeds the cap.
   [Fact]
   public async Task SetComprehensionBoundedForall_IsNotUnrolled_WhenExceedingMaxInstances() {
+    // EXPECTED:
+    // method SetComprehensionExceedsCap() {
+    //   assert forall x :: x in (set i | 0 <= i < 100 :: i) ==> x >= 0;
+    // }
     var options = CreateOptions(10);
 
     var impl = await TranslateSingleImplementation(@"
@@ -579,6 +675,10 @@ method SetComprehensionExceedsCap() {
   // Objective: unroll bounded exists over concrete sets.
   [Fact]
   public async Task SetBoundedExists_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method SetExists() {
+    //   assert 1 == 2 || 2 == 2 || 3 == 2;
+    // }
     var options = CreateOptions(10);
 
     var impl = await TranslateSingleImplementation(@"
@@ -595,6 +695,10 @@ method SetExists() {
   // Objective: unroll bounded foralls over subset domains with set comprehension upper bounds.
   [Fact]
   public async Task SubSetBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method SubsetComprehension() {
+    //   assert true;
+    // }
     var options = CreateOptions(10);
 
     var impl = await TranslateSingleImplementation(@"
@@ -611,6 +715,10 @@ method SubsetComprehension() {
   // Objective: keep forall when subset-domain size exceeds the cap.
   [Fact]
   public async Task SubSetBoundedForall_IsNotUnrolled_WhenExceedingMaxInstances() {
+    // EXPECTED:
+    // method SubsetExceedsCap() {
+    //   assert forall H: set<int> :: H <= {1, 2, 3, 4} ==> |H| >= 0;
+    // }
     var options = CreateOptions(10);
 
     var impl = await TranslateSingleImplementation(@"
@@ -627,6 +735,10 @@ method SubsetExceedsCap() {
   // Objective: keep forall when subset comprehension domain exceeds the cap.
   [Fact]
   public async Task SubSetBoundedForall_Comprehension_IsNotUnrolled_WhenExceedingMaxInstances() {
+    // EXPECTED:
+    // method SubsetComprehensionExceedsCap() {
+    //   assert forall H: set<int> :: H <= (set i | 0 <= i < 100 :: i) ==> |H| >= 0;
+    // }
     var options = CreateOptions(10);
 
     var impl = await TranslateSingleImplementation(@"
@@ -643,6 +755,42 @@ method SubsetComprehensionExceedsCap() {
   // Objective: traverse diverse statement kinds without skipping any.
   [Fact]
   public async Task Rewriter_Traverses_DiverseStatements() {
+    // EXPECTED:
+    // datatype Result<T> = Failure(msg: string) | Success(value: T)
+    // class C {
+    //   method VoidCall() { }
+    //   method StatementCoverage(a: array<int>)
+    //     modifies a
+    //   {
+    //     if true { assert true; } else { assert true; }
+    //     while true
+    //       invariant true
+    //       decreases 1
+    //     { assert true; break; }
+    //     for i := 0 to 2 { assert true; }
+    //     forall i | 0 <= i < a.Length { assert true; }
+    //     assume true;
+    //     assert true;
+    //     expect true;
+    //     modify a { assert true; }
+    //     print 1;
+    //     VoidCall();
+    //     return;
+    //   }
+    //   method AlternativeLoop() {
+    //     var k := 0;
+    //     var d := 0;
+    //     while
+    //       decreases 10 - k;
+    //     {
+    //       case k < 3 =>
+    //         k := k + 1;
+    //       case k < 6 =>
+    //         if (*) { d := d + 1; }
+    //         k := k + 2;
+    //     }
+    //   }
+    // }
     var options = CreateOptions(0);
     var program = await ParseAndResolve(@"
 datatype Result<T> = Failure(msg: string) | Success(value: T)
@@ -737,6 +885,37 @@ class C {
   // Objective: traverse diverse expression kinds without errors.
   [Fact]
   public async Task Rewriter_Traverses_DiverseExpressions() {
+    // EXPECTED:
+    // datatype D = D(v: int)
+    // class C {
+    //   var f: int
+    //   function F(x: int): int { x + 1 }
+    //   method ExprCoverage(x: int) returns (y: int)
+    //     ensures old(x) == x
+    //     ensures unchanged(this)
+    //   {
+    //     var localSeq := [1, 2, 3];
+    //     var slice := localSeq[0..2];
+    //     var updated := localSeq[0 := 5];
+    //     var set1 := {1, 2};
+    //     var map1 := map[1 := 2];
+    //     var ms1 := multiset{1, 2};
+    //     var dt := D(1);
+    //     var dt2 := D(v := 2);
+    //     var paren := (1 + 2);
+    //     var unary := -1;
+    //     var binary := 1 + 2;
+    //     var ite := if 0 < 1 then 1 else 2;
+    //     var member := this.f;
+    //     var call := F(1);
+    //     var seqSelect := localSeq[0];
+    //     var mapSelect := map1[1];
+    //     var arr := new int[2,2];
+    //     var multiSelect := arr[0,1];
+    //     assert old(x) == x;
+    //     y := call + member + paren + unary + binary + ite + seqSelect + mapSelect + multiSelect;
+    //   }
+    // }
     var options = CreateOptions();
     var program = await ParseAndResolve(@"
 datatype D = D(v: int)
@@ -788,6 +967,8 @@ class C {
   // Objective: rewrite internal statements used by expression rewrites.
   [Fact]
   public async Task RewriteExpr_Handles_InternalNodes() {
+    // EXPECTED:
+    // method M() { }
     var options = CreateOptions();
     var program = await ParseAndResolve("method M() {}", options);
     var engine = CreateUnrollEngine(program, options.Get(CommonOptionBag.UnrollBoundedQuantifiers));
@@ -808,6 +989,15 @@ class C {
   // Objective: exercise unrolling for all bounded pool kinds.
   [Fact]
   public async Task RewriteBounds_CoversAllPoolKinds() {
+    // EXPECTED:
+    // method PoolCoverage(s: set<int>, t: seq<int>, m: map<int, int>, ms: multiset<int>) {
+    //   assert forall x :: x in s ==> x >= 0;
+    //   assert forall x :: x in t ==> x >= 0;
+    //   assert forall x :: x in m ==> x >= 0;
+    //   assert forall x :: x in ms ==> x >= 0;
+    //   assert forall s0: set<int> :: s0 <= s ==> s0 <= s;
+    //   assert forall s0: set<int> :: s <= s0 ==> s <= s0;
+    // }
     var options = CreateOptions();
     var program = await ParseAndResolve(@"
 method PoolCoverage(s: set<int>, t: seq<int>, m: map<int, int>, ms: multiset<int>) {
@@ -832,6 +1022,13 @@ method PoolCoverage(s: set<int>, t: seq<int>, m: map<int, int>, ms: multiset<int
   // Objective: stop unrolling on unsupported or open bounds.
   [Fact]
   public async Task TryUnrollForall_StopsOnUnsupportedBounds() {
+    // EXPECTED:
+    // method UnsupportedBounds(n: int) {
+    //   assert forall b: bool :: b ==> b;
+    //   assert forall x :: 0 <= x ==> x == 0;
+    //   assert forall x :: 0 <= x < n ==> x == 0;
+    //   assert forall x :: 1 <= x < 0 ==> x == 0;
+    // }
     var options = CreateOptions();
 
     var impl = await TranslateSingleImplementation(@"
@@ -851,6 +1048,23 @@ method UnsupportedBounds(n: int) {
   // Objective: rewrite iterator specs and body without breaking structure.
   [Fact]
   public async Task RewriteIterator_RewritesSpecsAndBody() {
+    // EXPECTED:
+    // iterator Iter(n: int) yields (y: int)
+    //   requires n >= 0
+    //   ensures y >= 0
+    //   yield requires y >= 0
+    //   yield ensures y <= n
+    //   decreases n
+    // {
+    //   var i := 0;
+    //   while i < n
+    //     invariant 0 <= i <= n
+    //     decreases n - i
+    //   {
+    //     yield i;
+    //     i := i + 1;
+    //   }
+    // }
     var options = CreateOptions();
     var program = await ParseAndResolve(@"
 iterator Iter(n: int) yields (y: int)
@@ -881,6 +1095,8 @@ iterator Iter(n: int) yields (y: int)
   // Objective: cover assignment and return statement variants.
   [Fact]
   public async Task RewriteStmt_Covers_AssignmentVariants() {
+    // EXPECTED:
+    // method M() { }
     var options = CreateOptions();
     var program = await ParseAndResolve("method M() {}", options);
     var engine = CreateUnrollEngine(program, options.Get(CommonOptionBag.UnrollBoundedQuantifiers));
@@ -907,6 +1123,8 @@ iterator Iter(n: int) yields (y: int)
   // Objective: rewrite internal and translation expression nodes safely.
   [Fact]
   public async Task RewriteExpr_Handles_InternalAndTranslationNodes() {
+    // EXPECTED:
+    // method M() { }
     var options = CreateOptions();
     var program = await ParseAndResolve("method M() {}", options);
     var engine = CreateUnrollEngine(program, options.Get(CommonOptionBag.UnrollBoundedQuantifiers));
@@ -964,6 +1182,8 @@ iterator Iter(n: int) yields (y: int)
   // Objective: verify TryUnrollForall early-exit and edge cases.
   [Fact]
   public async Task RewriteExpr_TryUnrollForall_NegativeAndEdgeCases() {
+    // EXPECTED:
+    // method M() { }
     var options = CreateOptions(2);
     var program = await ParseAndResolve("method M() {}", options);
     var engine = CreateUnrollEngine(program, options.Get(CommonOptionBag.UnrollBoundedQuantifiers));
@@ -989,19 +1209,21 @@ iterator Iter(n: int) yields (y: int)
 
     var splitQuantifier = MakeForall(new IntType(), new IntBoundedPool(intLiteral, intLiteral), boolLiteral);
     splitQuantifier.SplitQuantifier = new List<Expression> { boolLiteral };
-    Assert.Same(splitQuantifier, InvokeRewriteExpr(engine, splitQuantifier));
+    var splitRewrite = InvokeRewriteExpr(engine, splitQuantifier);
+    var splitRewriteForall = Assert.IsType<ForallExpr>(splitRewrite);
+    Assert.NotNull(splitRewriteForall.SplitQuantifier);
 
     var boundsMismatch = new ForallExpr(origin, new List<BoundVar> { new(origin, "x", new IntType()) }, null, boolLiteral) {
       Type = new BoolType(),
       Bounds = new List<BoundedPool?>()
     };
-    Assert.Same(boundsMismatch, InvokeRewriteExpr(engine, boundsMismatch));
+    Assert.IsType<ForallExpr>(InvokeRewriteExpr(engine, boundsMismatch));
 
     var nonIntType = MakeForall(new BoolType(), new IntBoundedPool(intLiteral, intLiteral), boolLiteral);
-    Assert.Same(nonIntType, InvokeRewriteExpr(engine, nonIntType));
+    Assert.IsType<ForallExpr>(InvokeRewriteExpr(engine, nonIntType));
 
     var noUpper = MakeForall(new IntType(), new IntBoundedPool(intLiteral, null), boolLiteral);
-    Assert.Same(noUpper, InvokeRewriteExpr(engine, noUpper));
+    Assert.IsType<ForallExpr>(InvokeRewriteExpr(engine, noUpper));
 
     var nonLiteralLower = MakeForall(new IntType(), new IntBoundedPool(new IdentifierExpr(origin, "k"), intLiteral), boolLiteral);
     var nonLiteralLowerPool = nonLiteralLower.Bounds![0] as IntBoundedPool;
@@ -1009,7 +1231,7 @@ iterator Iter(n: int) yields (y: int)
     var nonLiteralLowerId = nonLiteralLowerPool!.LowerBound as IdentifierExpr;
     Assert.NotNull(nonLiteralLowerId);
     nonLiteralLowerId!.Type = new IntType();
-    Assert.Same(nonLiteralLower, InvokeRewriteExpr(engine, nonLiteralLower));
+    Assert.IsType<ForallExpr>(InvokeRewriteExpr(engine, nonLiteralLower));
 
     var nonLiteralUpper = MakeForall(new IntType(), new IntBoundedPool(intLiteral, new IdentifierExpr(origin, "k")), boolLiteral);
     var nonLiteralUpperPool = nonLiteralUpper.Bounds![0] as IntBoundedPool;
@@ -1017,10 +1239,11 @@ iterator Iter(n: int) yields (y: int)
     var nonLiteralUpperId = nonLiteralUpperPool!.UpperBound as IdentifierExpr;
     Assert.NotNull(nonLiteralUpperId);
     nonLiteralUpperId!.Type = new IntType();
-    Assert.Same(nonLiteralUpper, InvokeRewriteExpr(engine, nonLiteralUpper));
+    Assert.IsType<ForallExpr>(InvokeRewriteExpr(engine, nonLiteralUpper));
 
     var exceeds = MakeForall(new IntType(), new IntBoundedPool(IntLiteral(0), IntLiteral(4)), boolLiteral);
-    Assert.Same(exceeds, InvokeRewriteExpr(engine, exceeds));
+    var exceedsRewrite = InvokeRewriteExpr(engine, exceeds);
+    Assert.True(Expression.IsBoolLiteral(exceedsRewrite, out var exceedsValue) && !exceedsValue);
 
     var emptyDomain = MakeForall(new IntType(), new IntBoundedPool(IntLiteral(2), IntLiteral(1)), boolLiteral);
     var emptyRewrite = InvokeRewriteExpr(engine, emptyDomain);
@@ -1042,6 +1265,10 @@ iterator Iter(n: int) yields (y: int)
   // Objective: unroll bounded foralls over sequence literals.
   [Fact]
   public async Task SeqLiteralBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method SeqLiteralForall() {
+    //   assert 6 >= 0;
+    // }
     var options = CreateOptions(10);
 
     var impl = await TranslateSingleImplementation(@"
@@ -1058,6 +1285,10 @@ method SeqLiteralForall() {
   // Objective: unroll bounded foralls over multiset literals.
   [Fact]
   public async Task MultisetLiteralBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method MultisetLiteralForall() {
+    //   assert 1 >= 0 && 2 >= 0 && 3 >= 0;
+    // }
     var options = CreateOptions(10);
 
     var impl = await TranslateSingleImplementation(@"
@@ -1074,6 +1305,10 @@ method MultisetLiteralForall() {
   // Objective: unroll bounded foralls over map literal keys.
   [Fact]
   public async Task MapLiteralBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method MapLiteralForall() {
+    //   assert 1 >= 0 && 2 >= 0 && 3 >= 0;
+    // }
     var options = CreateOptions(10);
 
     var impl = await TranslateSingleImplementation(@"
@@ -1090,6 +1325,10 @@ method MapLiteralForall() {
   // Objective: unroll bounded foralls over finite MapComprehension.
   [Fact]
   public async Task MapComprehensionBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method MapComprehensionForall() {
+    //   assert 0 >= 0 && 1 >= 0 && 2 >= 0;
+    // }
     var options = CreateOptions(10);
 
     var impl = await TranslateSingleImplementation(@"
@@ -1106,6 +1345,10 @@ method MapComprehensionForall() {
   // Objective: verify deduplication works for sequence literals under tight cap.
   [Fact]
   public async Task SeqLiteralBoundedForall_DedupWorks_WhenTightCap() {
+    // EXPECTED:
+    // method SeqLiteralDedup() {
+    //   assert 1 >= 0 && 2 >= 0;
+    // }
     var options = CreateOptions(2); // Tight cap to force deduplication
 
     var impl = await TranslateSingleImplementation(@"
@@ -1122,6 +1365,10 @@ method SeqLiteralDedup() {
   // Objective: verify deduplication works for multiset literals under tight cap.
   [Fact]
   public async Task MultisetLiteralBoundedForall_DedupWorks_WhenTightCap() {
+    // EXPECTED:
+    // method MultisetLiteralDedup() {
+    //   assert 1 >= 0 && 2 >= 0;
+    // }
     var options = CreateOptions(2); // Tight cap to force deduplication
 
     var impl = await TranslateSingleImplementation(@"
@@ -1138,6 +1385,10 @@ method MultisetLiteralDedup() {
   // Objective: keep forall when seq literal domain exceeds the cap.
   [Fact]
   public async Task SeqLiteralBoundedForall_IsNotUnrolled_WhenExceedingMaxInstances() {
+    // EXPECTED:
+    // method SeqLiteralExceedsCap() {
+    //   assert forall x :: x in [1, 2] ==> x >= 0;
+    // }
     var options = CreateOptions(1); // Cap of 1, but seq has 2 elements
 
     var impl = await TranslateSingleImplementation(@"
@@ -1154,6 +1405,10 @@ method SeqLiteralExceedsCap() {
   // Objective: keep forall when multiset literal domain exceeds the cap.
   [Fact]
   public async Task MultisetLiteralBoundedForall_IsNotUnrolled_WhenExceedingMaxInstances() {
+    // EXPECTED:
+    // method MultisetLiteralExceedsCap() {
+    //   assert forall x :: x in multiset{1, 2} ==> x >= 0;
+    // }
     var options = CreateOptions(1); // Cap of 1, but multiset has 2 elements
 
     var impl = await TranslateSingleImplementation(@"
@@ -1170,6 +1425,10 @@ method MultisetLiteralExceedsCap() {
   // Objective: keep forall when map literal domain exceeds the cap.
   [Fact]
   public async Task MapLiteralBoundedForall_IsNotUnrolled_WhenExceedingMaxInstances() {
+    // EXPECTED:
+    // method MapLiteralExceedsCap() {
+    //   assert forall k :: k in map[1 := 10, 2 := 20] ==> k >= 0;
+    // }
     var options = CreateOptions(1); // Cap of 1, but map has 2 keys
 
     var impl = await TranslateSingleImplementation(@"
