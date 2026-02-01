@@ -163,3 +163,4 @@ make -C docs/DafnyRef
 ## Working agreements for agents
 - Prefer minimal, targeted changes.
 - Run formatting appropriate to touched files (`make format` and/or `make format-dfy`).
+- Always run relevant tests yourself after changes.
