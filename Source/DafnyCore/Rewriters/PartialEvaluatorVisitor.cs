@@ -1312,12 +1312,11 @@ internal sealed partial class PartialEvaluatorEngine {
       }
 
       public Expression CreateExpression(Type type) {
-        var cloner = new Cloner(cloneResolvedFields: true);
-        var clone = cloner.CloneExpr(expr);
-        if (clone.Type == null) {
-          clone.Type = type;
+        // Reuse the cached literal/lambda expression for speed; shared nodes are acceptable here.
+        if (expr.Type == null) {
+          expr.Type = type;
         }
-        return clone;
+        return expr;
       }
     }
   }

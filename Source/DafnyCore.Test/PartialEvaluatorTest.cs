@@ -75,7 +75,7 @@ method Entry() {
     var assertStmt = DescendantStatements(entry.Body!)
       .OfType<AssertStmt>()
       .Single();
-        var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+    var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
 
     Assert.True(Expression.IsBoolLiteral(assertExpr, out var literal));
     Assert.False(literal);
