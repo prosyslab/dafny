@@ -573,7 +573,7 @@ internal sealed partial class PartialEvaluatorEngine {
       if (unary.ResolvedOp == UnaryOpExpr.ResolvedOpcode.SetCard) {
         if (TryGetSetDisplayLiteral(unary.E, out var display)) {
           if (display.Elements.Count <= 1 || AllElementsAreLiterals(display.Elements)) {
-            var distinct = DistinctLiteralElements(display.Elements);
+            var distinct = new LiteralSet(display.Elements);
             var result = CreateIntLiteral(unary.Origin, distinct.Count, unary.Type);
             SetReplacement(unary, result);
             return false;
@@ -1198,11 +1198,11 @@ internal sealed partial class PartialEvaluatorEngine {
       if (!AllElementsAreLiterals(setDisplay.Elements)) {
         return false;
       }
-      var distinct = DistinctLiteralElements(setDisplay.Elements);
+      var distinct = new LiteralSet(setDisplay.Elements);
       if (distinct.Count != 1) {
         return false;
       }
-      simplified = distinct[0];
+      simplified = distinct.Elements[0];
       if (simplified.Type == null) {
         simplified.Type = callExpr.Type;
       }
