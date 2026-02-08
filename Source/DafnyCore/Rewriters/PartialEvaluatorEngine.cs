@@ -479,9 +479,9 @@ internal sealed partial class PartialEvaluatorEngine {
         TryGetSetDisplayLiteral(right, out var rightDisplayLiteral) &&
         AllElementsAreLiterals(leftDisplay.Elements) &&
         AllElementsAreLiterals(rightDisplayLiteral.Elements)) {
-      var leftDistinct = DistinctLiteralElements(leftDisplay.Elements);
-      var rightDistinct = DistinctLiteralElements(rightDisplayLiteral.Elements);
-      var isSubset = leftDistinct.All(element => ContainsLiteralElement(rightDistinct, element));
+      var leftDistinct = new LiteralSet(leftDisplay.Elements);
+      var rightDistinct = new LiteralSet(rightDisplayLiteral.Elements);
+      var isSubset = leftDistinct.Elements.All(element => rightDistinct.Contains(element));
       var isProper = isSubset && leftDistinct.Count < rightDistinct.Count;
       return CreateBoolLiteral(binary.Origin, proper ? isProper : isSubset);
     }
@@ -496,9 +496,9 @@ internal sealed partial class PartialEvaluatorEngine {
         TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
         AllElementsAreLiterals(leftDisplay.Elements) &&
         AllElementsAreLiterals(rightDisplay.Elements)) {
-      var leftDistinct = DistinctLiteralElements(leftDisplay.Elements);
-      var rightDistinct = DistinctLiteralElements(rightDisplay.Elements);
-      var disjoint = leftDistinct.All(element => !ContainsLiteralElement(rightDistinct, element));
+      var leftDistinct = new LiteralSet(leftDisplay.Elements);
+      var rightDistinct = new LiteralSet(rightDisplay.Elements);
+      var disjoint = leftDistinct.Elements.All(element => !rightDistinct.Contains(element));
       return CreateBoolLiteral(binary.Origin, disjoint);
     }
     return binary;
@@ -515,13 +515,11 @@ internal sealed partial class PartialEvaluatorEngine {
         TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
         AllElementsAreLiterals(leftDisplay.Elements) &&
         AllElementsAreLiterals(rightDisplay.Elements)) {
-      var merged = DistinctLiteralElements(leftDisplay.Elements);
+      var merged = new LiteralSet(leftDisplay.Elements);
       foreach (var element in rightDisplay.Elements) {
-        if (!ContainsLiteralElement(merged, element)) {
-          merged.Add(element);
-        }
+        merged.Add(element);
       }
-      return CreateSetDisplayLiteral(binary.Origin, merged, binary.Type);
+      return CreateSetDisplayLiteral(binary.Origin, merged.Elements, binary.Type);
     }
     return binary;
   }
@@ -537,11 +535,11 @@ internal sealed partial class PartialEvaluatorEngine {
         TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
         AllElementsAreLiterals(leftDisplay.Elements) &&
         AllElementsAreLiterals(rightDisplay.Elements)) {
-      var leftDistinct = DistinctLiteralElements(leftDisplay.Elements);
-      var rightDistinct = DistinctLiteralElements(rightDisplay.Elements);
+      var leftDistinct = new LiteralSet(leftDisplay.Elements);
+      var rightDistinct = new LiteralSet(rightDisplay.Elements);
       var intersection = new List<Expression>();
-      foreach (var element in leftDistinct) {
-        if (ContainsLiteralElement(rightDistinct, element)) {
+      foreach (var element in leftDistinct.Elements) {
+        if (rightDistinct.Contains(element)) {
           intersection.Add(element);
         }
       }
@@ -558,9 +556,9 @@ internal sealed partial class PartialEvaluatorEngine {
         TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
         AllElementsAreLiterals(leftDisplay.Elements) &&
         AllElementsAreLiterals(rightDisplay.Elements)) {
-      var leftDistinct = DistinctLiteralElements(leftDisplay.Elements);
-      var rightDistinct = DistinctLiteralElements(rightDisplay.Elements);
-      var difference = leftDistinct.Where(element => !ContainsLiteralElement(rightDistinct, element)).ToList();
+      var leftDistinct = new LiteralSet(leftDisplay.Elements);
+      var rightDistinct = new LiteralSet(rightDisplay.Elements);
+      var difference = leftDistinct.Elements.Where(element => !rightDistinct.Contains(element)).ToList();
       return CreateSetDisplayLiteral(binary.Origin, difference, binary.Type);
     }
     return binary;
@@ -584,8 +582,8 @@ internal sealed partial class PartialEvaluatorEngine {
     if (TryGetMultiSetDisplayLiteral(binary.E1, out var multiSetDisplay) &&
         AllElementsAreLiterals(multiSetDisplay.Elements) &&
         IsLiteralLike(binary.E0)) {
-      var counts = BuildMultisetCounts(multiSetDisplay.Elements);
-      var contains = counts.Any(entry => AreLiteralExpressionsEqual(entry.Element, binary.E0) && entry.Count > 0);
+      var counts = BuildMultisetCountsDict(multiSetDisplay.Elements);
+      var contains = counts.ContainsKey(binary.E0);
       return CreateBoolLiteral(binary.Origin, isIn ? contains : !contains);
     }
     return binary;
@@ -618,13 +616,11 @@ internal sealed partial class PartialEvaluatorEngine {
         TryGetMultiSetDisplayLiteral(right, out var rightDisplayLiteral) &&
         AllElementsAreLiterals(leftDisplay.Elements) &&
         AllElementsAreLiterals(rightDisplayLiteral.Elements)) {
-      var leftCounts = BuildMultisetCounts(leftDisplay.Elements);
-      var rightCounts = BuildMultisetCounts(rightDisplayLiteral.Elements);
-      var isSubset = leftCounts.All(entry => {
-        var match = rightCounts.FirstOrDefault(candidate => AreLiteralExpressionsEqual(candidate.Element, entry.Element));
-        return match != null && entry.Count <= match.Count;
-      });
-      var isProper = isSubset && leftCounts.Sum(entry => entry.Count) < rightCounts.Sum(entry => entry.Count);
+      var leftCounts = BuildMultisetCountsDict(leftDisplay.Elements);
+      var rightCounts = BuildMultisetCountsDict(rightDisplayLiteral.Elements);
+      var isSubset = leftCounts.All(entry =>
+        rightCounts.TryGetValue(entry.Key, out var rightCount) && entry.Value <= rightCount);
+      var isProper = isSubset && leftCounts.Values.Sum() < rightCounts.Values.Sum();
       return CreateBoolLiteral(binary.Origin, proper ? isProper : isSubset);
     }
     return binary;
@@ -638,9 +634,9 @@ internal sealed partial class PartialEvaluatorEngine {
         TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
         AllElementsAreLiterals(leftDisplay.Elements) &&
         AllElementsAreLiterals(rightDisplay.Elements)) {
-      var leftCounts = BuildMultisetCounts(leftDisplay.Elements);
-      var rightCounts = BuildMultisetCounts(rightDisplay.Elements);
-      var disjoint = leftCounts.All(entry => rightCounts.All(candidate => !AreLiteralExpressionsEqual(candidate.Element, entry.Element)));
+      var leftCounts = BuildMultisetCountsDict(leftDisplay.Elements);
+      var rightCounts = BuildMultisetCountsDict(rightDisplay.Elements);
+      var disjoint = leftCounts.Keys.All(key => !rightCounts.ContainsKey(key));
       return CreateBoolLiteral(binary.Origin, disjoint);
     }
     return binary;
@@ -657,16 +653,12 @@ internal sealed partial class PartialEvaluatorEngine {
         TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
         AllElementsAreLiterals(leftDisplay.Elements) &&
         AllElementsAreLiterals(rightDisplay.Elements)) {
-      var combined = BuildMultisetCounts(leftDisplay.Elements);
-      foreach (var entry in BuildMultisetCounts(rightDisplay.Elements)) {
-        var target = combined.FirstOrDefault(candidate => AreLiteralExpressionsEqual(candidate.Element, entry.Element));
-        if (target == null) {
-          combined.Add(new MultisetElementCount(entry.Element) { Count = entry.Count });
-        } else {
-          target.Count += entry.Count;
-        }
+      var combined = BuildMultisetCountsDict(leftDisplay.Elements);
+      foreach (var entry in BuildMultisetCountsDict(rightDisplay.Elements)) {
+        combined.TryGetValue(entry.Key, out var existing);
+        combined[entry.Key] = existing + entry.Value;
       }
-      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCounts(combined), binary.Type);
+      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCountsDict(combined), binary.Type);
     }
     return binary;
   }
@@ -682,19 +674,18 @@ internal sealed partial class PartialEvaluatorEngine {
         TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
         AllElementsAreLiterals(leftDisplay.Elements) &&
         AllElementsAreLiterals(rightDisplay.Elements)) {
-      var leftCounts = BuildMultisetCounts(leftDisplay.Elements);
-      var rightCounts = BuildMultisetCounts(rightDisplay.Elements);
-      var intersection = new List<MultisetElementCount>();
+      var leftCounts = BuildMultisetCountsDict(leftDisplay.Elements);
+      var rightCounts = BuildMultisetCountsDict(rightDisplay.Elements);
+      var intersection = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.Instance);
       foreach (var entry in leftCounts) {
-        var match = rightCounts.FirstOrDefault(candidate => AreLiteralExpressionsEqual(candidate.Element, entry.Element));
-        if (match != null) {
-          var count = Math.Min(entry.Count, match.Count);
+        if (rightCounts.TryGetValue(entry.Key, out var rightCount)) {
+          var count = Math.Min(entry.Value, rightCount);
           if (count > 0) {
-            intersection.Add(new MultisetElementCount(entry.Element) { Count = count });
+            intersection[entry.Key] = count;
           }
         }
       }
-      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCounts(intersection), binary.Type);
+      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCountsDict(intersection), binary.Type);
     }
     return binary;
   }
@@ -707,26 +698,26 @@ internal sealed partial class PartialEvaluatorEngine {
         TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
         AllElementsAreLiterals(leftDisplay.Elements) &&
         AllElementsAreLiterals(rightDisplay.Elements)) {
-      var leftCounts = BuildMultisetCounts(leftDisplay.Elements);
-      var rightCounts = BuildMultisetCounts(rightDisplay.Elements);
-      var difference = new List<MultisetElementCount>();
+      var leftCounts = BuildMultisetCountsDict(leftDisplay.Elements);
+      var rightCounts = BuildMultisetCountsDict(rightDisplay.Elements);
+      var difference = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.Instance);
       foreach (var entry in leftCounts) {
-        var match = rightCounts.FirstOrDefault(candidate => AreLiteralExpressionsEqual(candidate.Element, entry.Element));
-        var count = entry.Count - (match?.Count ?? 0);
+        rightCounts.TryGetValue(entry.Key, out var rightCount);
+        var count = entry.Value - rightCount;
         if (count > 0) {
-          difference.Add(new MultisetElementCount(entry.Element) { Count = count });
+          difference[entry.Key] = count;
         }
       }
-      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCounts(difference), binary.Type);
+      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCountsDict(difference), binary.Type);
     }
     return binary;
   }
 
-  private static List<Expression> ExpandMultisetCounts(IEnumerable<MultisetElementCount> counts) {
+  private static List<Expression> ExpandMultisetCountsDict(Dictionary<Expression, int> counts) {
     var elements = new List<Expression>();
     foreach (var entry in counts) {
-      for (var i = 0; i < entry.Count; i++) {
-        elements.Add(entry.Element);
+      for (var i = 0; i < entry.Value; i++) {
+        elements.Add(entry.Key);
       }
     }
     return elements;
@@ -858,7 +849,7 @@ internal sealed partial class PartialEvaluatorEngine {
     }
 
     var stackKey = BuildInlineStackKey(state.InlineStack, function);
-    var callKey = callExpr.ToString();
+    var callKey = BuildInlineCallCacheCallKey(callExpr);
 
     key = $"{RuntimeHelpers.GetHashCode(function)}|d={state.Depth}|s={stackKey}|c={callKey}";
     return true;
@@ -884,6 +875,45 @@ internal sealed partial class PartialEvaluatorEngine {
 
     ids.Sort();
     return string.Join(",", ids);
+  }
+
+  /// <summary>
+  /// Builds a cache-key fragment from a FunctionCallExpr's literal arguments and type applications,
+  /// avoiding the expensive callExpr.ToString() which serializes the entire AST subtree.
+  /// Only called when all args are known to be int or bool literals (checked by the caller's guard).
+  /// </summary>
+  private static string BuildInlineCallCacheCallKey(FunctionCallExpr callExpr) {
+    var builder = new StringBuilder();
+    for (var i = 0; i < callExpr.Args.Count; i++) {
+      if (i > 0) {
+        builder.Append(',');
+      }
+      var arg = callExpr.Args[i];
+      if (Expression.IsIntLiteral(arg, out var intVal)) {
+        builder.Append('i').Append(intVal);
+      } else if (Expression.IsBoolLiteral(arg, out var boolVal)) {
+        builder.Append('b').Append(boolVal ? '1' : '0');
+      }
+    }
+    if (callExpr.TypeApplication_AtEnclosingClass is { Count: > 0 }) {
+      builder.Append("|t=");
+      for (var i = 0; i < callExpr.TypeApplication_AtEnclosingClass.Count; i++) {
+        if (i > 0) {
+          builder.Append(',');
+        }
+        builder.Append(callExpr.TypeApplication_AtEnclosingClass[i]);
+      }
+    }
+    if (callExpr.TypeApplication_JustFunction is { Count: > 0 }) {
+      builder.Append("|tf=");
+      for (var i = 0; i < callExpr.TypeApplication_JustFunction.Count; i++) {
+        if (i > 0) {
+          builder.Append(',');
+        }
+        builder.Append(callExpr.TypeApplication_JustFunction[i]);
+      }
+    }
+    return builder.ToString();
   }
 
   // ------------------- Literal constructors -------------------
@@ -1170,13 +1200,13 @@ internal sealed partial class PartialEvaluatorEngine {
     if (!AllElementsAreLiterals(left.Elements) || !AllElementsAreLiterals(right.Elements)) {
       return false;
     }
-    var leftDistinct = DistinctLiteralElements(left.Elements);
-    var rightDistinct = DistinctLiteralElements(right.Elements);
+    var leftDistinct = new LiteralSet(left.Elements);
+    var rightDistinct = new LiteralSet(right.Elements);
     if (leftDistinct.Count != rightDistinct.Count) {
       return false;
     }
-    foreach (var element in leftDistinct) {
-      if (!ContainsLiteralElement(rightDistinct, element)) {
+    foreach (var element in leftDistinct.Elements) {
+      if (!rightDistinct.Contains(element)) {
         return false;
       }
     }
@@ -1187,28 +1217,17 @@ internal sealed partial class PartialEvaluatorEngine {
     if (!AllElementsAreLiterals(left.Elements) || !AllElementsAreLiterals(right.Elements)) {
       return false;
     }
-    var leftCounts = BuildMultisetCounts(left.Elements);
-    var rightCounts = BuildMultisetCounts(right.Elements);
+    var leftCounts = BuildMultisetCountsDict(left.Elements);
+    var rightCounts = BuildMultisetCountsDict(right.Elements);
     if (leftCounts.Count != rightCounts.Count) {
       return false;
     }
     foreach (var entry in leftCounts) {
-      var match = rightCounts.FirstOrDefault(candidate => AreLiteralExpressionsEqual(entry.Element, candidate.Element));
-      if (match == null || match.Count != entry.Count) {
+      if (!rightCounts.TryGetValue(entry.Key, out var rightCount) || rightCount != entry.Value) {
         return false;
       }
     }
     return true;
-  }
-
-  private static List<Expression> DistinctLiteralElements(IEnumerable<Expression> elements) {
-    var distinct = new List<Expression>();
-    foreach (var element in elements) {
-      if (!ContainsLiteralElement(distinct, element)) {
-        distinct.Add(element);
-      }
-    }
-    return distinct;
   }
 
   private static bool ContainsLiteralElement(List<Expression> elements, Expression candidate) {
@@ -1222,24 +1241,11 @@ internal sealed partial class PartialEvaluatorEngine {
 
   // ------------------- Multiset element counting -------------------
 
-  private sealed class MultisetElementCount {
-    public MultisetElementCount(Expression element) {
-      Element = element;
-    }
-
-    public Expression Element { get; }
-    public int Count { get; set; }
-  }
-
-  private static List<MultisetElementCount> BuildMultisetCounts(IEnumerable<Expression> elements) {
-    var counts = new List<MultisetElementCount>();
+  private static Dictionary<Expression, int> BuildMultisetCountsDict(IEnumerable<Expression> elements) {
+    var counts = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.Instance);
     foreach (var element in elements) {
-      var existing = counts.FirstOrDefault(entry => AreLiteralExpressionsEqual(entry.Element, element));
-      if (existing == null) {
-        counts.Add(new MultisetElementCount(element) { Count = 1 });
-      } else {
-        existing.Count++;
-      }
+      counts.TryGetValue(element, out var count);
+      counts[element] = count + 1;
     }
     return counts;
   }
@@ -1325,6 +1331,88 @@ internal sealed partial class PartialEvaluatorEngine {
         CachedLiteralKind.Bool => Expression.CreateBoolLiteral(origin, BoolValue),
         _ => null
       };
+    }
+  }
+
+  // ------------------- Hash-based literal collections -------------------
+
+  private sealed class LiteralExpressionEqualityComparer : IEqualityComparer<Expression> {
+    public static readonly LiteralExpressionEqualityComparer Instance = new();
+
+    public bool Equals(Expression x, Expression y) {
+      if (ReferenceEquals(x, y)) {
+        return true;
+      }
+      if (x == null || y == null) {
+        return false;
+      }
+      return AreLiteralExpressionsEqual(x, y);
+    }
+
+    public int GetHashCode(Expression expr) {
+      if (expr == null) {
+        return 0;
+      }
+      return ComputeHash(expr);
+    }
+
+    private static int ComputeHash(Expression expr) {
+      if (expr is CharLiteralExpr && TryGetCharLiteral(expr, out var ch)) {
+        return HashCode.Combine(typeof(CharLiteralExpr), (int)ch);
+      }
+      if (expr is LiteralExpr lit) {
+        return HashCode.Combine(typeof(LiteralExpr), lit.Value);
+      }
+      if (expr is SeqDisplayExpr seq) {
+        var hash = new HashCode();
+        hash.Add(typeof(SeqDisplayExpr));
+        foreach (var e in seq.Elements) {
+          hash.Add(ComputeHash(e));
+        }
+        return hash.ToHashCode();
+      }
+      if (expr is SetDisplayExpr) {
+        // Order-independent hash for sets is complex; use type tag only.
+        // Correct (equal objects get equal hashes) but may collide for different sets.
+        // Actual equality is checked via Equals which handles order-independence properly.
+        return typeof(SetDisplayExpr).GetHashCode();
+      }
+      if (expr is MultiSetDisplayExpr) {
+        return typeof(MultiSetDisplayExpr).GetHashCode();
+      }
+      if (TryGetTupleLiteral(expr, out var tuple)) {
+        var hash = new HashCode();
+        hash.Add(typeof(DatatypeValue));
+        foreach (var arg in tuple.Arguments) {
+          hash.Add(ComputeHash(arg));
+        }
+        return hash.ToHashCode();
+      }
+      return 0;
+    }
+  }
+
+  private struct LiteralSet {
+    public readonly List<Expression> Elements;
+    private readonly HashSet<Expression> set;
+
+    public LiteralSet(IEnumerable<Expression> source) {
+      set = new HashSet<Expression>(LiteralExpressionEqualityComparer.Instance);
+      Elements = new List<Expression>();
+      foreach (var e in source) {
+        if (set.Add(e)) {
+          Elements.Add(e);
+        }
+      }
+    }
+
+    public int Count => Elements.Count;
+    public bool Contains(Expression expr) => set.Contains(expr);
+
+    public void Add(Expression expr) {
+      if (set.Add(expr)) {
+        Elements.Add(expr);
+      }
     }
   }
 }
