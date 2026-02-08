@@ -33,7 +33,6 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
     private readonly uint maxInstances;
     private readonly PartialEvaluatorEngine partialEvaluator;
     private readonly QuantifierBounds quantifierBounds;
-    private readonly UnrollCloner cloner;
     internal uint MaxInstances => maxInstances;
 
     internal UnrollEngine(SystemModuleManager systemModuleManager, uint maxInstances, PartialEvaluatorEngine partialEvaluator) {
@@ -41,7 +40,6 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
       this.maxInstances = maxInstances;
       this.partialEvaluator = partialEvaluator ?? throw new ArgumentNullException(nameof(partialEvaluator));
       quantifierBounds = new QuantifierBounds(systemModuleManager, maxInstances);
-      cloner = new UnrollCloner(quantifierBounds, partialEvaluator.SimplifyExpression);
     }
 
     public void Rewrite(ICallable decl) {
@@ -59,7 +57,7 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
           RewriteFrameExprsInPlace(method.Reads.Expressions, RewriteExpr);
           RewriteFrameExprsInPlace(method.Mod.Expressions, RewriteExpr);
           RewriteExprInPlaceList(method.Decreases.Expressions, RewriteExpr);
-          method.SetBody((BlockLikeStmt)RewriteStmt(method.Body));
+          RewriteStmt(method.Body);
           break;
         case IteratorDecl iterator:
           RewriteAttributedExprsInPlace(iterator.Requires, RewriteExpr);
@@ -70,7 +68,7 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
           RewriteAttributedExprsInPlace(iterator.YieldRequires, RewriteExpr);
           RewriteAttributedExprsInPlace(iterator.YieldEnsures, RewriteExpr);
           if (iterator.Body != null) {
-            iterator.Body = (BlockStmt)RewriteStmt(iterator.Body);
+            RewriteStmt(iterator.Body);
           }
           break;
       }
@@ -94,7 +92,8 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
       if (!ContainsQuantifier(stmt)) {
         return stmt;
       }
-      return cloner.CloneStmt(stmt, isReference: false);
+      ExpressionRewriteUtil.RewriteExpressionsInStmtInPlace(stmt, TryRewriteQuantifier);
+      return stmt;
     }
 
     // NOTE: This method is invoked via reflection in tests (BindingFlags.NonPublic).
@@ -103,7 +102,17 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
       if (!ContainsQuantifier(expr)) {
         return expr;
       }
-      return cloner.CloneExpr(expr);
+      return ExpressionRewriteUtil.RewriteExpressionsInPlace(expr, TryRewriteQuantifier);
+    }
+
+    private Expression TryRewriteQuantifier(Expression expr) {
+      if (expr is QuantifierExpr quantifierExpr &&
+          quantifierBounds.TryUnrollQuantifier(quantifierExpr, partialEvaluator.SimplifyExpression, out var rewritten) &&
+          !ReferenceEquals(rewritten, quantifierExpr) &&
+          rewritten != null) {
+        return rewritten;
+      }
+      return expr;
     }
 
     private static bool ContainsQuantifier(Statement stmt) {
@@ -140,72 +149,6 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
 
     internal bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, out Expression rewritten) {
       return quantifierBounds.TryUnrollQuantifier(quantifierExpr, partialEvaluator.SimplifyExpression, out rewritten);
-    }
-
-    private sealed class UnrollCloner : Cloner {
-      private readonly QuantifierBounds quantifierBounds;
-      private readonly Func<Expression, Expression> simplifyAfterSubst;
-
-      public UnrollCloner(QuantifierBounds quantifierBounds, Func<Expression, Expression> simplifyAfterSubst)
-        : base(cloneLiteralModuleDefinition: false, cloneResolvedFields: true) {
-        this.quantifierBounds = quantifierBounds ?? throw new ArgumentNullException(nameof(quantifierBounds));
-        this.simplifyAfterSubst = simplifyAfterSubst ?? throw new ArgumentNullException(nameof(simplifyAfterSubst));
-      }
-
-      public override Expression CloneExpr(Expression expr) {
-        if (expr == null) {
-          return null!;
-        }
-        // Keep concrete syntax nodes stable; just rewrite their resolved expression.
-        if (expr is ConcreteSyntaxExpression concreteSyntaxExpression) {
-          if (concreteSyntaxExpression.ResolvedExpression != null) {
-            var clonedResolved = CloneExpr(concreteSyntaxExpression.ResolvedExpression);
-            if (clonedResolved != null) {
-              concreteSyntaxExpression.ResolvedExpression = clonedResolved;
-            }
-          }
-          return expr;
-        }
-
-        // Keep parentheses stable for tests and debugging.
-        if (expr is ParensExpression parens) {
-          if (parens.E != null) {
-            var clonedE = CloneExpr(parens.E);
-            if (clonedE != null) {
-              parens.E = clonedE;
-            }
-          }
-          if (parens.ResolvedExpression != null) {
-            var clonedResolved = CloneExpr(parens.ResolvedExpression);
-            if (clonedResolved != null) {
-              parens.ResolvedExpression = clonedResolved;
-            }
-          }
-          return expr;
-        }
-
-        if (expr is QuantifierExpr quantifierExpr &&
-            quantifierBounds.TryUnrollQuantifier(quantifierExpr, simplifyAfterSubst, out var rewritten) &&
-            !ReferenceEquals(rewritten, quantifierExpr)) {
-          if (rewritten == null) {
-            return expr;
-          }
-          return rewritten;
-        }
-
-        // Some internal/translation expressions do not implement ICloneable<Expression>.
-        // Best-effort: traverse to rewrite nested quantifiers, but keep the node unchanged.
-        if (expr is not ICloneable<Expression>) {
-          foreach (var child in expr.SubExpressions) {
-            if (child != null) {
-              _ = CloneExpr(child);
-            }
-          }
-          return expr;
-        }
-
-        return base.CloneExpr(expr);
-      }
     }
   }
 }
