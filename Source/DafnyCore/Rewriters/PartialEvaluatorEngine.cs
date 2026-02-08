@@ -779,9 +779,6 @@ internal sealed partial class PartialEvaluatorEngine {
       var substituter = new Substituter(receiverReplacement, substMap, typeMap, null, systemModuleManager);
       var body = substituter.Substitute(function.Body);
       inlined = visitor.SimplifyExpression(body, state.WithDepth(state.Depth - 1));
-      var postVisitor = CreateVisitor();
-      inlined = postVisitor.SimplifyExpression(inlined, state.WithDepth(0));
-
       if (inlined is LiteralExpr literal) {
         CacheInlinedLiteral(callExpr, state, literal);
       }
