@@ -164,17 +164,78 @@ internal sealed class QuantifierBounds {
     }
   }
 
-  private static bool AddUniqueLiteral(List<Expression> uniques, Expression candidate) {
+  private sealed class LiteralExpressionStructuralComparer : IEqualityComparer<Expression> {
+    public static readonly LiteralExpressionStructuralComparer Instance = new();
+
+    public bool Equals(Expression? x, Expression? y) {
+      if (ReferenceEquals(x, y)) {
+        return true;
+      }
+      if (x == null || y == null) {
+        return false;
+      }
+      return LiteralStructuralEquals(x, y);
+    }
+
+    public int GetHashCode(Expression obj) {
+      if (obj == null) {
+        return 0;
+      }
+      return ComputeHash(obj);
+    }
+
+    private static int ComputeHash(Expression expr) {
+      expr = StripConcreteSyntax(expr);
+      if (expr is LiteralExpr literal) {
+        return HashCode.Combine(literal.GetType(), literal.Value);
+      }
+      if (expr is DisplayExpression display) {
+        var hash = new HashCode();
+        hash.Add(display.GetType());
+        hash.Add(display.Elements.Count);
+        foreach (var element in display.Elements) {
+          hash.Add(ComputeHash(element));
+        }
+        return hash.ToHashCode();
+      }
+      if (expr is MapDisplayExpr mapDisplay) {
+        var hash = new HashCode();
+        hash.Add(typeof(MapDisplayExpr));
+        hash.Add(mapDisplay.Finite);
+        hash.Add(mapDisplay.Elements.Count);
+        foreach (var entry in mapDisplay.Elements) {
+          hash.Add(ComputeHash(entry.A));
+          hash.Add(ComputeHash(entry.B));
+        }
+        return hash.ToHashCode();
+      }
+      if (expr is DatatypeValue datatype) {
+        var hash = new HashCode();
+        hash.Add(typeof(DatatypeValue));
+        hash.Add(datatype.DatatypeName);
+        hash.Add(datatype.MemberName);
+        hash.Add(datatype.Arguments.Count);
+        foreach (var arg in datatype.Arguments) {
+          hash.Add(ComputeHash(arg));
+        }
+        return hash.ToHashCode();
+      }
+      return expr.GetType().GetHashCode();
+    }
+  }
+
+  private static bool AddUniqueLiteral(List<Expression> uniques, HashSet<Expression> uniqueSet, Expression candidate) {
     var normalized = StripConcreteSyntax(candidate);
-    if (uniques.Any(existing => LiteralStructuralEquals(existing, normalized))) {
+    if (!uniqueSet.Add(normalized)) {
       return false;
     }
     uniques.Add(normalized);
     return true;
   }
 
-  private bool TryAddUniqueLiteral(List<Expression> uniques, Expression candidate, uint? cap) {
-    if (AddUniqueLiteral(uniques, candidate)) {
+  private bool TryAddUniqueLiteral(List<Expression> uniques, HashSet<Expression> uniqueSet,
+    Expression candidate, uint? cap) {
+    if (AddUniqueLiteral(uniques, uniqueSet, candidate)) {
       if (cap.HasValue && uniques.Count > cap.Value) {
         return false;
       }
@@ -184,8 +245,9 @@ internal sealed class QuantifierBounds {
 
   private static List<Expression> DeduplicateLiterals(List<Expression> elements) {
     var results = new List<Expression>();
+    var uniqueSet = new HashSet<Expression>(LiteralExpressionStructuralComparer.Instance);
     foreach (var element in elements) {
-      AddUniqueLiteral(results, element);
+      AddUniqueLiteral(results, uniqueSet, element);
     }
     return results;
   }
@@ -579,6 +641,7 @@ internal sealed class QuantifierBounds {
     }
 
     var resultKeys = new List<Expression>();
+    var resultKeySet = new HashSet<Expression>(LiteralExpressionStructuralComparer.Instance);
     var substMap = new Dictionary<IVariable, Expression>();
     var typeMap = new Dictionary<TypeParameter, Type>();
     var range = mapComprehension.Range;
@@ -597,7 +660,7 @@ internal sealed class QuantifierBounds {
         return false;
       }
       var cap = maxInstances == 0 ? (uint?)null : maxInstances;
-      return TryAddUniqueLiteral(resultKeys, keyInst, cap);
+      return TryAddUniqueLiteral(resultKeys, resultKeySet, keyInst, cap);
     }
 
     if (!TryEnumerateAssignments(mapComprehension.BoundVars, domains, substMap, typeMap, HandleInstance)) {
@@ -1530,13 +1593,14 @@ internal sealed class QuantifierBounds {
       var resolved = StripConcreteSyntax(seqPool.Seq);
       if (resolved is SeqDisplayExpr seqDisplay) {
         var elements = new List<Expression>();
+        var elementSet = new HashSet<Expression>(LiteralExpressionStructuralComparer.Instance);
         var cap = maxInstances == 0 ? (uint?)null : maxInstances;
         foreach (var element in seqDisplay.Elements) {
           var value = StripConcreteSyntax(element);
           if (!IsLiteralExpression(value)) {
             return false;
           }
-          if (!TryAddUniqueLiteral(elements, value, cap)) {
+          if (!TryAddUniqueLiteral(elements, elementSet, value, cap)) {
             return false;
           }
         }
@@ -1550,13 +1614,14 @@ internal sealed class QuantifierBounds {
       var resolved = StripConcreteSyntax(multisetPool.MultiSet);
       if (resolved is MultiSetDisplayExpr multisetDisplay) {
         var elements = new List<Expression>();
+        var elementSet = new HashSet<Expression>(LiteralExpressionStructuralComparer.Instance);
         var cap = maxInstances == 0 ? (uint?)null : maxInstances;
         foreach (var element in multisetDisplay.Elements) {
           var value = StripConcreteSyntax(element);
           if (!IsLiteralExpression(value)) {
             return false;
           }
-          if (!TryAddUniqueLiteral(elements, value, cap)) {
+          if (!TryAddUniqueLiteral(elements, elementSet, value, cap)) {
             return false;
           }
         }
@@ -1576,6 +1641,7 @@ internal sealed class QuantifierBounds {
           return false;
         }
         var keys = new List<Expression>();
+        var keySet = new HashSet<Expression>(LiteralExpressionStructuralComparer.Instance);
         var cap = maxInstances == 0 ? (uint?)null : maxInstances;
         foreach (var entry in mapDisplay.Elements) {
           var key = StripConcreteSyntax(entry.A);
@@ -1583,7 +1649,7 @@ internal sealed class QuantifierBounds {
           if (!IsLiteralExpression(key) || !IsLiteralExpression(value)) {
             return false;
           }
-          if (!TryAddUniqueLiteral(keys, key, cap)) {
+          if (!TryAddUniqueLiteral(keys, keySet, key, cap)) {
             return false;
           }
         }
