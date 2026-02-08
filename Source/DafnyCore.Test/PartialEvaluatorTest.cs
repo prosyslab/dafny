@@ -978,6 +978,92 @@ method Entry() {
   }
 
   [Fact]
+  public async Task PartialEvaluation_ComplexInliningAndQuantifierUnrolling() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert true;
+    // }
+    // Justification: literal and lambda arguments enable inlining across BuildSeq/AppendIf/AllChars,
+    // and bounded quantifiers over concrete seq/set domains unroll to boolean literals.
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 5U);
+    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 10U);
+
+    var program = await ParseAndResolve(@"
+function BuildSeq(a: char, b: char, c: char): seq<char> {
+  [a, b, c]
+}
+
+function AppendIf(s: seq<char>, ch: char, shouldAppend: bool): seq<char> {
+  if shouldAppend then s + [ch] else s
+}
+
+function AllChars(s: seq<char>, charPredicate: char -> bool, tag: string): bool {
+  tag == ""ok"" &&
+  forall i | 0 <= i < |s| :: charPredicate(s[i])
+}
+
+function SetInvariant(sets: set<set<int>>, tag: string, extra: int): bool {
+  tag == ""ok"" &&
+  forall t :: t in sets ==> |t| == 1 + (extra - extra)
+}
+
+function MultisetCheck(ms: multiset<int>, expected: multiset<int>, tag: string): bool {
+  tag == ""ok"" && ms + multiset{} == expected
+}
+
+method Entry() {
+  var seed := BuildSeq('A', 'B', 'C');
+  var extended := AppendIf(seed, 'D', true);
+  assert AllChars(extended, (ch: char) => ch != 'Z', ""ok"") &&
+         (exists c: char :: c in {'A', 'B'} && c != 'Z') &&
+         SetInvariant({{1}, {2}}, ""ok"", 0) &&
+         MultisetCheck(multiset{1, 2}, multiset{1, 2}, ""ok"");
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmt = DescendantStatements(entry.Body!).OfType<AssertStmt>().Single();
+    var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+
+    Assert.True(Expression.IsBoolLiteral(assertExpr, out var value) && value);
+    Assert.Empty(assertExpr.DescendantsAndSelf.OfType<QuantifierExpr>());
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_ExistsSequenceOverSetElements() {
+    // EXPECTED:
+    // method Entry() {
+    //   assert true;
+    // }
+    // Justification: the exists-sequence solver enumerates all seq<set<int>> of length 2 from
+    // a finite element domain and finds a witness matching the concrete sequence literal.
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 50U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert exists s: seq<set<int>> ::
+    |s| == 2 &&
+    (forall i | 0 <= i < 2 :: s[i] in {{1}, {2}}) &&
+    s == [{1}, {2}];
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmt = DescendantStatements(entry.Body!).OfType<AssertStmt>().Single();
+
+    Assert.True(Expression.IsBoolLiteral(assertStmt.Expr, out var value) && value);
+  }
+
+  [Fact]
   public async Task PartialEvaluation_CacheDoesNotCrossInliningDepthBoundaries() {
     // EXPECTED:
     // function Entry(): int { 1 + G() }
