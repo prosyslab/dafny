@@ -1271,7 +1271,7 @@ internal sealed partial class PartialEvaluatorEngine {
     builder.Append(RuntimeHelpers.GetHashCode(callExpr.Function));
     builder.Append("|r=");
     if (!callExpr.Function.IsStatic) {
-      builder.Append(callExpr.Receiver);
+      builder.Append(RuntimeHelpers.GetHashCode(callExpr.Receiver));
     }
     builder.Append("|a=");
     for (var i = 0; i < callExpr.Args.Count; i++) {
@@ -1371,15 +1371,38 @@ internal sealed partial class PartialEvaluatorEngine {
         }
         return hash.ToHashCode();
       }
-      if (expr is SetDisplayExpr) {
-        // Order-independent hash for sets is complex; use type tag only.
-        // Correct (equal objects get equal hashes) but may collide for different sets.
-        // Actual equality is checked via Equals which handles order-independence properly.
+    if (expr is SetDisplayExpr setDisplay) {
+      if (!AllElementsAreLiterals(setDisplay.Elements)) {
         return typeof(SetDisplayExpr).GetHashCode();
       }
-      if (expr is MultiSetDisplayExpr) {
+      // Order-independent hash based on distinct literal elements.
+      var distinct = new LiteralSet(setDisplay.Elements);
+      var sum = 0;
+      var xor = 0;
+      foreach (var element in distinct.Elements) {
+        var elementHash = ComputeHash(element);
+        sum = unchecked(sum + elementHash);
+        xor ^= elementHash;
+      }
+      return HashCode.Combine(typeof(SetDisplayExpr), distinct.Count, sum, xor);
+    }
+    if (expr is MultiSetDisplayExpr multiSetDisplay) {
+      if (!AllElementsAreLiterals(multiSetDisplay.Elements)) {
         return typeof(MultiSetDisplayExpr).GetHashCode();
       }
+      // Order-independent hash based on literal element multiplicities.
+      var counts = BuildMultisetCountsDict(multiSetDisplay.Elements);
+      var sum = 0;
+      var xor = 0;
+      var totalCount = 0;
+      foreach (var entry in counts) {
+        var entryHash = HashCode.Combine(ComputeHash(entry.Key), entry.Value);
+        sum = unchecked(sum + entryHash);
+        xor ^= entryHash;
+        totalCount += entry.Value;
+      }
+      return HashCode.Combine(typeof(MultiSetDisplayExpr), counts.Count, totalCount, sum, xor);
+    }
       if (TryGetTupleLiteral(expr, out var tuple)) {
         var hash = new HashCode();
         hash.Add(typeof(DatatypeValue));
