@@ -1300,6 +1300,54 @@ method Entry() {
   }
 
   [Fact]
+  public async Task PartialEvaluation_SimplifiesMapMembership() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert 1 in map[1 := ""a"", 2 := ""b""];
+  assert 3 !in map[1 := ""a"", 2 := ""b""];
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var body = Assert.IsType<BlockStmt>(entry.Body);
+    var asserts = body.Body.OfType<AssertStmt>().ToList();
+    Assert.Equal(2, asserts.Count);
+
+    Assert.All(asserts, assertStmt => Assert.True(Expression.IsBoolLiteral(assertStmt.Expr, out var value) && value));
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_SimplifiesArithmeticIdentities() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert 10 / 1 == 10;
+  assert 7 % 1 == 0;
+  assert 15 / 3 == 5;
+  assert 15 % 4 == 3;
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var body = Assert.IsType<BlockStmt>(entry.Body);
+    var asserts = body.Body.OfType<AssertStmt>().ToList();
+    Assert.Equal(4, asserts.Count);
+
+    Assert.All(asserts, assertStmt => Assert.True(Expression.IsBoolLiteral(assertStmt.Expr, out var value) && value));
+  }
+
+  [Fact]
   public async Task PartialEvaluation_FoldsTupleOperations_NestedCollections() {
     // EXPECTED:
     // function Entry(): bool { true }
