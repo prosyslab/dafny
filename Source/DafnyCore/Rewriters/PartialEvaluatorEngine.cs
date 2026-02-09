@@ -144,9 +144,9 @@ internal sealed partial class PartialEvaluatorEngine {
       case BinaryExpr.ResolvedOpcode.Mul:
         return SimplifyIntBinary(binary, (a, b) => a * b, 1, BinaryExpr.ResolvedOpcode.Mul);
       case BinaryExpr.ResolvedOpcode.Div:
-        return SimplifyIntBinary(binary, (a, b) => b == 0 ? null : a / b);
+        return SimplifyIntDivMod(binary, (a, b) => b == 0 ? null : a / b, BinaryExpr.ResolvedOpcode.Div);
       case BinaryExpr.ResolvedOpcode.Mod:
-        return SimplifyIntBinary(binary, (a, b) => b == 0 ? null : a % b);
+        return SimplifyIntDivMod(binary, (a, b) => b == 0 ? null : a % b, BinaryExpr.ResolvedOpcode.Mod);
       case BinaryExpr.ResolvedOpcode.Lt:
       case BinaryExpr.ResolvedOpcode.LtChar:
         return SimplifyOrderedComparison(binary, (a, b) => a < b);
@@ -225,6 +225,10 @@ internal sealed partial class PartialEvaluatorEngine {
         return SimplifySeqMembership(binary, true);
       case BinaryExpr.ResolvedOpcode.NotInSeq:
         return SimplifySeqMembership(binary, false);
+      case BinaryExpr.ResolvedOpcode.InMap:
+        return SimplifyMapMembership(binary, true);
+      case BinaryExpr.ResolvedOpcode.NotInMap:
+        return SimplifyMapMembership(binary, false);
       default:
         return binary;
     }
@@ -310,15 +314,25 @@ internal sealed partial class PartialEvaluatorEngine {
       }
     }
 
+    if (opcode == BinaryExpr.ResolvedOpcode.Sub && ReferenceEquals(binary.E0, binary.E1)) {
+      return CreateIntLiteral(binary.Origin, BigInteger.Zero);
+    }
+
     return binary;
   }
 
-  private Expression SimplifyIntBinary(BinaryExpr binary, Func<BigInteger, BigInteger, BigInteger?> op) {
+  private Expression SimplifyIntDivMod(BinaryExpr binary, Func<BigInteger, BigInteger, BigInteger?> op, BinaryExpr.ResolvedOpcode opcode) {
     if (Expression.IsIntLiteral(binary.E0, out var left) && Expression.IsIntLiteral(binary.E1, out var right)) {
       var result = op(left, right);
       if (result != null) {
         return CreateIntLiteral(binary.Origin, result.Value);
       }
+    }
+    if (opcode == BinaryExpr.ResolvedOpcode.Div && Expression.IsIntLiteral(binary.E1, out right) && right == 1) {
+      return binary.E0;
+    }
+    if (opcode == BinaryExpr.ResolvedOpcode.Mod && Expression.IsIntLiteral(binary.E1, out right) && right == 1) {
+      return CreateIntLiteral(binary.Origin, BigInteger.Zero);
     }
     return binary;
   }
@@ -511,6 +525,9 @@ internal sealed partial class PartialEvaluatorEngine {
     if (LiteralExpr.IsEmptySet(binary.E1)) {
       return binary.E0;
     }
+    if (ReferenceEquals(binary.E0, binary.E1)) {
+      return binary.E0;
+    }
     if (TryGetSetDisplayLiteral(binary.E0, out var leftDisplay) &&
         TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
         AllElementsAreLiterals(leftDisplay.Elements) &&
@@ -530,6 +547,9 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     if (LiteralExpr.IsEmptySet(binary.E1)) {
       return binary.E1;
+    }
+    if (ReferenceEquals(binary.E0, binary.E1)) {
+      return binary.E0;
     }
     if (TryGetSetDisplayLiteral(binary.E0, out var leftDisplay) &&
         TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
@@ -551,6 +571,9 @@ internal sealed partial class PartialEvaluatorEngine {
   private static Expression SimplifySetDifference(BinaryExpr binary) {
     if (LiteralExpr.IsEmptySet(binary.E0) || LiteralExpr.IsEmptySet(binary.E1)) {
       return binary.E0;
+    }
+    if (ReferenceEquals(binary.E0, binary.E1)) {
+      return new SetDisplayExpr(binary.Origin, true, new List<Expression>()) { Type = binary.Type };
     }
     if (TryGetSetDisplayLiteral(binary.E0, out var leftDisplay) &&
         TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
@@ -594,6 +617,19 @@ internal sealed partial class PartialEvaluatorEngine {
         AllElementsAreLiterals(seqDisplay.Elements) &&
         IsLiteralLike(binary.E0)) {
       var contains = ContainsLiteralElement(seqDisplay.Elements, binary.E0);
+      return CreateBoolLiteral(binary.Origin, isIn ? contains : !contains);
+    }
+    return binary;
+  }
+
+  private static Expression SimplifyMapMembership(BinaryExpr binary, bool isIn) {
+    if (binary.E1 is MapDisplayExpr { Elements.Count: 0 }) {
+      return CreateBoolLiteral(binary.Origin, !isIn);
+    }
+    if (binary.E1 is MapDisplayExpr mapDisplay &&
+        AllElementsAreLiterals(mapDisplay) &&
+        IsLiteralLike(binary.E0)) {
+      var contains = mapDisplay.Elements.Any(e => AreLiteralExpressionsEqual(e.A, binary.E0));
       return CreateBoolLiteral(binary.Origin, isIn ? contains : !contains);
     }
     return binary;
@@ -670,6 +706,9 @@ internal sealed partial class PartialEvaluatorEngine {
     if (LiteralExpr.IsEmptyMultiset(binary.E1)) {
       return binary.E1;
     }
+    if (ReferenceEquals(binary.E0, binary.E1)) {
+      return binary.E0;
+    }
     if (TryGetMultiSetDisplayLiteral(binary.E0, out var leftDisplay) &&
         TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
         AllElementsAreLiterals(leftDisplay.Elements) &&
@@ -693,6 +732,9 @@ internal sealed partial class PartialEvaluatorEngine {
   private static Expression SimplifyMultiSetDifference(BinaryExpr binary) {
     if (LiteralExpr.IsEmptyMultiset(binary.E0) || LiteralExpr.IsEmptyMultiset(binary.E1)) {
       return binary.E0;
+    }
+    if (ReferenceEquals(binary.E0, binary.E1)) {
+      return new MultiSetDisplayExpr(binary.Origin, new List<Expression>()) { Type = binary.Type };
     }
     if (TryGetMultiSetDisplayLiteral(binary.E0, out var leftDisplay) &&
         TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
@@ -840,7 +882,8 @@ internal sealed partial class PartialEvaluatorEngine {
     }
 
     foreach (var arg in callExpr.Args) {
-      if (!Expression.IsIntLiteral(arg, out _) && !Expression.IsBoolLiteral(arg, out _)) {
+      if (!Expression.IsIntLiteral(arg, out _) && !Expression.IsBoolLiteral(arg, out _) &&
+          arg is not CharLiteralExpr && arg is not StringLiteralExpr) {
         return false;
       }
     }
@@ -890,6 +933,10 @@ internal sealed partial class PartialEvaluatorEngine {
         builder.Append('i').Append(intVal);
       } else if (Expression.IsBoolLiteral(arg, out var boolVal)) {
         builder.Append('b').Append(boolVal ? '1' : '0');
+      } else if (arg is CharLiteralExpr charArg && charArg.Value is string charStr) {
+        builder.Append('c').Append(charStr);
+      } else if (arg is StringLiteralExpr strArg && strArg.Value is string strVal) {
+        builder.Append('s').Append(strVal.Length).Append(':').Append(strVal);
       }
     }
     if (callExpr.TypeApplication_AtEnclosingClass is { Count: > 0 }) {
@@ -1299,10 +1346,12 @@ internal sealed partial class PartialEvaluatorEngine {
 
   private enum CachedLiteralKind {
     Int,
-    Bool
+    Bool,
+    Char,
+    String
   }
 
-  private readonly record struct CachedLiteral(CachedLiteralKind Kind, BigInteger IntValue, bool BoolValue) {
+  private readonly record struct CachedLiteral(CachedLiteralKind Kind, BigInteger IntValue, bool BoolValue, string StringValue, Type LiteralType) {
     public static bool TryCreate(LiteralExpr literal, out CachedLiteral cached) {
       cached = default;
       if (literal == null) {
@@ -1310,12 +1359,22 @@ internal sealed partial class PartialEvaluatorEngine {
       }
 
       if (Expression.IsIntLiteral(literal, out var intValue)) {
-        cached = new CachedLiteral(CachedLiteralKind.Int, intValue, default);
+        cached = new CachedLiteral(CachedLiteralKind.Int, intValue, default, default, default);
         return true;
       }
 
       if (Expression.IsBoolLiteral(literal, out var boolValue)) {
-        cached = new CachedLiteral(CachedLiteralKind.Bool, default, boolValue);
+        cached = new CachedLiteral(CachedLiteralKind.Bool, default, boolValue, default, default);
+        return true;
+      }
+
+      if (literal is CharLiteralExpr charLiteral && charLiteral.Value is string charStr) {
+        cached = new CachedLiteral(CachedLiteralKind.Char, default, default, charStr, literal.Type);
+        return true;
+      }
+
+      if (literal is StringLiteralExpr stringLiteral && stringLiteral.Value is string strVal) {
+        cached = new CachedLiteral(CachedLiteralKind.String, default, stringLiteral.IsVerbatim, strVal, literal.Type);
         return true;
       }
 
@@ -1326,6 +1385,8 @@ internal sealed partial class PartialEvaluatorEngine {
       return Kind switch {
         CachedLiteralKind.Int => CreateIntLiteral(origin, IntValue),
         CachedLiteralKind.Bool => Expression.CreateBoolLiteral(origin, BoolValue),
+        CachedLiteralKind.Char => CreateCharLiteral(origin, StringValue, LiteralType),
+        CachedLiteralKind.String => CreateStringLiteral(origin, StringValue, LiteralType, BoolValue),
         _ => null
       };
     }
@@ -1368,38 +1429,38 @@ internal sealed partial class PartialEvaluatorEngine {
         }
         return hash.ToHashCode();
       }
-    if (expr is SetDisplayExpr setDisplay) {
-      if (!AllElementsAreLiterals(setDisplay.Elements)) {
-        return typeof(SetDisplayExpr).GetHashCode();
+      if (expr is SetDisplayExpr setDisplay) {
+        if (!AllElementsAreLiterals(setDisplay.Elements)) {
+          return typeof(SetDisplayExpr).GetHashCode();
+        }
+        // Order-independent hash based on distinct literal elements.
+        var distinct = new LiteralSet(setDisplay.Elements);
+        var sum = 0;
+        var xor = 0;
+        foreach (var element in distinct.Elements) {
+          var elementHash = ComputeHash(element);
+          sum = unchecked(sum + elementHash);
+          xor ^= elementHash;
+        }
+        return HashCode.Combine(typeof(SetDisplayExpr), distinct.Count, sum, xor);
       }
-      // Order-independent hash based on distinct literal elements.
-      var distinct = new LiteralSet(setDisplay.Elements);
-      var sum = 0;
-      var xor = 0;
-      foreach (var element in distinct.Elements) {
-        var elementHash = ComputeHash(element);
-        sum = unchecked(sum + elementHash);
-        xor ^= elementHash;
+      if (expr is MultiSetDisplayExpr multiSetDisplay) {
+        if (!AllElementsAreLiterals(multiSetDisplay.Elements)) {
+          return typeof(MultiSetDisplayExpr).GetHashCode();
+        }
+        // Order-independent hash based on literal element multiplicities.
+        var counts = BuildMultisetCountsDict(multiSetDisplay.Elements);
+        var sum = 0;
+        var xor = 0;
+        var totalCount = 0;
+        foreach (var entry in counts) {
+          var entryHash = HashCode.Combine(ComputeHash(entry.Key), entry.Value);
+          sum = unchecked(sum + entryHash);
+          xor ^= entryHash;
+          totalCount += entry.Value;
+        }
+        return HashCode.Combine(typeof(MultiSetDisplayExpr), counts.Count, totalCount, sum, xor);
       }
-      return HashCode.Combine(typeof(SetDisplayExpr), distinct.Count, sum, xor);
-    }
-    if (expr is MultiSetDisplayExpr multiSetDisplay) {
-      if (!AllElementsAreLiterals(multiSetDisplay.Elements)) {
-        return typeof(MultiSetDisplayExpr).GetHashCode();
-      }
-      // Order-independent hash based on literal element multiplicities.
-      var counts = BuildMultisetCountsDict(multiSetDisplay.Elements);
-      var sum = 0;
-      var xor = 0;
-      var totalCount = 0;
-      foreach (var entry in counts) {
-        var entryHash = HashCode.Combine(ComputeHash(entry.Key), entry.Value);
-        sum = unchecked(sum + entryHash);
-        xor ^= entryHash;
-        totalCount += entry.Value;
-      }
-      return HashCode.Combine(typeof(MultiSetDisplayExpr), counts.Count, totalCount, sum, xor);
-    }
       if (TryGetTupleLiteral(expr, out var tuple)) {
         var hash = new HashCode();
         hash.Add(typeof(DatatypeValue));

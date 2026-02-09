@@ -130,10 +130,6 @@ internal sealed partial class PartialEvaluatorEngine {
       return snapshot;
     }
 
-    private List<Dictionary<IVariable, ConstValue>> CloneConstScopes() {
-      return CloneConstScopes(constScopes);
-    }
-
     private static HashSet<IVariable> CollectAssignedLocalsDeep(Statement root) {
       var assigned = new HashSet<IVariable>();
       if (root == null) {
@@ -274,19 +270,19 @@ internal sealed partial class PartialEvaluatorEngine {
     /// After visiting, any local assigned in either branch is invalidated, since its value is no longer stable.
     /// </summary>
     private void VisitBranchesWithIsolatedScopes(Statement thenBranch, Statement elseBranch, PartialEvalState state) {
-      // Take a deep snapshot of the current constant environment. Each branch runs on its own clone so that
-      // branch-local propagation cannot leak across branches or back into the incoming environment.
-      var incoming = CloneConstScopes();
+      // Save the original reference. Each branch runs on its own clone so that branch-local propagation
+      // cannot leak across branches or back into the incoming environment.
+      var original = constScopes;
 
-      constScopes = CloneConstScopes(incoming);
+      constScopes = CloneConstScopes(original);
       Visit(thenBranch, state);
 
       if (elseBranch != null) {
-        constScopes = CloneConstScopes(incoming);
+        constScopes = CloneConstScopes(original);
         Visit(elseBranch, state);
       }
 
-      constScopes = incoming;
+      constScopes = original;
       var assigned = CollectAssignedLocalsDeep(thenBranch);
       if (elseBranch != null) {
         assigned.UnionWith(CollectAssignedLocalsDeep(elseBranch));
@@ -411,23 +407,24 @@ internal sealed partial class PartialEvaluatorEngine {
         return false;
       }
 
-      var tokens = TokenizeStringLiteral(value, isVerbatim)
-        .Select(token => new {
-          Token = token,
-          UnescapedLength = Util.UnescapedCharacters(engine.options, token, isVerbatim).Count()
-        })
-        .ToList();
+      var tokens = TokenizeStringLiteral(value, isVerbatim).ToList();
+      var totalLength = 0;
+      var tokenLengths = new int[tokens.Count];
+      for (var i = 0; i < tokens.Count; i++) {
+        var len = Util.UnescapedCharacters(engine.options, tokens[i], isVerbatim).Count();
+        tokenLengths[i] = len;
+        totalLength += len;
+      }
 
-      var totalLength = tokens.Sum(token => token.UnescapedLength);
       if (end > totalLength) {
         return false;
       }
 
       var builder = new StringBuilder();
       var index = 0;
-      foreach (var token in tokens) {
+      for (var i = 0; i < tokens.Count; i++) {
         var tokenStart = index;
-        var tokenEnd = index + token.UnescapedLength;
+        var tokenEnd = index + tokenLengths[i];
         if (tokenEnd <= start) {
           index = tokenEnd;
           continue;
@@ -438,10 +435,10 @@ internal sealed partial class PartialEvaluatorEngine {
 
         var localStart = Math.Max(start, tokenStart) - tokenStart;
         var localEnd = Math.Min(end, tokenEnd) - tokenStart;
-        if (token.UnescapedLength == 1) {
-          builder.Append(token.Token);
+        if (tokenLengths[i] == 1) {
+          builder.Append(tokens[i]);
         } else {
-          builder.Append(token.Token.Substring(localStart, localEnd - localStart));
+          builder.Append(tokens[i].Substring(localStart, localEnd - localStart));
         }
         index = tokenEnd;
       }
