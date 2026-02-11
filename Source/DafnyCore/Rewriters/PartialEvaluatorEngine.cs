@@ -144,9 +144,8 @@ internal sealed partial class PartialEvaluatorEngine {
       case BinaryExpr.ResolvedOpcode.Mul:
         return SimplifyIntBinary(binary, (a, b) => a * b, 1, BinaryExpr.ResolvedOpcode.Mul);
       case BinaryExpr.ResolvedOpcode.Div:
-        return SimplifyIntDivMod(binary, (a, b) => b == 0 ? null : a / b, BinaryExpr.ResolvedOpcode.Div);
       case BinaryExpr.ResolvedOpcode.Mod:
-        return SimplifyIntDivMod(binary, (a, b) => b == 0 ? null : a % b, BinaryExpr.ResolvedOpcode.Mod);
+        return SimplifyIntDivMod(binary, binary.ResolvedOp);
       case BinaryExpr.ResolvedOpcode.Lt:
       case BinaryExpr.ResolvedOpcode.LtChar:
         return SimplifyOrderedComparison(binary, (a, b) => a < b);
@@ -229,6 +228,20 @@ internal sealed partial class PartialEvaluatorEngine {
         return SimplifyMapMembership(binary, true);
       case BinaryExpr.ResolvedOpcode.NotInMap:
         return SimplifyMapMembership(binary, false);
+      case BinaryExpr.ResolvedOpcode.MapEq:
+        return SimplifyMapEquality(binary, true);
+      case BinaryExpr.ResolvedOpcode.MapNeq:
+        return SimplifyMapEquality(binary, false);
+      case BinaryExpr.ResolvedOpcode.MapMerge:
+        return SimplifyMapMerge(binary);
+      case BinaryExpr.ResolvedOpcode.MapSubtraction:
+        return SimplifyMapSubtraction(binary);
+      case BinaryExpr.ResolvedOpcode.BitwiseAnd:
+      case BinaryExpr.ResolvedOpcode.BitwiseOr:
+      case BinaryExpr.ResolvedOpcode.BitwiseXor:
+      case BinaryExpr.ResolvedOpcode.LeftShift:
+      case BinaryExpr.ResolvedOpcode.RightShift:
+        return SimplifyBitvectorBinary(binary);
       default:
         return binary;
     }
@@ -321,11 +334,26 @@ internal sealed partial class PartialEvaluatorEngine {
     return binary;
   }
 
-  private Expression SimplifyIntDivMod(BinaryExpr binary, Func<BigInteger, BigInteger, BigInteger?> op, BinaryExpr.ResolvedOpcode opcode) {
+  private Expression SimplifyIntDivMod(BinaryExpr binary, BinaryExpr.ResolvedOpcode opcode) {
     if (Expression.IsIntLiteral(binary.E0, out var left) && Expression.IsIntLiteral(binary.E1, out var right)) {
-      var result = op(left, right);
-      if (result != null) {
-        return CreateIntLiteral(binary.Origin, result.Value);
+      if (right != 0) {
+        if (opcode == BinaryExpr.ResolvedOpcode.Div) {
+          // Match Dafny integer folding semantics: Euclidean division.
+          var quotient = left / right;
+          if (left < 0 && left != quotient * right) {
+            quotient += right > 0 ? -1 : 1;
+          }
+          return CreateIntLiteral(binary.Origin, quotient);
+        }
+        if (opcode == BinaryExpr.ResolvedOpcode.Mod) {
+          // Match Dafny integer folding semantics: Euclidean modulo.
+          var divisor = BigInteger.Abs(right);
+          var remainder = left % divisor;
+          if (left < 0) {
+            remainder += divisor;
+          }
+          return CreateIntLiteral(binary.Origin, remainder);
+        }
       }
     }
     if (opcode == BinaryExpr.ResolvedOpcode.Div && Expression.IsIntLiteral(binary.E1, out right) && right == 1) {
@@ -335,6 +363,38 @@ internal sealed partial class PartialEvaluatorEngine {
       return CreateIntLiteral(binary.Origin, BigInteger.Zero);
     }
     return binary;
+  }
+
+  private static Expression SimplifyBitvectorBinary(BinaryExpr binary) {
+    var bitvectorType = binary.Type.NormalizeExpand().AsBitVectorType;
+    if (bitvectorType == null) {
+      return binary;
+    }
+
+    if (!Expression.IsIntLiteral(binary.E0, out var left) || !Expression.IsIntLiteral(binary.E1, out var right)) {
+      return binary;
+    }
+
+    switch (binary.ResolvedOp) {
+      case BinaryExpr.ResolvedOpcode.BitwiseAnd:
+        return CreateIntLiteral(binary.Origin, left & right, binary.Type);
+      case BinaryExpr.ResolvedOpcode.BitwiseOr:
+        return CreateIntLiteral(binary.Origin, left | right, binary.Type);
+      case BinaryExpr.ResolvedOpcode.BitwiseXor:
+        return CreateIntLiteral(binary.Origin, left ^ right, binary.Type);
+      case BinaryExpr.ResolvedOpcode.LeftShift:
+        if (right < 0 || right > bitvectorType.Width || right > int.MaxValue) {
+          return binary;
+        }
+        return CreateIntLiteral(binary.Origin, (left << (int)right) & ConstantFolder.MaxBv(binary.Type), binary.Type);
+      case BinaryExpr.ResolvedOpcode.RightShift:
+        if (right < 0 || right > bitvectorType.Width || right > int.MaxValue) {
+          return binary;
+        }
+        return CreateIntLiteral(binary.Origin, left >> (int)right, binary.Type);
+      default:
+        return binary;
+    }
   }
 
   private Expression SimplifyOrderedComparison(BinaryExpr binary, Func<BigInteger, BigInteger, bool> op) {
@@ -633,6 +693,102 @@ internal sealed partial class PartialEvaluatorEngine {
       return CreateBoolLiteral(binary.Origin, isIn ? contains : !contains);
     }
     return binary;
+  }
+
+  private static Expression SimplifyMapEquality(BinaryExpr binary, bool isEq) {
+    if (binary.E0 is not MapDisplayExpr leftMap || binary.E1 is not MapDisplayExpr rightMap) {
+      return binary;
+    }
+
+    if (!TryNormalizeLiteralMapEntries(leftMap, out var leftEntries) ||
+        !TryNormalizeLiteralMapEntries(rightMap, out var rightEntries)) {
+      return binary;
+    }
+
+    var rightByKey = new Dictionary<Expression, Expression>(LiteralExpressionEqualityComparer.Instance);
+    foreach (var entry in rightEntries) {
+      rightByKey[entry.A] = entry.B;
+    }
+
+    var equal = leftEntries.Count == rightEntries.Count;
+    if (equal) {
+      foreach (var entry in leftEntries) {
+        if (!rightByKey.TryGetValue(entry.A, out var rightValue) ||
+            !AreLiteralExpressionsEqual(entry.B, rightValue)) {
+          equal = false;
+          break;
+        }
+      }
+    }
+
+    return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
+  }
+
+  private static Expression SimplifyMapMerge(BinaryExpr binary) {
+    if (binary.E0 is not MapDisplayExpr leftMap || binary.E1 is not MapDisplayExpr rightMap) {
+      return binary;
+    }
+
+    if (leftMap.Elements.Count == 0) {
+      return binary.E1;
+    }
+    if (rightMap.Elements.Count == 0) {
+      return binary.E0;
+    }
+    if (ReferenceEquals(binary.E0, binary.E1)) {
+      return binary.E0;
+    }
+
+    if (!TryNormalizeLiteralMapEntries(leftMap, out var leftEntries) ||
+        !TryNormalizeLiteralMapEntries(rightMap, out var rightEntries)) {
+      return binary;
+    }
+
+    var merged = new List<MapDisplayEntry>(leftEntries);
+    var indexByKey = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.Instance);
+    for (var index = 0; index < merged.Count; index++) {
+      indexByKey[merged[index].A] = index;
+    }
+
+    foreach (var entry in rightEntries) {
+      if (indexByKey.TryGetValue(entry.A, out var existingIndex)) {
+        merged[existingIndex] = new MapDisplayEntry(entry.A, entry.B);
+      } else {
+        indexByKey[entry.A] = merged.Count;
+        merged.Add(new MapDisplayEntry(entry.A, entry.B));
+      }
+    }
+
+    return CreateMapDisplayLiteral(binary.Origin, merged, binary.Type);
+  }
+
+  private static Expression SimplifyMapSubtraction(BinaryExpr binary) {
+    if (binary.E0 is not MapDisplayExpr leftMap || binary.E1 is not SetDisplayExpr rightKeySet) {
+      return binary;
+    }
+
+    if (leftMap.Elements.Count == 0) {
+      return binary.E0;
+    }
+    if (rightKeySet.Elements.Count == 0) {
+      return binary.E0;
+    }
+
+    if (!TryNormalizeLiteralMapEntries(leftMap, out var leftEntries) ||
+        !AllElementsAreLiterals(rightKeySet.Elements)) {
+      return binary;
+    }
+
+    var keysToRemove = new LiteralSet(rightKeySet.Elements);
+
+    var remaining = new List<MapDisplayEntry>();
+    foreach (var entry in leftEntries) {
+      if (!keysToRemove.Contains(entry.A)) {
+        remaining.Add(new MapDisplayEntry(entry.A, entry.B));
+      }
+    }
+
+    return CreateMapDisplayLiteral(binary.Origin, remaining, binary.Type);
   }
 
   private static Expression SimplifyMultiSetSubset(BinaryExpr binary, Expression left, Expression right, bool proper) {
@@ -991,6 +1147,11 @@ internal sealed partial class PartialEvaluatorEngine {
     return new MultiSetDisplayExpr(origin, elements) { Type = type };
   }
 
+  private static MapDisplayExpr CreateMapDisplayLiteral(IOrigin origin, List<MapDisplayEntry> elements, Type type) {
+    var mapType = type.NormalizeExpand().AsMapType;
+    return new MapDisplayExpr(origin, mapType.Finite, elements) { Type = type };
+  }
+
   // ------------------- Literal extraction / parsing -------------------
 
   private static bool TryGetStringLiteral(Expression expr, out string value, out bool isVerbatim) {
@@ -1129,12 +1290,21 @@ internal sealed partial class PartialEvaluatorEngine {
     return display != null;
   }
 
+  private static bool TryGetMapDisplayLiteral(Expression expr, out MapDisplayExpr display) {
+    display = expr as MapDisplayExpr;
+    return display != null;
+  }
+
   private static bool AllElementsAreLiterals(IEnumerable<Expression> elements) {
     return elements.All(IsLiteralLike);
   }
 
   private static bool AllElementsAreLiterals(MapDisplayExpr display) {
     return display.Elements.All(entry => IsLiteralLike(entry.A) && IsLiteralLike(entry.B));
+  }
+
+  private static bool AllMapKeysAreLiterals(MapDisplayExpr display) {
+    return display.Elements.All(entry => IsLiteralLike(entry.A));
   }
 
   private static bool IsLiteralLike(Expression expr) {
@@ -1182,6 +1352,9 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     if (left is MultiSetDisplayExpr leftMulti && right is MultiSetDisplayExpr rightMulti) {
       return MultiSetDisplayLiteralsEqual(leftMulti, rightMulti);
+    }
+    if (left is MapDisplayExpr leftMap && right is MapDisplayExpr rightMap) {
+      return MapDisplayLiteralsEqual(leftMap, rightMap);
     }
     if (TryGetTupleLiteral(left, out var leftTuple) && TryGetTupleLiteral(right, out var rightTuple)) {
       return TupleLiteralsEqual(leftTuple, rightTuple);
@@ -1271,6 +1444,51 @@ internal sealed partial class PartialEvaluatorEngine {
         return false;
       }
     }
+    return true;
+  }
+
+  private static bool MapDisplayLiteralsEqual(MapDisplayExpr left, MapDisplayExpr right) {
+    if (!TryNormalizeLiteralMapEntries(left, out var leftEntries) ||
+        !TryNormalizeLiteralMapEntries(right, out var rightEntries)) {
+      return false;
+    }
+    if (leftEntries.Count != rightEntries.Count) {
+      return false;
+    }
+
+    var rightByKey = new Dictionary<Expression, Expression>(LiteralExpressionEqualityComparer.Instance);
+    foreach (var entry in rightEntries) {
+      rightByKey[entry.A] = entry.B;
+    }
+
+    foreach (var entry in leftEntries) {
+      if (!rightByKey.TryGetValue(entry.A, out var rightValue) ||
+          !AreLiteralExpressionsEqual(entry.B, rightValue)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  private static bool TryNormalizeLiteralMapEntries(MapDisplayExpr mapDisplay, out List<MapDisplayEntry> normalizedEntries) {
+    normalizedEntries = null;
+    if (!AllElementsAreLiterals(mapDisplay)) {
+      return false;
+    }
+
+    var entries = new List<MapDisplayEntry>(mapDisplay.Elements.Count);
+    var indexByKey = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.Instance);
+    foreach (var entry in mapDisplay.Elements) {
+      if (indexByKey.TryGetValue(entry.A, out var existingIndex)) {
+        entries[existingIndex] = new MapDisplayEntry(entry.A, entry.B);
+      } else {
+        indexByKey[entry.A] = entries.Count;
+        entries.Add(new MapDisplayEntry(entry.A, entry.B));
+      }
+    }
+
+    normalizedEntries = entries;
     return true;
   }
 
@@ -1460,6 +1678,19 @@ internal sealed partial class PartialEvaluatorEngine {
           totalCount += entry.Value;
         }
         return HashCode.Combine(typeof(MultiSetDisplayExpr), counts.Count, totalCount, sum, xor);
+      }
+      if (expr is MapDisplayExpr mapDisplay) {
+        if (!TryNormalizeLiteralMapEntries(mapDisplay, out var normalizedEntries)) {
+          return typeof(MapDisplayExpr).GetHashCode();
+        }
+        var sum = 0;
+        var xor = 0;
+        foreach (var entry in normalizedEntries) {
+          var entryHash = HashCode.Combine(ComputeHash(entry.A), ComputeHash(entry.B));
+          sum = unchecked(sum + entryHash);
+          xor ^= entryHash;
+        }
+        return HashCode.Combine(typeof(MapDisplayExpr), normalizedEntries.Count, sum, xor);
       }
       if (TryGetTupleLiteral(expr, out var tuple)) {
         var hash = new HashCode();
