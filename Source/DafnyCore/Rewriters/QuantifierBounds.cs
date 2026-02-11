@@ -13,6 +13,7 @@ namespace Microsoft.Dafny;
 /// </summary>
 internal sealed class QuantifierBounds {
   private const string PartialUnrollMarkerAttributeName = "_partial_unroll";
+  private const int CharDomainCardinality = 0x10000;
   private readonly SystemModuleManager systemModuleManager;
   private readonly uint maxInstances;
 
@@ -356,35 +357,25 @@ internal sealed class QuantifierBounds {
     uint instanceCount = 0;
     bool reachedInstanceCap = false;
 
-    void Enumerate(int varIndex) {
-      if (IsShortCircuited() || reachedInstanceCap) {
-        return;
+    bool HandleInstance(Substituter substituter) {
+      var inst = substituter.Substitute(logicalBody);
+      inst = simplifyAfterSubst(inst);
+      AddInstance(inst);
+      if (maxInstances > 0 && ++instanceCount >= maxInstances) {
+        reachedInstanceCap = true;
       }
-
-      if (varIndex == domains.Length) {
-        var substituter = new Substituter(null, substMap, typeMap);
-        var inst = substituter.Substitute(logicalBody);
-        inst = simplifyAfterSubst(inst);
-        AddInstance(inst);
-        if (maxInstances > 0 && ++instanceCount >= maxInstances) {
-          reachedInstanceCap = true;
-        }
-        return;
-      }
-
-      var bv = quantifierExpr.BoundVars[varIndex];
-      foreach (var value in domains[varIndex].Enumerate()) {
-        if (IsShortCircuited() || reachedInstanceCap) {
-          return;
-        }
-
-        EnsureExpressionType(value, bv.Type);
-        substMap[bv] = value;
-        Enumerate(varIndex + 1);
-      }
+      return true;
     }
 
-    Enumerate(0);
+    if (!TryEnumerateAssignments(
+          quantifierExpr.BoundVars,
+          domains,
+          substMap,
+          typeMap,
+          HandleInstance,
+          () => IsShortCircuited() || reachedInstanceCap)) {
+      return false;
+    }
     if (exceedsMaxInstances && !IsShortCircuited()) {
       MarkQuantifierAsPartiallyUnrolled(quantifierExpr);
       rewritten = isForall
@@ -548,6 +539,7 @@ internal sealed class QuantifierBounds {
     }
 
     var resultEntries = new List<MapDisplayEntry>();
+    var keyIndexByLiteral = new Dictionary<Expression, int>(LiteralExpressionStructuralComparer.Instance);
     var substMap = new Dictionary<IVariable, Expression>();
     var typeMap = new Dictionary<TypeParameter, Type>();
 
@@ -582,16 +574,16 @@ internal sealed class QuantifierBounds {
       var valueExpr = simplify(substituter.Substitute(mapComprehension.Term));
       valueExpr = StripConcreteSyntax(valueExpr);
 
-      for (var i = 0; i < resultEntries.Count; i++) {
-        if (LiteralStructuralEquals(resultEntries[i].A, keyExpr)) {
-          if (!LiteralStructuralEquals(resultEntries[i].B, valueExpr)) {
-            return false;
-          }
-          return true;
+      if (keyIndexByLiteral.TryGetValue(keyExpr, out var existingIndex)) {
+        if (!LiteralStructuralEquals(resultEntries[existingIndex].B, valueExpr)) {
+          return false;
         }
+        return true;
       }
 
+      var nextIndex = resultEntries.Count;
       resultEntries.Add(new MapDisplayEntry(keyExpr, valueExpr));
+      keyIndexByLiteral[keyExpr] = nextIndex;
       return true;
     }
 
@@ -765,14 +757,14 @@ internal sealed class QuantifierBounds {
     foreach (var conjunct in conjuncts) {
       var normalized = NormalizeForPattern(conjunct);
       if (normalized is not BinaryExpr binaryExpr) {
-        return false;
+        continue;
       }
       var isGe = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Ge || binaryExpr.Op == BinaryExpr.Opcode.Ge;
       var isGt = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Gt || binaryExpr.Op == BinaryExpr.Opcode.Gt;
       var isLe = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Le || binaryExpr.Op == BinaryExpr.Opcode.Le;
       var isLt = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Lt || binaryExpr.Op == BinaryExpr.Opcode.Lt;
       if (!isGe && !isGt && !isLe && !isLt) {
-        return false;
+        continue;
       }
 
       if (IsBoundVar(binaryExpr.E0, indexVar) && Expression.IsIntLiteral(binaryExpr.E1, out var rightLiteral)) {
@@ -788,7 +780,7 @@ internal sealed class QuantifierBounds {
           hasLower = true;
           continue;
         }
-        return false;
+        continue;
       }
 
       if (IsBoundVar(binaryExpr.E1, indexVar) && Expression.IsIntLiteral(binaryExpr.E0, out var leftLiteral)) {
@@ -804,9 +796,8 @@ internal sealed class QuantifierBounds {
           hasLower = true;
           continue;
         }
-        return false;
+        continue;
       }
-      return false;
     }
 
     return hasUpper && (hasLower || length == 0);
@@ -877,14 +868,14 @@ internal sealed class QuantifierBounds {
     foreach (var conjunct in conjuncts) {
       var normalized = NormalizeForPattern(conjunct);
       if (normalized is not BinaryExpr binaryExpr) {
-        return false;
+        continue;
       }
       var isGe = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Ge || binaryExpr.Op == BinaryExpr.Opcode.Ge;
       var isGt = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Gt || binaryExpr.Op == BinaryExpr.Opcode.Gt;
       var isLe = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Le || binaryExpr.Op == BinaryExpr.Opcode.Le;
       var isLt = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Lt || binaryExpr.Op == BinaryExpr.Opcode.Lt;
       if (!isGe && !isGt && !isLe && !isLt) {
-        return false;
+        continue;
       }
 
       if (TryGetSeqSelect(binaryExpr.E0, seqVar, indexVar, out _) &&
@@ -915,7 +906,7 @@ internal sealed class QuantifierBounds {
         }
       }
 
-      return false;
+      continue;
     }
 
     if (lower == null || upper == null || lower.Value >= upper.Value) {
@@ -961,13 +952,14 @@ internal sealed class QuantifierBounds {
   private bool TryEnumerateAssignments(IReadOnlyList<BoundVar> boundVars, ConcreteDomain[] domains,
     Dictionary<IVariable, Expression> substMap, Dictionary<TypeParameter, Type> typeMap,
     Func<Substituter, bool> onComplete, Func<bool>? shouldStopEarly = null) {
+    var substituter = new Substituter(null, substMap, typeMap);
+
     bool Enumerate(int varIndex) {
       if (shouldStopEarly?.Invoke() == true) {
         return true;
       }
 
       if (varIndex == domains.Length) {
-        var substituter = new Substituter(null, substMap, typeMap);
         return onComplete(substituter);
       }
 
@@ -1083,14 +1075,28 @@ internal sealed class QuantifierBounds {
       }
       var isLe = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Le || binaryExpr.Op == BinaryExpr.Opcode.Le;
       var isLt = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Lt || binaryExpr.Op == BinaryExpr.Opcode.Lt;
-      if (!isLe && !isLt) {
+      var isGe = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Ge || binaryExpr.Op == BinaryExpr.Opcode.Ge;
+      var isGt = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Gt || binaryExpr.Op == BinaryExpr.Opcode.Gt;
+
+      Expression leftExpr;
+      Expression rightExpr;
+      bool isStrict;
+      if (isLe || isLt) {
+        leftExpr = binaryExpr.E0;
+        rightExpr = binaryExpr.E1;
+        isStrict = isLt;
+      } else if (isGe || isGt) {
+        // Normalize >= and > constraints into <= and < form.
+        leftExpr = binaryExpr.E1;
+        rightExpr = binaryExpr.E0;
+        isStrict = isGt;
+      } else {
         continue;
       }
-      if (!TryGetVarPlusConstant(binaryExpr.E0, boundVarIndices, out var leftIndex, out var leftConst) ||
-          !TryGetVarPlusConstant(binaryExpr.E1, boundVarIndices, out var rightIndex, out var rightConst)) {
+      if (!TryGetVarPlusConstant(leftExpr, boundVarIndices, out var leftIndex, out var leftConst) ||
+          !TryGetVarPlusConstant(rightExpr, boundVarIndices, out var rightIndex, out var rightConst)) {
         continue;
       }
-      var isStrict = isLt;
       if (leftIndex.HasValue) {
         var upperOffset = rightConst - leftConst + (isStrict ? 0 : 1);
         constraints.Add(new IntBoundConstraint(leftIndex.Value, rightIndex, upperOffset, false));
@@ -1567,6 +1573,19 @@ internal sealed class QuantifierBounds {
       return true;
     }
 
+    if (bound is BoolBoundedPool) {
+      domain = new ConcreteDomain(2, () => EnumerateBooleanValues(bv.Type, bv.Origin));
+      return true;
+    }
+
+    if (bound is CharBoundedPool) {
+      if (maxInstances > 0 && CharDomainCardinality > maxInstances) {
+        return false;
+      }
+      domain = new ConcreteDomain(CharDomainCardinality, () => EnumerateAllChars(bv.Type, bv.Origin));
+      return true;
+    }
+
     if (bound is ExactBoundedPool exactBoundedPool) {
       var value = StripConcreteSyntax(exactBoundedPool.E);
       if (!IsLiteralExpression(value)) {
@@ -1696,6 +1715,26 @@ internal sealed class QuantifierBounds {
       return true;
     }
 
+    if (bound is DatatypeBoundedPool datatypePool) {
+      if (!datatypePool.Decl.HasFinitePossibleValues) {
+        return false;
+      }
+
+      var singletonCtors = datatypePool.Decl.Ctors
+        .Where(ctor => ctor.Formals.Count == 0)
+        .ToList();
+      if (singletonCtors.Count == 0) {
+        return false;
+      }
+      if (maxInstances > 0 && singletonCtors.Count > maxInstances) {
+        return false;
+      }
+
+      domain = new ConcreteDomain(singletonCtors.Count,
+        () => EnumerateDatatypeSingletonConstructors(bv.Type, bv.Origin, datatypePool.Decl.Name, singletonCtors));
+      return true;
+    }
+
     return false;
   }
 
@@ -1703,6 +1742,34 @@ internal sealed class QuantifierBounds {
   private IEnumerable<Expression> EnumerateIntRange(BoundVar bv, BigInteger lower, BigInteger upper) {
     for (var v = lower; v < upper; v++) {
       yield return new LiteralExpr(bv.Origin, v) { Type = bv.Type };
+    }
+  }
+
+  private static IEnumerable<Expression> EnumerateBooleanValues(Type boolType, IOrigin origin) {
+    var falseExpr = Expression.CreateBoolLiteral(origin, false);
+    falseExpr.Type = boolType;
+    yield return falseExpr;
+
+    var trueExpr = Expression.CreateBoolLiteral(origin, true);
+    trueExpr.Type = boolType;
+    yield return trueExpr;
+  }
+
+  private static IEnumerable<Expression> EnumerateAllChars(Type charType, IOrigin origin) {
+    for (var codePoint = 0; codePoint < CharDomainCardinality; codePoint++) {
+      var charExpr = new CharLiteralExpr(origin, ((char)codePoint).ToString()) { Type = charType };
+      yield return charExpr;
+    }
+  }
+
+  private static IEnumerable<Expression> EnumerateDatatypeSingletonConstructors(Type datatypeType, IOrigin origin,
+    string datatypeName, IEnumerable<DatatypeCtor> constructors) {
+    foreach (var constructor in constructors) {
+      var value = new DatatypeValue(origin, datatypeName, constructor.Name, new List<Expression>()) {
+        Type = datatypeType,
+        Ctor = constructor
+      };
+      yield return value;
     }
   }
 

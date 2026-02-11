@@ -652,6 +652,69 @@ method SetForall() {
     Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
   }
 
+  // Objective: unroll bounded foralls over bool domains.
+  [Fact]
+  public async Task BoolBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method BoolForall() {
+    //   assert (false || !false) && (true || !true);
+    // }
+    var options = CreateOptions(10);
+
+    var impl = await TranslateSingleImplementation(@"
+method BoolForall() {
+  assert forall b: bool :: b || !b;
+}
+", options, "BoolForall");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
+  }
+
+  // Objective: unroll bounded foralls over finite datatypes with singleton constructors.
+  [Fact]
+  public async Task FiniteDatatypeBoundedForall_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // datatype Color = Red | Green | Blue
+    // method DatatypeForall() {
+    //   assert true;
+    // }
+    var options = CreateOptions(10);
+
+    var impl = await TranslateSingleImplementation(@"
+datatype Color = Red | Green | Blue
+
+method DatatypeForall() {
+  assert forall c: Color :: c == Red || c == Green || c == Blue;
+}
+", options, "DatatypeForall");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
+  }
+
+  // Objective: infer finite int domains from >= and > bound patterns.
+  [Fact]
+  public async Task GeGtIntBoundsForall_IsUnrolled_WhenWithinMaxInstances() {
+    // EXPECTED:
+    // method GeGtBounds() {
+    //   assert true;
+    // }
+    var options = CreateOptions(10);
+
+    var impl = await TranslateSingleImplementation(@"
+method GeGtBounds() {
+  assert forall x: int :: x >= 0 && 3 > x ==> x >= 0;
+}
+", options, "GeGtBounds");
+
+    var asserts = AssertStatementAsserts(impl).ToList();
+    Assert.NotEmpty(asserts);
+    Assert.All(asserts, a => Assert.False(ContainsForall(a.Expr)));
+  }
+
   // Objective: keep forall when set-comprehension domain exceeds the cap.
   [Fact]
   public async Task SetComprehensionBoundedForall_IsNotUnrolled_WhenExceedingMaxInstances() {

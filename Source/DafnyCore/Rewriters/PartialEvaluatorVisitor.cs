@@ -584,6 +584,24 @@ internal sealed partial class PartialEvaluatorEngine {
           return false;
         }
       }
+      if (unary.ResolvedOp == UnaryOpExpr.ResolvedOpcode.MapCard) {
+        if (TryGetMapDisplayLiteral(unary.E, out var display)) {
+          if (display.Elements.Count <= 1 || AllMapKeysAreLiterals(display)) {
+            var distinctKeys = new LiteralSet(display.Elements.Select(entry => entry.A));
+            var result = CreateIntLiteral(unary.Origin, distinctKeys.Count, unary.Type);
+            SetReplacement(unary, result);
+            return false;
+          }
+        }
+      }
+      if (unary.ResolvedOp == UnaryOpExpr.ResolvedOpcode.BVNot &&
+          Expression.IsIntLiteral(unary.E, out var bitvectorValue) &&
+          unary.Type.NormalizeExpand().AsBitVectorType is { } bitvectorType) {
+        var mask = (BigInteger.One << bitvectorType.Width) - BigInteger.One;
+        var result = CreateIntLiteral(unary.Origin, mask ^ bitvectorValue, unary.Type);
+        SetReplacement(unary, result);
+        return false;
+      }
       return false;
     }
 

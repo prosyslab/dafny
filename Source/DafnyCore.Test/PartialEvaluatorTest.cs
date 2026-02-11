@@ -1348,6 +1348,63 @@ method Entry() {
   }
 
   [Fact]
+  public async Task PartialEvaluation_UsesEuclideanDivModForNegativeOperands() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert -3 / 2 == -2;
+  assert -3 % 2 == 1;
+  assert 3 / -2 == -1;
+  assert 3 % -2 == 1;
+  assert -3 / -2 == 2;
+  assert -3 % -2 == 1;
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var body = Assert.IsType<BlockStmt>(entry.Body);
+    var asserts = body.Body.OfType<AssertStmt>().ToList();
+    Assert.Equal(6, asserts.Count);
+
+    Assert.All(asserts, assertStmt => Assert.True(Expression.IsBoolLiteral(assertStmt.Expr, out var value) && value));
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_FoldsMapBitvectorAndMapCardOperations() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+function Entry(): bool {
+  |map[1 := 10, 2 := 20]| == 2 &&
+  map[1 := 10, 2 := 20] == map[2 := 20, 1 := 10] &&
+  map[1 := 10] != map[1 := 11] &&
+  map[1 := 10] + map[1 := 99, 2 := 20] == map[1 := 99, 2 := 20] &&
+  map[1 := 10, 2 := 20] - {2} == map[1 := 10] &&
+  ((9 as bv4) & (3 as bv4)) == (1 as bv4) &&
+  ((9 as bv4) | (3 as bv4)) == (11 as bv4) &&
+  ((9 as bv4) ^ (3 as bv4)) == (10 as bv4) &&
+  (!(9 as bv4)) == (6 as bv4) &&
+  ((9 as bv4) << 1) == (2 as bv4) &&
+  ((9 as bv4) >> 1) == (4 as bv4)
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Function>().Where(f => f.Name == "Entry"));
+    Assert.NotNull(entry.Body);
+
+    Assert.True(Expression.IsBoolLiteral(entry.Body!, out var value) && value);
+  }
+
+  [Fact]
   public async Task PartialEvaluation_FoldsTupleOperations_NestedCollections() {
     // EXPECTED:
     // function Entry(): bool { true }
@@ -1373,5 +1430,106 @@ function Entry(): bool {
     Assert.NotNull(entry.Body);
 
     Assert.True(Expression.IsBoolLiteral(entry.Body!, out var value) && value);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_InlinesCrossModuleFunction() {
+    // Functions imported from another module should be inlined when they are
+    // revealed in the importing module's scope.
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 3U);
+
+    var program = await ParseAndResolve(@"
+module Library {
+  function Add(x: int, y: int): int { x + y }
+  predicate IsPositive(x: int) { x > 0 }
+}
+
+module Client {
+  import Library
+
+  method Entry() {
+    assert Library.Add(2, 3) == 5;
+    assert Library.IsPositive(1);
+  }
+}
+", options);
+
+    var clientModule = program.CompileModules
+      .FirstOrDefault(m => m.Name == "Client");
+    Assert.NotNull(clientModule);
+    var defaultClass = Assert.Single(clientModule!.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    Assert.NotNull(entry.Body);
+
+    var asserts = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .ToList();
+    Assert.Equal(2, asserts.Count);
+
+    // Add(2, 3) == 5 should fold to true
+    var expr0 = asserts[0].Expr.Resolved ?? asserts[0].Expr;
+    Assert.True(Expression.IsBoolLiteral(expr0, out var lit0));
+    Assert.True(lit0);
+
+    // IsPositive(1) should fold to true
+    var expr1 = asserts[1].Expr.Resolved ?? asserts[1].Expr;
+    Assert.True(Expression.IsBoolLiteral(expr1, out var lit1));
+    Assert.True(lit1);
+
+    // No residual calls to Library functions
+    foreach (var assert in asserts) {
+      var expr = assert.Expr.Resolved ?? assert.Expr;
+      var calls = expr.DescendantsAndSelf.OfType<FunctionCallExpr>()
+        .Select(c => c.Function.Name)
+        .ToList();
+      Assert.DoesNotContain("Add", calls);
+      Assert.DoesNotContain("IsPositive", calls);
+    }
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_InlinesCrossModuleTransitiveFunction() {
+    // Functions imported transitively (A -> B -> C) should also be inlineable.
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 4U);
+
+    var program = await ParseAndResolve(@"
+module Base {
+  function Double(x: int): int { x + x }
+}
+
+module Mid {
+  import Base
+  function Quadruple(x: int): int { Base.Double(Base.Double(x)) }
+}
+
+module Top {
+  import Mid
+
+  method Entry() {
+    assert Mid.Quadruple(3) == 12;
+  }
+}
+", options);
+
+    var topModule = program.CompileModules
+      .FirstOrDefault(m => m.Name == "Top");
+    Assert.NotNull(topModule);
+    var defaultClass = Assert.Single(topModule!.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    Assert.NotNull(entry.Body);
+
+    var assertStmt = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .Single();
+    var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+
+    Assert.True(Expression.IsBoolLiteral(assertExpr, out var literal));
+    Assert.True(literal);
   }
 }
