@@ -14,16 +14,22 @@ internal sealed partial class PartialEvaluatorEngine {
   private readonly ModuleDefinition module;
   private readonly SystemModuleManager systemModuleManager;
   private readonly uint inlineDepth;
+  private readonly VisibilityScope effectiveScope;
   private readonly Dictionary<string, CachedLiteral> inlineCallCache = new(StringComparer.Ordinal);
   private QuantifierBounds quantifierBounds;
 
   // ------------------- Construction and entry points -------------------
 
-  public PartialEvaluatorEngine(DafnyOptions options, ModuleDefinition module, SystemModuleManager systemModuleManager, uint inlineDepth) {
+  public PartialEvaluatorEngine(DafnyOptions options, ModuleDefinition module, SystemModuleManager systemModuleManager, uint inlineDepth)
+    : this(options, module, systemModuleManager, inlineDepth, null) {
+  }
+
+  public PartialEvaluatorEngine(DafnyOptions options, ModuleDefinition module, SystemModuleManager systemModuleManager, uint inlineDepth, VisibilityScope effectiveScope = null) {
     this.options = options;
     this.module = module;
     this.systemModuleManager = systemModuleManager;
     this.inlineDepth = inlineDepth;
+    this.effectiveScope = effectiveScope ?? module.VisibilityScope;
   }
 
   private PartialEvalState CreateInitialState() {
@@ -937,7 +943,8 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
-    if (BoogieGenerator.IsOpaque(function, options) || !function.IsRevealedInScope(module.VisibilityScope)) {
+    var is_revealed_in_effective_scope = function.IsRevealedInScope(effectiveScope);
+    if (BoogieGenerator.IsOpaque(function, options) || !is_revealed_in_effective_scope) {
       return false;
     }
 
