@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -33,6 +34,44 @@ public class PartialEvaluatorTest {
     var resolver = new ProgramResolver(program);
     await resolver.Resolve(CancellationToken.None);
     return (program, errorReporter);
+  }
+
+  private static async Task<(bool Verified, Microsoft.Boogie.PipelineStatistics Stats)> ParseResolveAndVerify(
+    string dafnyProgramText, DafnyOptions options) {
+    var (program, reporter) = await ParseAndResolveWithReporter(dafnyProgramText, options);
+
+    options.Compile = false;
+    options.RunningBoogieFromCommandLine = true;
+    var oldErrorCount = reporter.ErrorCount;
+    options.ProcessSolverOptions(reporter, Token.NoToken);
+    Assert.Equal(oldErrorCount, reporter.ErrorCount);
+
+    using var engine = Microsoft.Boogie.ExecutionEngine.CreateWithoutSharedCache(options);
+    var boogiePrograms = BoogieGenerator.Translate(program, reporter).ToList();
+
+    var verified = true;
+    var totalStats = new Microsoft.Boogie.PipelineStatistics();
+    foreach (var (moduleName, boogieProgram) in boogiePrograms) {
+      var (outcome, stats) = await DafnyMain.BoogieOnce(
+        reporter,
+        options,
+        TextWriter.Null,
+        engine,
+        "partial-eval-regression",
+        moduleName,
+        boogieProgram,
+        programId: null);
+      verified &= DafnyMain.IsBoogieVerified(outcome, stats);
+      totalStats.VerifiedCount += stats.VerifiedCount;
+      totalStats.ErrorCount += stats.ErrorCount;
+      totalStats.TimeoutCount += stats.TimeoutCount;
+      totalStats.OutOfResourceCount += stats.OutOfResourceCount;
+      totalStats.OutOfMemoryCount += stats.OutOfMemoryCount;
+      totalStats.SolverExceptionCount += stats.SolverExceptionCount;
+      totalStats.InconclusiveCount += stats.InconclusiveCount;
+    }
+
+    return (verified, totalStats);
   }
 
   private static IEnumerable<Statement> DescendantStatements(Statement root) {
@@ -85,6 +124,41 @@ method Entry() {
       .ToList();
     Assert.DoesNotContain("Spec", calls);
     Assert.DoesNotContain("Wrap", calls);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_DoesNotCauseInternalVerifierException_OnAssumedSpecCall() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Main");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 10U);
+    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 10000U);
+
+    var (_, stats) = await ParseResolveAndVerify(@"
+ghost function {:fuel 100} Abs(x: int): int
+  decreases *
+{
+  if x >= 0 then x else -x
+}
+
+predicate Spec(n: int, q: int, values: seq<int>, result: int)
+{
+  exists i :: 0 <= i < |values| && Abs(values[i]) >= 0 && result == q
+}
+
+method Main() {
+  var arg_0 := 6;
+  var arg_1 := 4;
+  var arg_2 := [1, 2, 2, 4];
+  var arg_3 := 3;
+  assume {:axiom} Spec(arg_0, arg_1, arg_2, arg_3);
+  assert false;
+}
+", options);
+
+    // Regression intent: verification must complete without internal solver exceptions.
+    Assert.True(stats.VerifiedCount + stats.ErrorCount > 0);
+    Assert.Equal(0, stats.SolverExceptionCount);
   }
 
   [Fact]
