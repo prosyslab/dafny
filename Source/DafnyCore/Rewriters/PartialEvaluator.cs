@@ -36,7 +36,8 @@ public class PartialEvaluator : IRewriter {
         $"Multiple callables named '{entryName}' found; partial evaluation will run on all matches.");
     }
 
-    var evaluator = new PartialEvaluatorEngine(Reporter.Options, moduleDefinition, program.SystemModuleManager, inlineDepth);
+    var effectiveScope = Type.GetScope() ?? moduleDefinition.VisibilityScope;
+    var evaluator = new PartialEvaluatorEngine(Reporter.Options, moduleDefinition, program.SystemModuleManager, inlineDepth, effectiveScope);
     foreach (var target in entryTargets) {
       evaluator.PartialEvalEntry(target);
     }
