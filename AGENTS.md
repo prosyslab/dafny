@@ -15,6 +15,7 @@
 | Documentation | `dafny/docs/` | language + integration references |
 
 ## CONVENTIONS
+- Before adding new functionality, search `dafny/Source/` for similar existing implementations first; add new code only when no suitable implementation exists.
 - Use Dafny-local commands (`dotnet build`, `make test`, `make format`, `make format-dfy`).
 - Follow C# formatting/style rules from `dafny/.editorconfig` and `dafny/CLAUDE.md`.
 - Preserve existing namespace style and nullable directives in touched C# files.
