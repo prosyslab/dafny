@@ -1504,5 +1504,125 @@ method MapLiteralExceedsCap() {
     Assert.NotEmpty(asserts);
     Assert.Contains(asserts, a => ContainsForall(a.Expr));
   }
+
+  [Fact]
+  public async Task CounterexampleSpecCalls_AreReducedToTrueAssertions_WithoutPartialEvalEntry() {
+    var options = CreateOptions(500U);
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 20U);
+
+    var program = await ParseAndResolve(@"
+ghost predicate Spec(n: int, k: int, m: int, a: int, g: seq<int>, r: seq<int>) {
+  |g| == a &&
+  |r| == n &&
+  1 <= k <= n <= 100 &&
+  1 <= m <= 100 &&
+  1 <= a <= m &&
+  (forall i :: 0 <= i < n ==> 1 <= r[i] <= 3) &&
+  forall i :: 0 <= i < n ==>
+    (
+      (r[i] == 1) <==>
+      (forall u: seq<int> ::
+          |u| == m - a &&
+          (forall v :: 0 <= v < |u| ==> 1 <= u[v] <= n) &&
+          CandidateElected(n, k, m, g + u, i + 1)
+      )
+    ) &&
+    (
+      (r[i] == 3) <==>
+      (forall u: seq<int> ::
+          |u| == m - a &&
+          (forall v :: 0 <= v < |u| ==> 1 <= u[v] <= n) &&
+          !CandidateElected(n, k, m, g + u, i + 1)
+      )
+    ) &&
+    (
+      (r[i] == 2) <==>
+      (exists u: seq<int> ::
+          |u| == m - a &&
+          (forall v :: 0 <= v < |u| ==> 1 <= u[v] <= n) &&
+          CandidateElected(n, k, m, g + u, i + 1)
+      ) &&
+      (exists u: seq<int> ::
+          |u| == m - a &&
+          (forall v :: 0 <= v < |u| ==> 1 <= u[v] <= n) &&
+          !CandidateElected(n, k, m, g + u, i + 1)
+      )
+    )
 }
 
+ghost predicate CandidateElected(n: int, k: int, m: int, votes: seq<int>, c: int)
+{
+  |votes| == m &&
+  VoteCount(n, votes, c) > 0 &&
+  (
+    |set i: int | 1 <= i <= n && i != c && VoteCount(n, votes, i) > 0 &&
+      (
+        VoteCount(n, votes, i) > VoteCount(n, votes, c) ||
+        (VoteCount(n, votes, i) == VoteCount(n, votes, c) &&
+         LastVoteIndex(n, m, votes, i) < LastVoteIndex(n, m, votes, c))
+      )
+    :: i| < k
+  )
+}
+
+function Count(votes: seq<int>, c: int): int {
+  |set idx: int | 0 <= idx < |votes| && votes[idx] == c :: idx|
+}
+
+function VoteCount(n: int, votes: seq<int>, c: int): int {
+  Count(votes, c)
+}
+
+function LastVoteIndex(n: int, m: int, votes: seq<int>, c: int): int
+  requires |votes| == m
+{
+  if VoteCount(n, votes, c) == 0 then
+    m
+  else
+    FindLastVoteIndex(m, votes, c, 0)
+}
+
+function FindLastVoteIndex(m: int, votes: seq<int>, c: int, start: int): int
+  requires |votes| == m
+  requires 0 <= start <= m
+  decreases m - start
+{
+  if start >= m then
+    m
+  else if IsLastVoteIndex(m, votes, c, start) then
+    start
+  else
+    FindLastVoteIndex(m, votes, c, start + 1)
+}
+
+predicate IsLastVoteIndex(m: int, votes: seq<int>, c: int, i: int)
+  requires |votes| == m
+{
+  0 <= i < m &&
+  votes[i] == c &&
+  forall j :: i < j < m ==> votes[j] != c
+}
+
+ghost method RejectCounterexamples() {
+  assert !Spec(3, 1, 5, 4, [1, 2, 1, 3], [3, 3, 1]);
+  assert !Spec(3, 1, 5, 4, [1, 2, 1, 3], [1, 2, 1]);
+  assert !Spec(3, 1, 5, 3, [1, 3, 1], [1, 2, 1]);
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var method = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "RejectCounterexamples"));
+    Assert.NotNull(method.Body);
+
+    var asserts = DescendantStatements(method.Body!)
+      .OfType<AssertStmt>()
+      .ToList();
+    Assert.Equal(3, asserts.Count);
+
+    foreach (var assertStmt in asserts) {
+      var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+      Assert.True(Expression.IsBoolLiteral(assertExpr, out var literal) && literal,
+        $"Unexpected rewritten assert: {assertExpr}");
+    }
+  }
+}
