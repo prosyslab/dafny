@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
 
@@ -20,7 +21,7 @@ public class PartialEvaluator : IRewriter {
     var inlineDepth = Reporter.Options.Get(CommonOptionBag.PartialEvalInlineDepth);
     var entryTargets = new List<ICallable>();
     foreach (var decl in ModuleDefinition.AllCallablesIncludingPrefixDeclarations(moduleDefinition.TopLevelDecls)) {
-      if (decl is Declaration declaration && declaration.Name == entryName) {
+      if (MatchesEntryTarget(decl, entryName)) {
         entryTargets.Add(decl);
       }
     }
@@ -41,5 +42,12 @@ public class PartialEvaluator : IRewriter {
     foreach (var target in entryTargets) {
       evaluator.PartialEvalEntry(target);
     }
+  }
+
+  private static bool MatchesEntryTarget(ICallable callable, string entryName) {
+    if (callable is Declaration declaration && string.Equals(declaration.Name, entryName, StringComparison.Ordinal)) {
+      return true;
+    }
+    return string.Equals(callable.NameRelativeToModule, entryName, StringComparison.Ordinal);
   }
 }
