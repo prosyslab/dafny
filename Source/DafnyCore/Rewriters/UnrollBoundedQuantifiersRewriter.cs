@@ -90,16 +90,17 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
     // NOTE: This method is invoked via reflection in tests (BindingFlags.NonPublic).
     private Statement RewriteStmt(Statement stmt) {
       ArgumentNullException.ThrowIfNull(stmt);
-      if (!ContainsQuantifier(stmt)) {
-        return stmt;
-      }
-      ExpressionRewriteUtil.RewriteExpressionsInStmtInPlace(stmt, TryRewriteQuantifier);
+      ExpressionRewriteUtil.RewriteExpressionsInStmtInPlace(stmt, RewriteExpr);
       return stmt;
     }
 
     // NOTE: This method is invoked via reflection in tests (BindingFlags.NonPublic).
     private Expression RewriteExpr(Expression expr) {
       ArgumentNullException.ThrowIfNull(expr);
+      if (!expr.WasResolved() || expr.Type == null) {
+        return expr;
+      }
+      expr = partialEvaluator.SimplifyExpression(expr);
       if (!ContainsQuantifier(expr)) {
         return expr;
       }
@@ -107,13 +108,48 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
     }
 
     private Expression TryRewriteQuantifier(Expression expr) {
-      if (expr is QuantifierExpr quantifierExpr &&
-          quantifierBounds.TryUnrollQuantifier(quantifierExpr, partialEvaluator.SimplifyExpression, out var rewritten) &&
+      if (expr is not QuantifierExpr quantifierExpr) {
+        return expr;
+      }
+
+      if (quantifierExpr is ForallExpr forallExpr &&
+          TryRewriteForallWithImpossibleSeqLengthConstraint(forallExpr, out var impossibleForallRewrite)) {
+        return impossibleForallRewrite;
+      }
+
+      if (quantifierBounds.TryUnrollQuantifier(quantifierExpr, partialEvaluator.SimplifyExpression, out var rewritten) &&
           !ReferenceEquals(rewritten, quantifierExpr) &&
           rewritten != null) {
         return rewritten;
       }
       return expr;
+    }
+
+    private bool TryRewriteForallWithImpossibleSeqLengthConstraint(ForallExpr forallExpr, out Expression rewritten) {
+      rewritten = forallExpr;
+      var logicalBody = forallExpr.LogicalBody(bypassSplitQuantifier: true);
+      var conjuncts = new List<Expression>();
+      QuantifierBounds.CollectConjuncts(logicalBody, conjuncts);
+
+      foreach (var boundVar in forallExpr.BoundVars) {
+        if (boundVar.Type?.AsSubsetType != null) {
+          continue;
+        }
+        var normalizedType = boundVar.Type?.NormalizeExpand();
+        if (normalizedType == null || (normalizedType.AsSeqType == null && !normalizedType.IsStringType)) {
+          continue;
+        }
+
+        foreach (var conjunct in conjuncts) {
+          if (quantifierBounds.TryGetSeqLengthConstraint(conjunct, boundVar, out _)) {
+            rewritten = Expression.CreateBoolLiteral(forallExpr.Origin, false);
+            rewritten.Type = Type.Bool;
+            return true;
+          }
+        }
+      }
+
+      return false;
     }
 
     private static bool ContainsQuantifier(Statement stmt) {
