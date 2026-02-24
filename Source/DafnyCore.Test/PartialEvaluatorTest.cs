@@ -162,6 +162,54 @@ method Main() {
   }
 
   [Fact]
+  public async Task PartialEvaluation_DoesNotCauseInternalVerifierException_OnAssumedSpecCallAcrossMultipleMainEntries() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Main");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 10U);
+    options.Set(CommonOptionBag.UnrollBoundedQuantifiers, 10000U);
+
+    var (_, stats) = await ParseResolveAndVerify(@"
+ghost function {:fuel 100} Abs(x: int): int
+  decreases *
+{
+  if x >= 0 then x else -x
+}
+
+predicate Spec(n: int, q: int, values: seq<int>, result: int)
+{
+  exists i :: 0 <= i < |values| && Abs(values[i]) >= 0 && result == q
+}
+
+class ExpectoCase_0 {
+  method Main() {
+    var arg_0 := 6;
+    var arg_1 := 4;
+    var arg_2 := [1, 2, 2, 4];
+    var arg_3 := 3;
+    assume {:axiom} Spec(arg_0, arg_1, arg_2, arg_3);
+    assert false;
+  }
+}
+
+class ExpectoCase_1 {
+  method Main() {
+    var arg_0 := -5;
+    var arg_1 := 1;
+    var arg_2 := [0, 1, -2];
+    var arg_3 := 1;
+    assume {:axiom} Spec(arg_0, arg_1, arg_2, arg_3);
+    assert false;
+  }
+}
+", options);
+
+    // Regression intent: verification must complete without internal solver exceptions.
+    Assert.True(stats.VerifiedCount + stats.ErrorCount > 0);
+    Assert.Equal(0, stats.SolverExceptionCount);
+  }
+
+  [Fact]
   public async Task PartialEvaluation_InlinesSeqDisplayLiteralArguments() {
     // EXPECTED:
     // method Entry() {

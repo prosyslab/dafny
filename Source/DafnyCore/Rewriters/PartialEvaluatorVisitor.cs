@@ -27,7 +27,6 @@ internal sealed partial class PartialEvaluatorEngine {
     private readonly PartialEvaluatorEngine engine;
     private readonly Dictionary<Expression, Expression> replacements = new();
     private List<Dictionary<IVariable, ConstValue>> constScopes = new() { new Dictionary<IVariable, ConstValue>() };
-    private int axiomAssumeDepth;
 
     public PartialEvaluatorVisitor(PartialEvaluatorEngine engine) {
       this.engine = engine;
@@ -44,9 +43,7 @@ internal sealed partial class PartialEvaluatorEngine {
         return null;
       }
 
-      var isApplySuffix = expr is ApplySuffix;
-      var shouldBypassResolvedSurrogate = isApplySuffix && axiomAssumeDepth > 0;
-      if (expr.Resolved != null && expr.Resolved != expr && !shouldBypassResolvedSurrogate) {
+      if (expr.Resolved != null && expr.Resolved != expr) {
         var resolvedResult = SimplifyExpression(expr.Resolved, state);
         if (!ReferenceEquals(resolvedResult, expr)) {
           AssertHasResolvedType(resolvedResult);
@@ -210,14 +207,7 @@ internal sealed partial class PartialEvaluatorEngine {
           assertStmt.Expr = SimplifyExpression(assertStmt.Expr, state);
           break;
         case AssumeStmt assumeStmt:
-          var isAxiomAssume = Attributes.Contains(assumeStmt.Attributes, Attributes.AxiomAttributeName);
-          if (isAxiomAssume) {
-            axiomAssumeDepth++;
-          }
           assumeStmt.Expr = SimplifyExpression(assumeStmt.Expr, state);
-          if (isAxiomAssume) {
-            axiomAssumeDepth--;
-          }
           break;
         case ExpectStmt expectStmt:
           expectStmt.Expr = SimplifyExpression(expectStmt.Expr, state);
