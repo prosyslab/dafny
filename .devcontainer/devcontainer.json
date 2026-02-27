@@ -1,0 +1,33 @@
+{
+  "name": "dafny",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "remoteUser": "vscode",
+  "containerEnv": {
+    "TZ": "Asia/Seoul"
+  },
+  "forwardPorts": [
+    1455
+  ],
+  "runArgs": [
+    "--name",
+    "dafny"
+  ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-dotnettools.csharp",
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "dafny-lang.ide-vscode"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/bin/python3.12",
+        "terminal.integrated.defaultProfile.linux": "zsh"
+      }
+    }
+  },
+  "postCreateCommand": "dotnet --version && csharp-ls --help >/dev/null && python3.12 --version && pylsp --version && z3 --version && opencode --version"
+}
