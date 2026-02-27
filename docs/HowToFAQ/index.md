@@ -51,6 +51,7 @@ If you have questions that are not addressed here, be sure to communicate them t
 - ["Does Dafny have monadic error handling?"](FAQMonadic)
 - ["What is the `:-` operator?"](FAQElephant)
 - ["How does `:-` work? I'm getting an unexpected failure."](FAQElephant)
+- ["What are natural-language block expressions and statements?"](FAQNaturalLanguageBlocks)
 - ["What is the meaning of and differences among `->`, `-->`, `~>`?"](FAQFunctionTypes)
 - ["What is the difference between `function`, `method`, `function method`, and `function by method`?"](FAQFunctionMethodDiffs)
 - ["Is it possible to restrict a type parameter to be a reference type? I see you can use T(!new) but I’m looking for the opposite."](FAQTypeParameterRestriction)
@@ -124,4 +125,3 @@ Also see [the error catalog](./Errors) for a complete, searchable list of error 
 - ["Duplicate name of import: ..."](ERROR_DuplicateImportName)
 - ["Warning: /!\ No terms found to trigger on."](ERROR_NoTriggers)
 - ["Error: value does not satisfy the subset constraints of '(seq\<uint8>, Materials.EncryptedDataKey) -> seq\<uint8>' (possible cause: it may be partial or have read effects)"](ERROR_SubsetConstraints)
-

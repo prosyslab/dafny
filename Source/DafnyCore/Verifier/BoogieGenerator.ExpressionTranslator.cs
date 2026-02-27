@@ -411,6 +411,9 @@ namespace Microsoft.Dafny {
             return GetArrayIndexFieldName(indexFieldLocation.Origin, indexFieldLocation.Indices.ToList());
           case LocalsObjectExpression:
             return Predef.Locals;
+          case NaturalLanguageExpression:
+            // TODO(nl-semantics): replace placeholder behavior when NL semantics are defined
+            return ArbitraryValue(expr.Type);
           default:
             Contract.Assert(false); throw new Cce.UnreachableException();  // unexpected expression
         }
@@ -1966,6 +1969,9 @@ BplBoundVar(varNameGen.FreshId(string.Format("#{0}#", bv.Name)), Predef.BoxType,
         } else if (expr is IndexFieldLocation indexFieldLocation) {
           return CanCallAssumption(indexFieldLocation.Indices, cco);
         } else if (expr is LocalsObjectExpression) {
+          return Expr.True;
+        } else if (expr is NaturalLanguageExpression) {
+          // TODO(nl-semantics): replace placeholder behavior when NL semantics are defined
           return Expr.True;
         } else {
           Contract.Assert(false); throw new Cce.UnreachableException();  // unexpected expression

@@ -3411,10 +3411,9 @@ namespace Microsoft.Dafny {
       if (!ModeledAsBoxType(fromType) && (toType == null || ModeledAsBoxType(toType))) {
         // if "e" denotes "Unbox(E): T", then just return "E"
         if (e is Bpl.NAryExpr { Fun: Bpl.TypeCoercion } coerce) {
-          Contract.Assert(coerce.Args.Count == 1);
-          Contract.Assert(Bpl.Type.Equals(((Bpl.TypeCoercion)coerce.Fun).Type, TrType(fromType)));
-          if (coerce.Args[0] is Bpl.NAryExpr { Fun: Bpl.FunctionCall { FunctionName: UnboxFunctionName } } call) {
-            Contract.Assert(call.Args.Count == 1);
+          if (coerce.Args.Count == 1
+              && coerce.Args[0] is Bpl.NAryExpr { Fun: Bpl.FunctionCall { FunctionName: UnboxFunctionName } } call
+              && call.Args.Count == 1) {
             return call.Args[0];
           }
         }

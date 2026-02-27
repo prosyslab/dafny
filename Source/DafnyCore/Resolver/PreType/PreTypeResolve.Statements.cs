@@ -114,6 +114,10 @@ namespace Microsoft.Dafny {
           ResolveExpression(e, resolutionContext);
         }
 
+      } else if (stmt is NaturalLanguageStatement naturalLanguageStatement) {
+        // TODO(nl-semantics): replace placeholder behavior when NL semantics are defined
+        ReportWarning(naturalLanguageStatement.Origin, UnsupportedNaturalLanguageBlocksDiagnostic);
+
       } else if (stmt is BreakOrContinueStmt) {
         var s = (BreakOrContinueStmt)stmt;
         if (s.TargetLabel != null) {

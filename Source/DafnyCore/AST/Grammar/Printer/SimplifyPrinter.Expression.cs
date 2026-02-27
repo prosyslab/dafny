@@ -1572,6 +1572,11 @@ namespace Microsoft.Dafny {
           wr.Write(")");
         }
 
+      } else if (expr is NaturalLanguageExpression naturalLanguageExpression) {
+        wr.Write("``");
+        wr.Write(naturalLanguageExpression.RawContent);
+        wr.Write("``");
+
       } else if (expr is IndexFieldLocationExpression) {
         var e = (IndexFieldLocationExpression)expr;
         PrintExpr(e.Lhs, BindingStrengthSuffix, false, false, false, -1);

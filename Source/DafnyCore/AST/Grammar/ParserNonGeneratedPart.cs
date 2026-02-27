@@ -309,6 +309,19 @@ public partial class Parser {
     return theOptions.Get(CommonOptionBag.Referrers);
   }
 
+  bool AcceptNaturalLanguageBlocks() {
+    return theOptions.Get(CommonOptionBag.NaturalLanguageBlocks);
+  }
+
+  bool IsDoubleBacktick() {
+    if (la.kind != _backtick) {
+      return false;
+    }
+    scanner.ResetPeek();
+    var next = scanner.Peek();
+    return next.kind == _backtick && next.pos == la.pos + 1;
+  }
+
   bool AcceptReferrersAndBacktick() {
     return AcceptReferrers() && la.kind is _backtick;
   }
@@ -826,6 +839,7 @@ public partial class Parser {
         var newOptionsCommand = new RootCommand();
         newOptionsCommand.AddOption(CommonOptionBag.QuantifierSyntax);
         newOptionsCommand.AddOption(Function.FunctionSyntaxOption);
+        newOptionsCommand.AddOption(CommonOptionBag.NaturalLanguageBlocks);
         var result = newOptionsCommand.Parse(string.Join(' ', opts));
 
         if (!result.Errors.Any()) {

@@ -66,6 +66,11 @@ namespace Microsoft.Dafny {
             wr.Write(";");
             break;
           }
+        case NaturalLanguageStatement naturalLanguageStatement:
+          wr.Write("``");
+          wr.Write(naturalLanguageStatement.RawContent);
+          wr.Write("``;");
+          break;
         case HideRevealStmt revealStmt:
           PrintHideReveal(revealStmt);
           break;

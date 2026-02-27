@@ -2231,6 +2231,7 @@ OneStmt<out Statement/*!*/ s>
   ( BlockStmt<out bs, out bodyStart, out bodyEnd>  (. s = bs; .)
   | OpaqueBlock<out s>
   | IF(IsReveal(scanner.Peek())) RevealStmt<out s>
+  | IF(IsDoubleBacktick()) NaturalLanguageBlockStatement<out s>
   | AssignStatement<out s>     // includes UpdateFailure
   | VarDeclStatement<out s>
   | ReturnStmt<out s>
@@ -2291,6 +2292,44 @@ Label<out Label l>
 = "label"  (. Token id; .)
   LabelName<out id> ":" (. l = new Label(id, id.val); .)
 .
+
+/*------------------------------------------------------------------------*/
+NaturalLanguageBlockStatement<out Statement s>
+= (. Contract.Ensures(Contract.ValueAtReturn(out s) != null);
+     Token openLeft = Token.NoToken;
+     Token openRight = Token.NoToken;
+     Token closeLeft = Token.NoToken;
+     Token closeRight = Token.NoToken;
+     bool sawBodyToken = false;
+     s = dummyStmt;
+  .)
+  "`"                                           (. openLeft = t; .)
+  "`"                                           (. openRight = t; .)
+                                                   (. while (la.kind != _EOF && (la.kind != _backtick || !IsDoubleBacktick())) {
+                                                        sawBodyToken = true;
+                                                        Get();
+                                                      }
+                                                   .)
+  "`"                                           (. closeLeft = t; .)
+  "`"                                           (. closeRight = t;
+                                                   var contentStart = openRight.pos + openRight.val.Length;
+                                                   var contentEnd = closeLeft.pos;
+                                                   var rawContent = contentEnd >= contentStart ? scanner.buffer.GetString(contentStart, contentEnd) : "";
+                                                   var openingDelimiter = new SourceOrigin(openLeft, openRight);
+                                                   var closingDelimiter = new SourceOrigin(closeLeft, closeRight);
+                                                   s = new NaturalLanguageStatement(new SourceOrigin(openLeft, closeRight), rawContent,
+                                                     openingDelimiter, closingDelimiter);
+                                                   if (!AcceptNaturalLanguageBlocks()) {
+                                                     SemErr(ErrorId.p_generic_syntax_error, openLeft,
+                                                       "Natural-language blocks are supported only with --natural-language-blocks");
+                                                   }
+                                                   if (!sawBodyToken) {
+                                                     SemErr(ErrorId.p_generic_syntax_error, openLeft,
+                                                       "Natural-language block cannot be empty");
+                                                   }
+                                                 .)
+  ";"
+  .
 
 /*------------------------------------------------------------------------*/
 SkeletonStmt<out Statement s>
@@ -3776,14 +3815,52 @@ ConstAtomExpression<out Expression e>
     "|"
   | "assigned"                                 (. x = t; .)
     "(" NameSegment<out e> ")"                 (. e = new UnaryOpExpr(x, UnaryOpExpr.Opcode.Assigned, e); .)
+  | IF(IsDoubleBacktick()) NaturalLanguageBlockExpression<out e>
   | "`"                                        (. if (!AcceptReferrers()) {
-                                                 SemErr(ErrorId.p_needs_referrers, t, "To use field location expressions, you need --referrers");
-                                               }
-                                               Token backtick = t;
+                                                  SemErr(ErrorId.p_needs_referrers, t, "To use field location expressions, you need --referrers");
+                                                }
+                                                Token backtick = t;
                                                e = new ImplicitThisExpr(t); .)
     FieldLocationBody<ref e, backtick>
   | ParensExpression<out e>
   ) (. if(x!= null) { e.SetOrigin(new SourceOrigin(x, t, e.Center)); } .)
+  .
+
+/*------------------------------------------------------------------------*/
+NaturalLanguageBlockExpression<out Expression e>
+= (. Contract.Ensures(Contract.ValueAtReturn(out e) != null);
+     Token openLeft = Token.NoToken;
+     Token openRight = Token.NoToken;
+     Token closeLeft = Token.NoToken;
+     Token closeRight = Token.NoToken;
+     bool sawBodyToken = false;
+     e = dummyExpr;
+  .)
+  "`"                                           (. openLeft = t; .)
+  "`"                                           (. openRight = t; .)
+                                                   (. while (la.kind != _EOF && (la.kind != _backtick || !IsDoubleBacktick())) {
+                                                        sawBodyToken = true;
+                                                        Get();
+                                                      }
+                                                   .)
+  "`"                                           (. closeLeft = t; .)
+  "`"                                           (. closeRight = t;
+                                                  var contentStart = openRight.pos + openRight.val.Length;
+                                                  var contentEnd = closeLeft.pos;
+                                                  var rawContent = contentEnd >= contentStart ? scanner.buffer.GetString(contentStart, contentEnd) : "";
+                                                  var openingDelimiter = new SourceOrigin(openLeft, openRight);
+                                                  var closingDelimiter = new SourceOrigin(closeLeft, closeRight);
+                                                  e = new NaturalLanguageExpression(new SourceOrigin(openLeft, closeRight), rawContent,
+                                                    openingDelimiter, closingDelimiter);
+                                                  if (!AcceptNaturalLanguageBlocks()) {
+                                                    SemErr(ErrorId.p_generic_syntax_error, openLeft,
+                                                      "Natural-language blocks are supported only with --natural-language-blocks");
+                                                  }
+                                                  if (!sawBodyToken) {
+                                                    SemErr(ErrorId.p_generic_syntax_error, openLeft,
+                                                      "Natural-language block cannot be empty");
+                                                  }
+                                                .)
   .
 
 /*------------------------------------------------------------------------*/

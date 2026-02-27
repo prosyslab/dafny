@@ -573,11 +573,10 @@ public partial class BoogieGenerator {
         var xs = new BoundVariable(GetToken(s), new TypedIdent(tok, "xs", BoogieGenerator.TrType(s.Type.AsSetType.Arg)));
         var xsExpr = new Boogie.IdentifierExpr(xs.tok, xs);
         var xsExprBoxExtract = extractObjectFromMemoryLocation(xsExpr);
-        // Create the trigger Set#IsMember(xs, s)
-        var trigger = new Trigger(tok, false, [
-          BoogieGenerator.FunctionCall(tok, BuiltinFunction.SetIsMember, Boogie.Type.Bool, xsExpr, TrExpr(s))
-        ]);
-        var ebody = Expr.Eq(elmt, xsExprBoxExtract);
+        var xsExprBox = BoxIfNecessary(tok, xsExpr, s.Type.AsSetType.Arg);
+        var inSet = BoogieGenerator.IsSetMember(tok, TrExpr(s), xsExprBox, isFiniteSet);
+        var trigger = new Trigger(tok, false, [xsExprBoxExtract]);
+        var ebody = BplAnd(inSet, Expr.Eq(elmt, xsExprBoxExtract));
         return new Boogie.ExistsExpr(GetToken(s), new List<Variable>() { xs }, trigger, ebody);
       }
       performedRewrite = false;

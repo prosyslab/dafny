@@ -21,6 +21,9 @@ using Microsoft.Dafny.Plugins;
 
 namespace Microsoft.Dafny {
   public partial class ModuleResolver {
+    private const string UnsupportedNaturalLanguageBlocksDiagnostic =
+      "Natural-language blocks are parsed experimentally, but semantics are not supported yet";
+
     public List<LabeledStatement> loopStack = [];  // the enclosing loops (from which it is possible to break out)
     public Scope<Label>/*!*/ DominatingStatementLabels { get; private set; }
 
@@ -1274,6 +1277,10 @@ namespace Microsoft.Dafny {
         }
 
         decreasesToExpr.Type = Type.Bool;
+      } else if (expr is NaturalLanguageExpression naturalLanguageExpression) {
+        // TODO(nl-semantics): replace placeholder behavior when NL semantics are defined
+        reporter.Warning(MessageSource.Resolver, ParseErrors.ErrorId.none, naturalLanguageExpression.Origin, UnsupportedNaturalLanguageBlocksDiagnostic);
+        naturalLanguageExpression.Type = Type.Int;
       } else if (expr is FieldLocationExpression or IndexFieldLocationExpression or FieldLocation or IndexFieldLocation) {
         reporter.Error(MessageSource.Resolver, expr,
           $"Requires --type-system-refresh to resolve");
@@ -3771,6 +3778,10 @@ namespace Microsoft.Dafny {
       if (stmt is PrintStmt) {
         var s = (PrintStmt)stmt;
         s.Args.ForEach(e => ResolveExpression(e, resolutionContext));
+
+      } else if (stmt is NaturalLanguageStatement naturalLanguageStatement) {
+        // TODO(nl-semantics): replace placeholder behavior when NL semantics are defined
+        reporter.Warning(MessageSource.Resolver, ParseErrors.ErrorId.none, naturalLanguageStatement.Origin, UnsupportedNaturalLanguageBlocksDiagnostic);
 
       } else if (stmt is HideRevealStmt hideRevealStmt) {
         stmt.GenResolve(this, resolutionContext);

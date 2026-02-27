@@ -567,6 +567,9 @@ namespace Microsoft.Dafny.Compilers {
         case LabeledStatement:
           // content already handled
           break;
+        case NaturalLanguageStatement:
+          // TODO(nl-semantics): replace placeholder behavior when NL semantics are defined
+          break;
         default:
           Contract.Assert(false); throw new Cce.UnreachableException();  // unexpected statement
       }

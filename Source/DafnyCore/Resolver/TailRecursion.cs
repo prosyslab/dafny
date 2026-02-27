@@ -253,6 +253,9 @@ class TailRecursion {
     } else if (stmt is AssignStatement) {
       var s = (AssignStatement)stmt;
       var ss = s.ResolvedStatements;
+      if (ss == null) {
+        return TailRecursionStatus.CanBeFollowedByAnything;
+      }
       if (ss.Count == 1) {
         return CheckTailRecursive(ss, enclosingMethod, ref tailCall, reportErrors);
       } else {
@@ -269,6 +272,8 @@ class TailRecursion {
     } else if (stmt is ExpectStmt) {
     } else if (stmt is BlockByProofStmt blockByProofStmt) {
       return CheckTailRecursive(blockByProofStmt.Body, enclosingMethod, ref tailCall, reportErrors);
+    } else if (stmt is NaturalLanguageStatement) {
+      // TODO(nl-semantics): replace placeholder behavior when NL semantics are defined
     } else if (stmt is LabeledStatement) {
     } else {
       Contract.Assert(false);  // unexpected statement type

@@ -1478,6 +1478,9 @@ namespace Microsoft.Dafny {
             // We don't do reads checks as we are not reading the heap
             break;
           }
+        case NaturalLanguageExpression:
+          // TODO(nl-semantics): replace placeholder behavior when NL semantics are defined
+          break;
         default:
           Contract.Assert(false); throw new Cce.UnreachableException();  // unexpected expression
       }

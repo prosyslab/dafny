@@ -328,6 +328,10 @@ true - Print debug information for the new type system.".TrimStart()) {
     "which objects are being stored.") {
     IsHidden = true
   };
+  public static readonly Option<bool> NaturalLanguageBlocks = new("--natural-language-blocks", () => false,
+    "(experimental) Enable parser support for natural-language blocks.") {
+    IsHidden = true
+  };
   public static readonly Option<bool> SpillTranslation = new("--spill-translation",
     @"In case the Dafny source code is translated to another language, emit that translation.") {
   };
@@ -697,6 +701,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
     OptionRegistry.RegisterGlobalOption(WarnShadowing, OptionCompatibility.OptionLibraryImpliesLocalWarning);
     OptionRegistry.RegisterGlobalOption(UseStandardLibraries, OptionCompatibility.OptionLibraryImpliesLocalError);
     OptionRegistry.RegisterGlobalOption(Referrers, OptionCompatibility.CheckOptionMatches);
+    OptionRegistry.RegisterGlobalOption(NaturalLanguageBlocks, OptionCompatibility.CheckOptionMatches);
     OptionRegistry.RegisterOption(TranslateStandardLibrary, OptionScope.Cli);
     OptionRegistry.RegisterOption(WarnAsErrors, OptionScope.Cli);
     OptionRegistry.RegisterOption(SuppressWarnings, OptionScope.Cli);
@@ -758,4 +763,3 @@ NoGhost - disable printing of functions, ghost methods, and proof
     OptionRegistry.RegisterOption(CheckSourceLocationConsistency, OptionScope.Cli);
   }
 }
-

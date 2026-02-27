@@ -600,6 +600,11 @@ namespace Microsoft.Dafny.Compilers {
             EmitExpr(e.ResolvedExpression, inLetExprBody, wr, wStmts);
             break;
           }
+        case NaturalLanguageExpression naturalLanguageExpression: {
+            // TODO(nl-semantics): replace placeholder behavior when NL semantics are defined
+            wr.Write(PlaceboValue(naturalLanguageExpression.Type, wr, naturalLanguageExpression.Origin, true));
+            break;
+          }
         default:
           Contract.Assert(false);
           throw new Cce.UnreachableException(); // unexpected expression
