@@ -1,0 +1,4 @@
+nl-blocks-parse-errors.dfy(6,13): Error: Natural-language block cannot be empty
+nl-blocks-parse-errors.dfy(10,22): Error: this symbol not expected in VarDeclStatement
+nl-blocks-parse-errors.dfy(16,13): Error: Natural-language blocks are supported only with --natural-language-blocks
+3 parse errors detected in nl-blocks-parse-errors.dfy
