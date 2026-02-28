@@ -1,0 +1,7 @@
+nl-blocks-type-inference.dfy(6,19): Warning: Natural-language blocks are parsed experimentally, but semantics are not supported yet
+nl-blocks-type-inference.dfy(7,18): Warning: Natural-language blocks are parsed experimentally, but semantics are not supported yet
+nl-blocks-type-inference.dfy(8,16): Warning: Natural-language blocks are parsed experimentally, but semantics are not supported yet
+nl-blocks-type-inference.dfy(13,11): Warning: Natural-language blocks are parsed experimentally, but semantics are not supported yet
+nl-blocks-type-inference.dfy(13,51): Warning: Natural-language blocks are parsed experimentally, but semantics are not supported yet
+nl-blocks-type-inference.dfy(13,11): Error: the type of this natural-language expression is underspecified
+1 resolution/type errors detected in nl-blocks-type-inference.dfy

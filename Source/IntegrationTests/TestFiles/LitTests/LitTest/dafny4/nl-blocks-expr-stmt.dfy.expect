@@ -1,4 +1,4 @@
-nl-blocks-expr-stmt.dfy(6,10): Warning: Natural-language blocks are parsed experimentally, but semantics are not supported yet
+nl-blocks-expr-stmt.dfy(6,11): Warning: Natural-language blocks are parsed experimentally, but semantics are not supported yet
 nl-blocks-expr-stmt.dfy(10,4): Warning: Natural-language blocks are parsed experimentally, but semantics are not supported yet
 
 Dafny program verifier did not attempt verification

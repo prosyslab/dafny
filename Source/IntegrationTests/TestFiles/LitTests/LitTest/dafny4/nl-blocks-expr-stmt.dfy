@@ -3,7 +3,7 @@
 
 module {:options "--natural-language-blocks"} EnabledNaturalLanguageBlocks {
   method UsesNaturalLanguageBlockAsExpression() {
-    print ``pick a deterministic integer``;
+    assert ``pick a deterministic integer`` == 0;
   }
 
   method UsesNaturalLanguageBlockAsStatement() {

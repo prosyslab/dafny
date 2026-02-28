@@ -300,6 +300,8 @@ class CheckTypeInferenceVisitor : ASTVisitor<TypeInferenceCheckingContext> {
           }
         }
       }
+    } else if (expr is NaturalLanguageExpression) {
+      CheckTypeIsDetermined(expr.Origin, expr.Type, "natural-language expression");
     } else if (expr is IdentifierExpr) {
       // by specializing for IdentifierExpr, error messages will be clearer
       CheckTypeIsDetermined(expr.Origin, expr.Type, "variable");

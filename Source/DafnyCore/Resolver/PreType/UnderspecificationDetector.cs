@@ -358,6 +358,9 @@ namespace Microsoft.Dafny {
           }
         }
 
+      } else if (expr is NaturalLanguageExpression) {
+        CheckPreTypeIsDetermined(expr.Origin, expr.PreType, "natural-language expression");
+
       } else if (expr is IdentifierExpr) {
         // by specializing for IdentifierExpr, error messages will be clearer
         CheckPreTypeIsDetermined(expr.Origin, expr.PreType, "variable");
@@ -575,7 +578,8 @@ namespace Microsoft.Dafny {
       if (pt is PreTypeProxy proxy) {
         if (!underspecifiedTypeProxies.Contains(proxy)) {
           // report an error for this TypeProxy only once
-          cus.ReportError(tok, $"the type{UndeterminedPreTypeToString(origPreType)} of this {whatIsBeingChecked} is underspecified");
+          cus.ReportError(ResolutionErrors.ErrorId.r_var_type_undetermined, tok,
+            $"the type{UndeterminedPreTypeToString(origPreType)} of this {whatIsBeingChecked} is underspecified");
           underspecifiedTypeProxies.Add(proxy);
         }
         return false;

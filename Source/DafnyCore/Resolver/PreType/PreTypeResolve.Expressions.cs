@@ -833,9 +833,8 @@ namespace Microsoft.Dafny {
             break;
           }
         case NaturalLanguageExpression naturalLanguageExpression: {
-            // TODO(nl-semantics): replace placeholder behavior when NL semantics are defined
             ReportWarning(naturalLanguageExpression.Origin, UnsupportedNaturalLanguageBlocksDiagnostic);
-            naturalLanguageExpression.PreType = new DPreType(BuiltInTypeDecl(PreType.TypeNameInt), []);
+            naturalLanguageExpression.PreType = CreatePreTypeProxy("natural-language expression");
             break;
           }
 

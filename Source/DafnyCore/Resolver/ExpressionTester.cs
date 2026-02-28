@@ -351,6 +351,9 @@ public class ExpressionTester {
       // other conditions are checked below
       subexpressionsAreInsideBranchesOnlyExcept = matchExpr.Source;
 
+    } else if (expr is NaturalLanguageExpression) {
+      return true;
+
     } else if (expr is DecreasesToExpr _) {
       ReportError(ErrorId.r_decreases_to_only_in_specification,
                   expr, "a `decreases to` expression is allowed only in specification and ghost contexts");
@@ -648,6 +651,8 @@ public class ExpressionTester {
     } else if (expr is MultiSetFormingExpr) {
       var e = (MultiSetFormingExpr)expr;
       return UsesSpecFeatures(e.E);
+    } else if (expr is NaturalLanguageExpression) {
+      return false;
     } else if (expr is IndexFieldLocation or FieldLocation) {
       return true;
     } else if (expr is LocalsObjectExpression) {

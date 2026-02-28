@@ -1278,9 +1278,8 @@ namespace Microsoft.Dafny {
 
         decreasesToExpr.Type = Type.Bool;
       } else if (expr is NaturalLanguageExpression naturalLanguageExpression) {
-        // TODO(nl-semantics): replace placeholder behavior when NL semantics are defined
         reporter.Warning(MessageSource.Resolver, ParseErrors.ErrorId.none, naturalLanguageExpression.Origin, UnsupportedNaturalLanguageBlocksDiagnostic);
-        naturalLanguageExpression.Type = Type.Int;
+        naturalLanguageExpression.Type = new InferredTypeProxy();
       } else if (expr is FieldLocationExpression or IndexFieldLocationExpression or FieldLocation or IndexFieldLocation) {
         reporter.Error(MessageSource.Resolver, expr,
           $"Requires --type-system-refresh to resolve");
