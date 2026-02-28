@@ -55,6 +55,8 @@ LSP codemap requests timed out in this environment. Use the subtree guides above
 - Private fields use camelCase; constants/static readonly use PascalCase.
 - User-visible changes should update `RELEASE_NOTES.md` and usually `docs/DafnyRef/`.
 - PRs should include relevant tests (`Source/IntegrationTests/...` and/or `Source/*.Test/...`).
+- When adding tests, keep them small and intention-revealing: state the target behavior and scenario clearly. Prefer strengthening existing tests incrementally to limit test growth, and add new tests only when necessary.
+- For feature additions, follow TDD: add a failing test first, then implement the feature until the test passes.
 
 ## ANTI-PATTERNS (THIS PROJECT)
 - Do not hand-edit generated parser outputs: `Source/DafnyCore/Parser.cs`, `Source/DafnyCore/Scanner.cs`.
