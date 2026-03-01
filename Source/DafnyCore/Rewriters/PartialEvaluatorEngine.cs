@@ -84,7 +84,30 @@ internal sealed partial class PartialEvaluatorEngine {
   /// Attempts to unroll a bounded quantifier into a finite boolean expression under the configured cap.
   /// </summary>
   internal bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, out Expression rewritten) {
-    return GetQuantifierBounds().TryUnrollQuantifier(quantifierExpr, SimplifyExpression, out rewritten);
+    return TryUnrollQuantifier(quantifierExpr, SimplifyExpression, out rewritten);
+  }
+
+  internal bool TryUnrollQuantifier(
+    QuantifierExpr quantifierExpr,
+    Func<Expression, Expression> simplifyAfterSubst,
+    out Expression rewritten) {
+    return TryUnrollQuantifier(quantifierExpr, simplifyAfterSubst, out rewritten, emitOverflowResidual: true);
+  }
+
+  internal bool TryUnrollQuantifier(
+    QuantifierExpr quantifierExpr,
+    Func<Expression, Expression> simplifyAfterSubst,
+    out Expression rewritten,
+    bool emitOverflowResidual) {
+    return GetQuantifierBounds().TryUnrollQuantifier(
+      quantifierExpr,
+      simplifyAfterSubst,
+      out rewritten,
+      emitOverflowResidual);
+  }
+
+  internal uint GetQuantifierUnrollLimit() {
+    return GetQuantifierBounds().MaxInstances;
   }
 
   /// <summary>
@@ -963,6 +986,15 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
+    var allInlineableArguments = AreAllInlineableArguments(callExpr.Args);
+    if (function.IsRecursive && ContainsQuantifierOrComprehension(function.Body)) {
+      return false;
+    }
+
+    if (function.IsRecursive && !allInlineableArguments && !HasCollectionLiteralArgument(callExpr.Args)) {
+      return false;
+    }
+
     if (TryGetCachedInlinedLiteral(callExpr, state, out inlined)) {
       return true;
     }
@@ -972,6 +1004,16 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
     var addedFunction = state.InlineStack.Add(function);
+    if (!addedFunction) {
+      var canContinueRecursiveInlining = function.IsRecursive &&
+        !ContainsQuantifierOrComprehension(function.Body) &&
+        HasCollectionLiteralArgument(callExpr.Args);
+      if ((!allInlineableArguments && !canContinueRecursiveInlining) ||
+          ContainsQuantifierOrComprehension(function.Body)) {
+        state.InlineCallStack.Remove(callKey);
+        return false;
+      }
+    }
 
     try {
       var substMap = new Dictionary<IVariable, Expression>(function.Ins.Count);
@@ -1342,6 +1384,42 @@ internal sealed partial class PartialEvaluatorEngine {
     return IsLiteralLike(expr) || expr is LambdaExpr;
   }
 
+  private static bool AreAllInlineableArguments(IEnumerable<Expression> args) {
+    foreach (var arg in args) {
+      if (!IsInlineableArgument(arg)) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  private static bool ContainsQuantifierOrComprehension(Expression expr) {
+    if (expr is QuantifierExpr or ComprehensionExpr) {
+      return true;
+    }
+
+    foreach (var subExpression in expr.SubExpressions) {
+      if (ContainsQuantifierOrComprehension(subExpression)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  private static bool HasCollectionLiteralArgument(IEnumerable<Expression> args) {
+    foreach (var arg in args) {
+      var normalized = QuantifierBounds.StripConcreteSyntax(arg);
+      if (normalized is SeqDisplayExpr or SetDisplayExpr or MultiSetDisplayExpr or MapDisplayExpr or StringLiteralExpr) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+
   // ------------------- Literal equality helpers -------------------
 
   private static bool AreLiteralExpressionsEqual(Expression left, Expression right) {
@@ -1549,6 +1627,10 @@ internal sealed partial class PartialEvaluatorEngine {
         builder.Append("i").Append(intValue);
       } else if (Expression.IsBoolLiteral(arg, out var boolValue)) {
         builder.Append("b").Append(boolValue ? "1" : "0");
+      } else if (arg is SeqDisplayExpr seqDisplay && AllElementsAreLiterals(seqDisplay.Elements)) {
+        builder.Append("q").Append(seqDisplay.Elements.Count);
+      } else if (arg is StringLiteralExpr stringLiteral && stringLiteral.Value is string stringValue) {
+        builder.Append("s").Append(stringValue.Length).Append(":").Append(stringValue);
       } else {
         builder.Append("x");
       }
