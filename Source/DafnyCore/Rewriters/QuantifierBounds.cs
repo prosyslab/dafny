@@ -260,7 +260,8 @@ internal sealed class QuantifierBounds {
   /// domain product exceeds the instance cap, partially unroll up to the cap and keep the original
   /// quantifier to cover the remaining domain.
   /// </summary>
-  internal bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, Func<Expression, Expression> simplifyAfterSubst, out Expression rewritten) {
+  internal bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, Func<Expression, Expression> simplifyAfterSubst,
+    out Expression rewritten, bool emitOverflowResidual = true) {
     rewritten = quantifierExpr;
 
     if (quantifierExpr.SplitQuantifier != null || quantifierExpr.SplitQuantifierExpression != null) {
@@ -377,6 +378,9 @@ internal sealed class QuantifierBounds {
       return false;
     }
     if (exceedsMaxInstances && !IsShortCircuited()) {
+      if (!emitOverflowResidual) {
+        return false;
+      }
       MarkQuantifierAsPartiallyUnrolled(quantifierExpr);
       rewritten = isForall
         ? Expression.CreateAnd(accumulator, quantifierExpr)
@@ -1928,4 +1932,3 @@ internal sealed class QuantifierBounds {
     return bounds;
   }
 }
-
