@@ -24,6 +24,7 @@ internal sealed partial class PartialEvaluatorEngine {
   }
 
   private sealed class PartialEvaluatorVisitor : TopDownVisitor<PartialEvalState> {
+    private const string PartialPeelMarkerAttributeName = "_partial_peel";
     private readonly PartialEvaluatorEngine engine;
     private readonly Dictionary<Expression, Expression> replacements = new();
     private List<Dictionary<IVariable, ConstValue>> constScopes = new() { new Dictionary<IVariable, ConstValue>() };
@@ -568,6 +569,11 @@ internal sealed partial class PartialEvaluatorEngine {
         }
       }
       if (unary.ResolvedOp == UnaryOpExpr.ResolvedOpcode.SetCard) {
+        if (unary.E is SetComprehension setComprehension &&
+            TryRewriteIdentitySetComprehensionCardinality(setComprehension, state, out var symbolicCardinality)) {
+          SetReplacement(unary, symbolicCardinality);
+          return false;
+        }
         if (TryGetSetDisplayLiteral(unary.E, out var display)) {
           if (display.Elements.Count <= 1 || AllElementsAreLiterals(display.Elements)) {
             var distinct = new LiteralSet(display.Elements);
@@ -603,6 +609,186 @@ internal sealed partial class PartialEvaluatorEngine {
         return false;
       }
       return false;
+    }
+
+    private bool TryRewriteIdentitySetComprehensionCardinality(
+      SetComprehension setComprehension,
+      PartialEvalState state,
+      out Expression rewritten) {
+      rewritten = null;
+      if (setComprehension.BoundVars.Count != 1) {
+        return false;
+      }
+
+      var boundVar = setComprehension.BoundVars[0];
+      if (!QuantifierBounds.IsBoundVar(setComprehension.Term, boundVar)) {
+        return false;
+      }
+
+      if (ContainsForeignBoundVar(setComprehension.Range, boundVar)) {
+        return false;
+      }
+
+      var hasFunctionCallInRange = ContainsAnyFunctionCall(setComprehension.Range);
+
+      if (!TryGetFiniteIntBoundFromComprehension(setComprehension, out var lower, out var upper)) {
+        return false;
+      }
+
+      if (lower > upper) {
+        rewritten = CreateIntLiteral(setComprehension.Origin, BigInteger.Zero, Type.Int);
+        return true;
+      }
+
+      var domainSize = upper - lower + BigInteger.One;
+      if (domainSize > 64) {
+        return false;
+      }
+
+      var simplificationState = state.WithDepth(Math.Max(0, state.Depth - 1));
+
+      Expression cardExpr = CreateIntLiteral(setComprehension.Origin, BigInteger.Zero, Type.Int);
+      for (var value = lower; value <= upper; value++) {
+        var substMap = new Dictionary<IVariable, Expression>(1) {
+          [boundVar] = CreateIntLiteral(setComprehension.Origin, value, boundVar.Type)
+        };
+        var substituter = new Substituter(null, substMap, null, null, engine.systemModuleManager);
+        var instantiatedRange = setComprehension.Range == null
+          ? Expression.CreateBoolLiteral(setComprehension.Origin, true)
+          : substituter.Substitute(setComprehension.Range);
+        var simplifiedRange = SimplifyExpression(instantiatedRange, simplificationState);
+
+        Expression addend;
+        if (Expression.IsBoolLiteral(simplifiedRange, out var rangeValue)) {
+          addend = CreateIntLiteral(setComprehension.Origin, rangeValue ? BigInteger.One : BigInteger.Zero, Type.Int);
+        } else {
+          addend = new ITEExpr(
+            setComprehension.Origin,
+            false,
+            simplifiedRange,
+            CreateIntLiteral(setComprehension.Origin, BigInteger.One, Type.Int),
+            CreateIntLiteral(setComprehension.Origin, BigInteger.Zero, Type.Int)) {
+            Type = Type.Int
+          };
+        }
+
+        cardExpr = CreateResolvedIntBinary(
+          setComprehension.Origin,
+          BinaryExpr.Opcode.Add,
+          BinaryExpr.ResolvedOpcode.Add,
+          cardExpr,
+          addend);
+      }
+
+      rewritten = SimplifyExpression(cardExpr, simplificationState);
+      rewritten.Type ??= Type.Int;
+      return true;
+    }
+
+    private static bool ContainsRecursiveFunctionCall(Expression expr) {
+      if (expr == null) {
+        return false;
+      }
+
+      expr = QuantifierBounds.NormalizeForPattern(expr);
+      if (expr is FunctionCallExpr functionCallExpr && functionCallExpr.Function != null && functionCallExpr.Function.IsRecursive) {
+        return true;
+      }
+
+      foreach (var subExpression in expr.SubExpressions) {
+        if (ContainsRecursiveFunctionCall(subExpression)) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    private static bool ContainsForeignBoundVar(Expression expr, BoundVar allowedBoundVar) {
+      if (expr == null) {
+        return false;
+      }
+
+      expr = QuantifierBounds.NormalizeForPattern(expr);
+      if (expr is IdentifierExpr identifierExpr &&
+          identifierExpr.Var is BoundVar otherBoundVar &&
+          otherBoundVar != allowedBoundVar) {
+        return true;
+      }
+
+      foreach (var subExpression in expr.SubExpressions) {
+        if (ContainsForeignBoundVar(subExpression, allowedBoundVar)) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    private static bool ContainsAnyFunctionCall(Expression expr) {
+      if (expr == null) {
+        return false;
+      }
+
+      expr = QuantifierBounds.NormalizeForPattern(expr);
+      if (expr is FunctionCallExpr || expr is ApplyExpr) {
+        return true;
+      }
+
+      foreach (var subExpression in expr.SubExpressions) {
+        if (ContainsAnyFunctionCall(subExpression)) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+    private static bool TryGetFiniteIntBoundFromComprehension(
+      SetComprehension setComprehension,
+      out BigInteger lower,
+      out BigInteger upper) {
+      lower = default;
+      upper = default;
+      if (setComprehension.Bounds != null && setComprehension.Bounds.Count == 1 &&
+          setComprehension.Bounds[0] is IntBoundedPool intPool &&
+          intPool.LowerBound != null &&
+          intPool.UpperBound != null) {
+        var normalizedLower = QuantifierBounds.NormalizeForPattern(intPool.LowerBound);
+        var normalizedUpper = QuantifierBounds.NormalizeForPattern(intPool.UpperBound);
+        if (Expression.IsIntLiteral(normalizedLower, out lower) &&
+            Expression.IsIntLiteral(normalizedUpper, out upper)) {
+          return true;
+        }
+      }
+
+      if (setComprehension.BoundVars.Count != 1 || setComprehension.Range == null) {
+        return false;
+      }
+
+      var boundVar = setComprehension.BoundVars[0];
+      var conjuncts = new List<Expression>();
+      QuantifierBounds.CollectConjuncts(setComprehension.Range, conjuncts);
+
+      BigInteger? lowerCandidate = null;
+      BigInteger? upperCandidate = null;
+      foreach (var conjunct in conjuncts) {
+        if (TryMatchLowerBound(conjunct, boundVar, out var lowerBound)) {
+          lowerCandidate = lowerCandidate == null ? lowerBound : BigInteger.Max(lowerCandidate.Value, lowerBound);
+        }
+
+        if (TryMatchUpperBound(conjunct, boundVar, out var upperBound)) {
+          upperCandidate = upperCandidate == null ? upperBound : BigInteger.Min(upperCandidate.Value, upperBound);
+        }
+      }
+
+      if (lowerCandidate == null || upperCandidate == null) {
+        return false;
+      }
+
+      lower = lowerCandidate.Value;
+      upper = upperCandidate.Value;
+      return true;
     }
 
     private bool SimplifyBinaryExpr(BinaryExpr binary, PartialEvalState state) {
@@ -696,8 +882,50 @@ internal sealed partial class PartialEvaluatorEngine {
       quantifierExpr.Range = quantifierExpr.Range == null ? null : SimplifyExpression(quantifierExpr.Range, state);
       quantifierExpr.Term = SimplifyExpression(quantifierExpr.Term, state);
       quantifierExpr.Bounds = SimplifyBounds(quantifierExpr.Bounds, state);
+
+      if (quantifierExpr is ForallExpr && Expression.IsBoolLiteral(quantifierExpr.Term, out var forallTermValue) && forallTermValue) {
+        SetReplacement(quantifierExpr, Expression.CreateBoolLiteral(quantifierExpr.Origin, true));
+        return false;
+      }
+
+      if (quantifierExpr is ExistsExpr && Expression.IsBoolLiteral(quantifierExpr.Term, out var existsTermValue) && !existsTermValue) {
+        SetReplacement(quantifierExpr, Expression.CreateBoolLiteral(quantifierExpr.Origin, false));
+        return false;
+      }
+
+      if (quantifierExpr.Range != null && Expression.IsBoolLiteral(quantifierExpr.Range, out var rangeValue) && !rangeValue) {
+        var vacuous = Expression.CreateBoolLiteral(quantifierExpr.Origin, quantifierExpr is ForallExpr);
+        vacuous.Type = Type.Bool;
+        SetReplacement(quantifierExpr, vacuous);
+        return false;
+      }
+
+      var logicalBody = quantifierExpr.LogicalBody(bypassSplitQuantifier: true);
+      var hasRecursiveLogicalBody = logicalBody != null && ContainsRecursiveFunctionCall(logicalBody);
+
+      if (!hasRecursiveLogicalBody &&
+          quantifierExpr is ForallExpr forallExpr &&
+          TrySimplifyForallByFiniteSupport(forallExpr, state, out var finiteSupportReplacement)) {
+        SetReplacement(quantifierExpr, finiteSupportReplacement);
+        return false;
+      }
+
+      if (quantifierExpr is ForallExpr peeledForall &&
+          TryPeelLowerBoundedForall(peeledForall, state, out var peeledReplacement)) {
+        SetReplacement(quantifierExpr, peeledReplacement);
+        return false;
+      }
+
       if (quantifierExpr is ExistsExpr existsExpr) {
-        if (TrySimplifyExistsArithmetic(existsExpr, out var arithmeticReplacement)) {
+        if (TrySimplifyExistsByPointAssignments(existsExpr, state, out var pointReplacement)) {
+          SetReplacement(quantifierExpr, pointReplacement);
+          return false;
+        }
+        if (TrySimplifyExistsByDisjunctivePointAssignments(existsExpr, state, out var disjunctivePointReplacement)) {
+          SetReplacement(quantifierExpr, disjunctivePointReplacement);
+          return false;
+        }
+        if (TrySimplifyExistsArithmetic(existsExpr, state, out var arithmeticReplacement)) {
           SetReplacement(quantifierExpr, arithmeticReplacement);
           return false;
         }
@@ -706,17 +934,568 @@ internal sealed partial class PartialEvaluatorEngine {
           return false;
         }
       }
-      if (engine.TryUnrollQuantifier(quantifierExpr, out var unrolled)) {
+
+      var inlineDepthForUnrolledInstances = Math.Max(0, state.Depth - 1);
+      if (!hasRecursiveLogicalBody &&
+          engine.TryUnrollQuantifier(
+            quantifierExpr,
+            expr => SimplifyExpression(expr, state.WithDepth(inlineDepthForUnrolledInstances)),
+            out var unrolled,
+            emitOverflowResidual: false)) {
         SetReplacement(quantifierExpr, unrolled);
       }
       return false;
+    }
+
+    private bool TryPeelLowerBoundedForall(ForallExpr forallExpr, PartialEvalState state, out Expression replacement) {
+      replacement = null;
+      if (forallExpr.BoundVars.Count != 1 || forallExpr.Range != null) {
+        return false;
+      }
+
+      if (Attributes.Contains(forallExpr.Attributes, PartialPeelMarkerAttributeName)) {
+        return false;
+      }
+
+      if (forallExpr.Term is not BinaryExpr implication ||
+          implication.ResolvedOp != BinaryExpr.ResolvedOpcode.Imp) {
+        return false;
+      }
+
+      var boundVar = forallExpr.BoundVars[0];
+      var normalizedType = boundVar.Type?.NormalizeExpand();
+      if (normalizedType == null || !normalizedType.IsNumericBased(Type.NumericPersuasion.Int)) {
+        return false;
+      }
+
+      if (!TryMatchLowerBound(implication.E0, boundVar, out var inclusiveLowerBound)) {
+        return false;
+      }
+
+      if (ContainsRecursiveFunctionCall(implication.E1)) {
+        return false;
+      }
+
+      const int peelCount = 1;
+      var simplifyState = state.WithDepth(Math.Max(0, state.Depth - 1));
+      var instantiatedConjuncts = new List<Expression>(peelCount + 1);
+      for (var offset = 0; offset < peelCount; offset++) {
+        var value = inclusiveLowerBound + offset;
+        var substMap = new Dictionary<IVariable, Expression>(1) {
+          [boundVar] = CreateIntLiteral(forallExpr.Origin, value, boundVar.Type)
+        };
+        var substituter = new Substituter(null, substMap, null, null, engine.systemModuleManager);
+        var instantiatedBody = substituter.Substitute(implication.E1);
+        var simplifiedBody = SimplifyExpression(instantiatedBody, simplifyState);
+        if (Expression.IsBoolLiteral(simplifiedBody, out var bodyValue)) {
+          if (!bodyValue) {
+            replacement = Expression.CreateBoolLiteral(forallExpr.Origin, false);
+            replacement.Type = Type.Bool;
+            return true;
+          }
+          continue;
+        }
+        simplifiedBody.Type ??= Type.Bool;
+        instantiatedConjuncts.Add(simplifiedBody);
+      }
+
+      var nextLowerBound = inclusiveLowerBound + peelCount;
+      var boundVarExpr = new IdentifierExpr(forallExpr.Origin, boundVar.Name) {
+        Var = boundVar,
+        Type = boundVar.Type
+      };
+      var residualGuard = new BinaryExpr(
+        forallExpr.Origin,
+        BinaryExpr.Opcode.Ge,
+        boundVarExpr,
+        CreateIntLiteral(forallExpr.Origin, nextLowerBound, boundVar.Type)) {
+        ResolvedOp = BinaryExpr.ResolvedOpcode.Ge,
+        Type = Type.Bool
+      };
+      var residualTerm = Expression.CreateImplies(residualGuard, implication.E1);
+      residualTerm.Type = Type.Bool;
+      var residualAttributes = forallExpr.Attributes;
+      if (!Attributes.Contains(residualAttributes, PartialPeelMarkerAttributeName)) {
+        residualAttributes = new Attributes(
+          forallExpr.Origin,
+          PartialPeelMarkerAttributeName,
+          new List<Expression>(),
+          residualAttributes);
+      }
+      var residualForall = new ForallExpr(
+        forallExpr.Origin,
+        forallExpr.BoundVars,
+        null,
+        residualTerm,
+        residualAttributes) {
+        Bounds = forallExpr.Bounds,
+        Type = Type.Bool
+      };
+      instantiatedConjuncts.Add(residualForall);
+
+      replacement = CombineConjuncts(instantiatedConjuncts, forallExpr.Origin);
+      replacement.Type ??= Type.Bool;
+      return true;
+    }
+
+    private bool TrySimplifyExistsByPointAssignments(ExistsExpr existsExpr, PartialEvalState state, out Expression replacement) {
+      replacement = null;
+      if (existsExpr.BoundVars.Count == 0) {
+        return false;
+      }
+
+      var combined = existsExpr.Range == null
+        ? existsExpr.Term
+        : Expression.CreateAnd(existsExpr.Range, existsExpr.Term);
+      var conjuncts = new List<Expression>();
+      QuantifierBounds.CollectConjuncts(combined, conjuncts);
+
+      var assignments = new Dictionary<BoundVar, Expression>();
+      var consumedConjuncts = new HashSet<Expression>();
+      foreach (var conjunct in conjuncts) {
+        if (!TryGetExistsPointAssignment(conjunct, existsExpr.BoundVars, out var boundVar, out var assignedValue)) {
+          continue;
+        }
+
+        if (assignments.ContainsKey(boundVar)) {
+          return false;
+        }
+
+        assignments[boundVar] = assignedValue;
+        consumedConjuncts.Add(conjunct);
+      }
+
+      if (assignments.Count != existsExpr.BoundVars.Count) {
+        return false;
+      }
+
+      var residualConjuncts = new List<Expression>();
+      foreach (var conjunct in conjuncts) {
+        if (!consumedConjuncts.Contains(conjunct)) {
+          residualConjuncts.Add(conjunct);
+        }
+      }
+
+      var residual = CombineConjuncts(residualConjuncts, existsExpr.Origin);
+      var substMap = new Dictionary<IVariable, Expression>(assignments.Count);
+      foreach (var assignment in assignments) {
+        substMap[assignment.Key] = assignment.Value;
+      }
+
+      var substituter = new Substituter(null, substMap, null, null, engine.systemModuleManager);
+      var substituted = substituter.Substitute(residual);
+      replacement = SimplifyExpression(substituted, state);
+      replacement.Type ??= Type.Bool;
+      return true;
+    }
+
+    private bool TrySimplifyExistsByDisjunctivePointAssignments(ExistsExpr existsExpr, PartialEvalState state, out Expression replacement) {
+      replacement = null;
+      if (existsExpr.BoundVars.Count == 0) {
+        return false;
+      }
+
+      var combined = existsExpr.Range == null
+        ? existsExpr.Term
+        : Expression.CreateAnd(existsExpr.Range, existsExpr.Term);
+      var conjuncts = new List<Expression>();
+      QuantifierBounds.CollectConjuncts(combined, conjuncts);
+
+      Expression disjunctiveChoices = null;
+      foreach (var conjunct in conjuncts) {
+        var normalized = QuantifierBounds.NormalizeForPattern(conjunct);
+        if (normalized is BinaryExpr binaryExpr &&
+            (binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Or || binaryExpr.Op == BinaryExpr.Opcode.Or)) {
+          disjunctiveChoices = normalized;
+          break;
+        }
+      }
+
+      if (disjunctiveChoices == null) {
+        return false;
+      }
+
+      var branchExpressions = new List<Expression>();
+      QuantifierBounds.CollectDisjuncts(disjunctiveChoices, branchExpressions);
+      if (branchExpressions.Count == 0 || branchExpressions.Count > 16) {
+        return false;
+      }
+
+      var nonChoiceConjuncts = new List<Expression>();
+      foreach (var conjunct in conjuncts) {
+        if (!ReferenceEquals(conjunct, disjunctiveChoices)) {
+          nonChoiceConjuncts.Add(conjunct);
+        }
+      }
+
+      var rewrittenDisjuncts = new List<Expression>();
+      foreach (var branch in branchExpressions) {
+        var branchConjuncts = new List<Expression>();
+        QuantifierBounds.CollectConjuncts(branch, branchConjuncts);
+        var branchAssignments = new Dictionary<BoundVar, Expression>();
+        var consumedInBranch = new HashSet<Expression>();
+
+        foreach (var branchConjunct in branchConjuncts) {
+          if (!TryGetExistsPointAssignment(branchConjunct, existsExpr.BoundVars, out var boundVar, out var assignedValue)) {
+            continue;
+          }
+
+          if (branchAssignments.ContainsKey(boundVar)) {
+            return false;
+          }
+
+          branchAssignments[boundVar] = assignedValue;
+          consumedInBranch.Add(branchConjunct);
+        }
+
+        if (branchAssignments.Count != existsExpr.BoundVars.Count) {
+          return false;
+        }
+
+        var branchResidualConjuncts = new List<Expression>(nonChoiceConjuncts);
+        foreach (var branchConjunct in branchConjuncts) {
+          if (!consumedInBranch.Contains(branchConjunct)) {
+            branchResidualConjuncts.Add(branchConjunct);
+          }
+        }
+
+        var branchResidual = CombineConjuncts(branchResidualConjuncts, existsExpr.Origin);
+        var substMap = new Dictionary<IVariable, Expression>(branchAssignments.Count);
+        foreach (var assignment in branchAssignments) {
+          substMap[assignment.Key] = assignment.Value;
+        }
+
+        var substituter = new Substituter(null, substMap, null, null, engine.systemModuleManager);
+        var branchSubstituted = substituter.Substitute(branchResidual);
+        var branchSimplified = SimplifyExpression(branchSubstituted, state);
+        rewrittenDisjuncts.Add(branchSimplified);
+      }
+
+      var rewritten = CombineDisjuncts(rewrittenDisjuncts, existsExpr.Origin);
+      replacement = SimplifyExpression(rewritten, state);
+      replacement.Type ??= Type.Bool;
+      return true;
+    }
+
+    private static bool TryGetExistsPointAssignment(Expression expr, IReadOnlyList<BoundVar> boundVars,
+      out BoundVar boundVar, out Expression assignedValue) {
+      boundVar = null;
+      assignedValue = null;
+      expr = QuantifierBounds.NormalizeForPattern(expr);
+      if (expr is not BinaryExpr binaryExpr) {
+        return false;
+      }
+
+      var isEq = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.EqCommon || binaryExpr.Op == BinaryExpr.Opcode.Eq;
+      if (!isEq) {
+        return false;
+      }
+
+      if (TryFindMatchingBoundVar(binaryExpr.E0, boundVars, out boundVar) &&
+          !ContainsAnyBoundVar(binaryExpr.E1, boundVars)) {
+        assignedValue = binaryExpr.E1;
+        return true;
+      }
+
+      if (TryFindMatchingBoundVar(binaryExpr.E1, boundVars, out boundVar) &&
+          !ContainsAnyBoundVar(binaryExpr.E0, boundVars)) {
+        assignedValue = binaryExpr.E0;
+        return true;
+      }
+
+      boundVar = null;
+      assignedValue = null;
+      return false;
+    }
+
+    private static bool TryFindMatchingBoundVar(Expression expr, IReadOnlyList<BoundVar> boundVars, out BoundVar boundVar) {
+      foreach (var candidate in boundVars) {
+        if (QuantifierBounds.IsBoundVar(expr, candidate)) {
+          boundVar = candidate;
+          return true;
+        }
+      }
+
+      boundVar = null;
+      return false;
+    }
+
+    private static bool ContainsAnyBoundVar(Expression expr, IReadOnlyList<BoundVar> boundVars) {
+      foreach (var boundVar in boundVars) {
+        if (ContainsBoundVar(expr, boundVar)) {
+          return true;
+        }
+      }
+
+      return false;
+    }
+
+
+    private bool TrySimplifyForallByFiniteSupport(ForallExpr forallExpr, PartialEvalState state, out Expression replacement) {
+      replacement = null;
+      if (forallExpr.BoundVars.Count != 1) {
+        return false;
+      }
+
+      if (forallExpr.SplitQuantifier != null || forallExpr.SplitQuantifierExpression != null) {
+        return false;
+      }
+
+      var boundVar = forallExpr.BoundVars[0];
+      var normalizedType = boundVar.Type?.NormalizeExpand();
+      if (normalizedType == null || !normalizedType.IsNumericBased(Type.NumericPersuasion.Int)) {
+        return false;
+      }
+
+      var logicalBody = forallExpr.LogicalBody(bypassSplitQuantifier: true);
+      if (logicalBody == null) {
+        return false;
+      }
+
+      if (!ContainsBoundVar(logicalBody, boundVar)) {
+        return false;
+      }
+
+      Expression independentFactor = null;
+      if (forallExpr.Range == null && IsDefinitelyInhabitedBoundType(boundVar.Type)) {
+        var conjuncts = new List<Expression>();
+        QuantifierBounds.CollectConjuncts(logicalBody, conjuncts);
+        var dependentConjuncts = new List<Expression>();
+        var independentConjuncts = new List<Expression>();
+        foreach (var conjunct in conjuncts) {
+          if (ContainsBoundVar(conjunct, boundVar)) {
+            dependentConjuncts.Add(conjunct);
+          } else {
+            independentConjuncts.Add(conjunct);
+          }
+        }
+
+        if (independentConjuncts.Count > 0) {
+          independentFactor = CombineConjuncts(independentConjuncts, forallExpr.Origin);
+          if (dependentConjuncts.Count == 0) {
+            replacement = SimplifyExpression(independentFactor, state.WithDepth(Math.Max(0, state.Depth - 1)));
+            replacement.Type ??= Type.Bool;
+            return true;
+          }
+
+          logicalBody = CombineConjuncts(dependentConjuncts, forallExpr.Origin);
+        }
+      }
+
+      var supportValues = new HashSet<BigInteger>();
+      if (!TryCollectFiniteSupportValues(logicalBody, boundVar, supportValues) || supportValues.Count == 0 || supportValues.Count > 32) {
+        return false;
+      }
+
+      var valuesToCheck = new List<BigInteger>(supportValues);
+      var outsideValue = BigInteger.Zero;
+      while (supportValues.Contains(outsideValue)) {
+        outsideValue++;
+      }
+      valuesToCheck.Add(outsideValue);
+
+      var instantiatedConjuncts = new List<Expression>(valuesToCheck.Count);
+      foreach (var value in valuesToCheck) {
+        var substMap = new Dictionary<IVariable, Expression>(1) {
+          [boundVar] = CreateIntLiteral(forallExpr.Origin, value, boundVar.Type)
+        };
+        var substituter = new Substituter(null, substMap, null, null, engine.systemModuleManager);
+        var instantiated = substituter.Substitute(logicalBody);
+        var simplified = SimplifyExpression(instantiated, state.WithDepth(Math.Max(0, state.Depth - 1)));
+        simplified.Type ??= Type.Bool;
+        instantiatedConjuncts.Add(simplified);
+      }
+
+      replacement = CombineConjuncts(instantiatedConjuncts, forallExpr.Origin);
+      if (independentFactor != null) {
+        replacement = Expression.CreateAnd(independentFactor, replacement);
+      }
+      replacement = SimplifyExpression(replacement, state.WithDepth(Math.Max(0, state.Depth - 1)));
+      replacement.Type ??= Type.Bool;
+      return true;
+    }
+
+    private static bool TryCollectFiniteSupportValues(Expression expr, BoundVar boundVar, HashSet<BigInteger> supportValues) {
+      if (expr == null) {
+        return true;
+      }
+
+      expr = QuantifierBounds.NormalizeForPattern(expr);
+      if (QuantifierBounds.IsBoundVar(expr, boundVar)) {
+        return false;
+      }
+
+      if (expr is SeqSelectExpr { SelectOne: true, E0: not null, E1: null } selectExpr &&
+          QuantifierBounds.IsBoundVar(selectExpr.E0, boundVar)) {
+        return TryCollectIntKeysFromMapLiteral(selectExpr.Seq, supportValues);
+      }
+
+      if (expr is BinaryExpr binaryExpr) {
+        if (!TryCollectFiniteSupportFromBinary(binaryExpr, boundVar, supportValues, out var shouldRecurse)) {
+          return false;
+        }
+
+        if (!shouldRecurse) {
+          return true;
+        }
+      }
+
+      if (expr is FunctionCallExpr functionCallExpr) {
+        foreach (var arg in functionCallExpr.Args) {
+          if (ContainsBoundVar(arg, boundVar)) {
+            return false;
+          }
+        }
+      }
+
+      foreach (var subExpression in expr.SubExpressions) {
+        if (!TryCollectFiniteSupportValues(subExpression, boundVar, supportValues)) {
+          return false;
+        }
+      }
+
+      return true;
+    }
+
+    private static bool TryCollectFiniteSupportFromBinary(BinaryExpr binaryExpr, BoundVar boundVar,
+      HashSet<BigInteger> supportValues, out bool shouldRecurse) {
+      shouldRecurse = true;
+      var resolvedOp = binaryExpr.ResolvedOp;
+
+      var leftHasBoundVar = ContainsBoundVar(binaryExpr.E0, boundVar);
+      var rightHasBoundVar = ContainsBoundVar(binaryExpr.E1, boundVar);
+
+      if (resolvedOp is BinaryExpr.ResolvedOpcode.EqCommon or BinaryExpr.ResolvedOpcode.NeqCommon) {
+        if (!leftHasBoundVar && !rightHasBoundVar) {
+          return true;
+        }
+
+        if (TryCollectBoundVarComparisonValue(binaryExpr.E0, binaryExpr.E1, boundVar, supportValues)) {
+          shouldRecurse = false;
+          return true;
+        }
+
+        shouldRecurse = true;
+        return true;
+      }
+
+      if (resolvedOp is BinaryExpr.ResolvedOpcode.InSet or BinaryExpr.ResolvedOpcode.InMultiSet or BinaryExpr.ResolvedOpcode.InMap) {
+        if (!leftHasBoundVar && !rightHasBoundVar) {
+          return true;
+        }
+
+        shouldRecurse = false;
+        if (!QuantifierBounds.IsBoundVar(binaryExpr.E0, boundVar)) {
+          return false;
+        }
+
+        return TryCollectIntValuesFromSetOrMapLiteral(binaryExpr.E1, supportValues);
+      }
+
+      if ((leftHasBoundVar || rightHasBoundVar) &&
+          resolvedOp is BinaryExpr.ResolvedOpcode.Lt or BinaryExpr.ResolvedOpcode.Le or BinaryExpr.ResolvedOpcode.Gt or BinaryExpr.ResolvedOpcode.Ge) {
+        return false;
+      }
+
+      return true;
+    }
+
+    private static bool TryCollectBoundVarComparisonValue(Expression left, Expression right, BoundVar boundVar,
+      HashSet<BigInteger> supportValues) {
+      if (QuantifierBounds.IsBoundVar(left, boundVar) && Expression.IsIntLiteral(right, out var rightLiteral)) {
+        supportValues.Add(rightLiteral);
+        return true;
+      }
+
+      if (QuantifierBounds.IsBoundVar(right, boundVar) && Expression.IsIntLiteral(left, out var leftLiteral)) {
+        supportValues.Add(leftLiteral);
+        return true;
+      }
+
+      return false;
+    }
+
+    private static bool TryCollectIntValuesFromSetOrMapLiteral(Expression expr, HashSet<BigInteger> supportValues) {
+      expr = QuantifierBounds.NormalizeForPattern(expr);
+      if (expr is SetDisplayExpr setDisplayExpr) {
+        foreach (var element in setDisplayExpr.Elements) {
+          if (!Expression.IsIntLiteral(element, out var value)) {
+            return false;
+          }
+
+          supportValues.Add(value);
+        }
+
+        return true;
+      }
+
+      if (expr is MultiSetDisplayExpr multiSetDisplayExpr) {
+        foreach (var element in multiSetDisplayExpr.Elements) {
+          if (!Expression.IsIntLiteral(element, out var value)) {
+            return false;
+          }
+
+          supportValues.Add(value);
+        }
+
+        return true;
+      }
+
+      if (expr is MapDisplayExpr mapDisplayExpr) {
+        foreach (var entry in mapDisplayExpr.Elements) {
+          if (!Expression.IsIntLiteral(entry.A, out var key)) {
+            return false;
+          }
+
+          supportValues.Add(key);
+        }
+
+        return true;
+      }
+
+      return false;
+    }
+
+    private static bool TryCollectIntKeysFromMapLiteral(Expression expr, HashSet<BigInteger> supportValues) {
+      expr = QuantifierBounds.NormalizeForPattern(expr);
+      if (expr is not MapDisplayExpr mapDisplayExpr) {
+        return false;
+      }
+
+      foreach (var entry in mapDisplayExpr.Elements) {
+        if (!Expression.IsIntLiteral(entry.A, out var key)) {
+          return false;
+        }
+
+        supportValues.Add(key);
+      }
+
+      return true;
+    }
+
+
+    private static bool IsDefinitelyInhabitedBoundType(Type type) {
+      var normalized = type?.NormalizeExpand();
+      if (normalized == null) {
+        return false;
+      }
+
+      if (normalized is IntType) {
+        return true;
+      }
+
+      if (normalized.IsBoolType || normalized.IsCharType) {
+        return true;
+      }
+
+      return normalized.AsSubsetType != null && normalized.AsSubsetType == Type.Int.AsSubsetType;
     }
 
     /// <summary>
     /// Recognizes a small arithmetic pattern inside <c>exists</c> and evaluates it to a boolean literal.
     /// This avoids expensive downstream reasoning for a few common "divisibility + lower bound" idioms.
     /// </summary>
-    private bool TrySimplifyExistsArithmetic(ExistsExpr existsExpr, out Expression replacement) {
+    private bool TrySimplifyExistsArithmetic(ExistsExpr existsExpr, PartialEvalState state, out Expression replacement) {
       replacement = null;
       if (existsExpr.BoundVars.Count != 1) {
         return false;
@@ -736,41 +1515,69 @@ internal sealed partial class PartialEvaluatorEngine {
       var conjuncts = new List<Expression>();
       QuantifierBounds.CollectConjuncts(combined, conjuncts);
 
-      BigInteger? lowerBound = null;
-      BigInteger? nValue = null;
-      BigInteger? dValue = null;
+      BigInteger? lowerBound = isNat ? BigInteger.Zero : null;
+      Expression targetExpr = null;
+      Expression divisorExpr = null;
       foreach (var conjunct in conjuncts) {
         var normalized = QuantifierBounds.NormalizeForPattern(conjunct);
         if (Expression.IsBoolLiteral(normalized, out var boolValue)) {
           if (!boolValue) {
-            return false;
+            replacement = Expression.CreateBoolLiteral(existsExpr.Origin, false);
+            replacement.Type = Type.Bool;
+            return true;
           }
           continue;
         }
-        if (lowerBound == null && TryMatchLowerBound(normalized, boundVar, out var lower)) {
-          lowerBound = lower;
+
+        if (TryMatchLowerBound(normalized, boundVar, out var lower)) {
+          lowerBound = lowerBound == null ? lower : BigInteger.Max(lowerBound.Value, lower);
           continue;
         }
-        if (nValue == null && dValue == null &&
-            TryMatchMultiplicationEquality(normalized, boundVar, out var nCandidate, out var dCandidate)) {
-          nValue = nCandidate;
-          dValue = dCandidate;
+
+        if (targetExpr == null && divisorExpr == null &&
+            TryMatchLinearMultiplicationEquality(normalized, boundVar, out var targetCandidate, out var divisorCandidate)) {
+          targetExpr = targetCandidate;
+          divisorExpr = divisorCandidate;
           continue;
         }
+
         return false;
       }
 
-      if (lowerBound == null || nValue == null || dValue == null) {
+      if (lowerBound != null && targetExpr == null && divisorExpr == null) {
+        replacement = Expression.CreateBoolLiteral(existsExpr.Origin, true);
+        replacement.Type = Type.Bool;
+        return true;
+      }
+
+      if (lowerBound == null || targetExpr == null || divisorExpr == null) {
         return false;
       }
 
-      if (dValue.Value <= 0) {
+      if (!IsIntLike(targetExpr) || !IsIntLike(divisorExpr)) {
         return false;
       }
 
-      var divides = nValue.Value % dValue.Value == 0;
-      var quotient = divides ? nValue.Value / dValue.Value : BigInteger.Zero;
-      var result = divides && quotient >= lowerBound.Value;
+      var normalizedTarget = QuantifierBounds.NormalizeForPattern(targetExpr);
+      var normalizedDivisor = QuantifierBounds.NormalizeForPattern(divisorExpr);
+      QuantifierBounds.EnsureExpressionType(normalizedTarget, Type.Int);
+      QuantifierBounds.EnsureExpressionType(normalizedDivisor, Type.Int);
+
+      var simplifiedTarget = SimplifyExpression(normalizedTarget, state);
+      var simplifiedDivisor = SimplifyExpression(normalizedDivisor, state);
+      if (!Expression.IsIntLiteral(simplifiedTarget, out var targetLiteral) ||
+          !Expression.IsIntLiteral(simplifiedDivisor, out var divisorLiteral)) {
+        return false;
+      }
+
+      if (divisorLiteral < 0) {
+        divisorLiteral = BigInteger.Negate(divisorLiteral);
+        targetLiteral = BigInteger.Negate(targetLiteral);
+      }
+
+      var result = divisorLiteral == 0
+        ? targetLiteral == 0
+        : targetLiteral % divisorLiteral == 0 && targetLiteral / divisorLiteral >= lowerBound.Value;
       replacement = Expression.CreateBoolLiteral(existsExpr.Origin, result);
       replacement.Type = Type.Bool;
       return true;
@@ -804,9 +1611,38 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
-    private static bool TryMatchMultiplicationEquality(Expression expr, BoundVar boundVar, out BigInteger n, out BigInteger d) {
-      n = default;
-      d = default;
+    private static bool TryMatchUpperBound(Expression expr, BoundVar boundVar, out BigInteger upperBound) {
+      upperBound = default;
+      expr = QuantifierBounds.NormalizeForPattern(expr);
+      if (expr is not BinaryExpr binaryExpr) {
+        return false;
+      }
+
+      var isGe = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Ge || binaryExpr.Op == BinaryExpr.Opcode.Ge;
+      var isGt = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Gt || binaryExpr.Op == BinaryExpr.Opcode.Gt;
+      var isLe = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Le || binaryExpr.Op == BinaryExpr.Opcode.Le;
+      var isLt = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Lt || binaryExpr.Op == BinaryExpr.Opcode.Lt;
+      if (!isGe && !isGt && !isLe && !isLt) {
+        return false;
+      }
+
+      if (QuantifierBounds.IsBoundVar(binaryExpr.E0, boundVar) && Expression.IsIntLiteral(binaryExpr.E1, out var literalRight)) {
+        upperBound = isLt ? literalRight - 1 : literalRight;
+        return isLe || isLt;
+      }
+
+      if (QuantifierBounds.IsBoundVar(binaryExpr.E1, boundVar) && Expression.IsIntLiteral(binaryExpr.E0, out var literalLeft)) {
+        upperBound = isGt ? literalLeft - 1 : literalLeft;
+        return isGe || isGt;
+      }
+
+      return false;
+    }
+
+    private static bool TryMatchLinearMultiplicationEquality(Expression expr, BoundVar boundVar,
+      out Expression target, out Expression divisor) {
+      target = null;
+      divisor = null;
       expr = QuantifierBounds.NormalizeForPattern(expr);
       if (expr is not BinaryExpr binaryExpr) {
         return false;
@@ -816,44 +1652,109 @@ internal sealed partial class PartialEvaluatorEngine {
         return false;
       }
 
-      if (Expression.IsIntLiteral(binaryExpr.E0, out var leftLiteral) &&
-          TryExtractMulLiteral(binaryExpr.E1, boundVar, out var dCandidate)) {
-        n = leftLiteral;
-        d = dCandidate;
+      if (TryExtractScaledBoundVar(binaryExpr.E0, boundVar, out var leftDivisor, out var leftOffset) &&
+          !ContainsBoundVar(binaryExpr.E1, boundVar)) {
+        target = QuantifierBounds.NormalizeForPattern(Expression.CreateSubtract(binaryExpr.E1, leftOffset));
+        divisor = QuantifierBounds.NormalizeForPattern(leftDivisor);
+        return IsIntLike(target) && IsIntLike(divisor);
+      }
+
+      if (TryExtractScaledBoundVar(binaryExpr.E1, boundVar, out var rightDivisor, out var rightOffset) &&
+          !ContainsBoundVar(binaryExpr.E0, boundVar)) {
+        target = QuantifierBounds.NormalizeForPattern(Expression.CreateSubtract(binaryExpr.E0, rightOffset));
+        divisor = QuantifierBounds.NormalizeForPattern(rightDivisor);
+        return IsIntLike(target) && IsIntLike(divisor);
+      }
+
+      return false;
+    }
+
+    private static bool TryExtractScaledBoundVar(Expression expr, BoundVar boundVar,
+      out Expression divisor, out Expression offset) {
+      divisor = null;
+      offset = null;
+      expr = QuantifierBounds.NormalizeForPattern(expr);
+
+      if (TryExtractMulFactor(expr, boundVar, out divisor)) {
+        offset = CreateIntLiteral(expr.Origin, BigInteger.Zero, Type.Int);
         return true;
       }
 
-      if (Expression.IsIntLiteral(binaryExpr.E1, out var rightLiteral) &&
-          TryExtractMulLiteral(binaryExpr.E0, boundVar, out var dCandidateAlt)) {
-        n = rightLiteral;
-        d = dCandidateAlt;
+      if (expr is BinaryExpr binaryExpr) {
+        var isAdd = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Add || binaryExpr.Op == BinaryExpr.Opcode.Add;
+        if (!isAdd) {
+          return false;
+        }
+
+        if (TryExtractMulFactor(binaryExpr.E0, boundVar, out divisor) && !ContainsBoundVar(binaryExpr.E1, boundVar)) {
+          offset = binaryExpr.E1;
+          return IsIntLike(offset);
+        }
+
+        if (TryExtractMulFactor(binaryExpr.E1, boundVar, out divisor) && !ContainsBoundVar(binaryExpr.E0, boundVar)) {
+          offset = binaryExpr.E0;
+          return IsIntLike(offset);
+        }
+      }
+
+      return false;
+    }
+
+    private static bool TryExtractMulFactor(Expression expr, BoundVar boundVar, out Expression factor) {
+      factor = null;
+      expr = QuantifierBounds.NormalizeForPattern(expr);
+      if (expr is not BinaryExpr binaryExpr) {
+        return false;
+      }
+
+      var isMul = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Mul || binaryExpr.Op == BinaryExpr.Opcode.Mul;
+      if (!isMul) {
+        return false;
+      }
+
+      if (QuantifierBounds.IsBoundVar(binaryExpr.E0, boundVar) && !ContainsBoundVar(binaryExpr.E1, boundVar)) {
+        factor = binaryExpr.E1;
+        return true;
+      }
+
+      if (QuantifierBounds.IsBoundVar(binaryExpr.E1, boundVar) && !ContainsBoundVar(binaryExpr.E0, boundVar)) {
+        factor = binaryExpr.E0;
         return true;
       }
 
       return false;
     }
 
-    private static bool TryExtractMulLiteral(Expression expr, BoundVar boundVar, out BigInteger d) {
-      d = default;
+    private static bool ContainsBoundVar(Expression expr, BoundVar boundVar) {
       expr = QuantifierBounds.NormalizeForPattern(expr);
-      if (expr is not BinaryExpr binaryExpr) {
-        return false;
-      }
-      var isMul = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Mul || binaryExpr.Op == BinaryExpr.Opcode.Mul;
-      if (!isMul) {
-        return false;
+      if (QuantifierBounds.IsBoundVar(expr, boundVar)) {
+        return true;
       }
 
-      if (QuantifierBounds.IsBoundVar(binaryExpr.E0, boundVar) && Expression.IsIntLiteral(binaryExpr.E1, out var literalRight)) {
-        d = literalRight;
-        return true;
-      }
-      if (QuantifierBounds.IsBoundVar(binaryExpr.E1, boundVar) && Expression.IsIntLiteral(binaryExpr.E0, out var literalLeft)) {
-        d = literalLeft;
-        return true;
+      foreach (var subExpression in expr.SubExpressions) {
+        if (ContainsBoundVar(subExpression, boundVar)) {
+          return true;
+        }
       }
 
       return false;
+    }
+
+    private static bool IsIntLike(Expression expr) {
+      return expr.Type != null && expr.Type.NormalizeExpand().IsNumericBased(Type.NumericPersuasion.Int);
+    }
+
+    private static Expression CreateResolvedIntBinary(
+      IOrigin origin,
+      BinaryExpr.Opcode op,
+      BinaryExpr.ResolvedOpcode resolvedOp,
+      Expression left,
+      Expression right) {
+      var binary = new BinaryExpr(origin, op, left, right) {
+        ResolvedOp = resolvedOp,
+        Type = Type.Int
+      };
+      return binary;
     }
 
     /// <summary>
@@ -1031,16 +1932,166 @@ internal sealed partial class PartialEvaluatorEngine {
       return current;
     }
 
+    private static Expression CombineDisjuncts(List<Expression> disjuncts, IOrigin origin) {
+      if (disjuncts == null || disjuncts.Count == 0) {
+        var literal = Expression.CreateBoolLiteral(origin, false);
+        literal.Type = Type.Bool;
+        return literal;
+      }
+
+      var current = disjuncts[0];
+      for (var index = 1; index < disjuncts.Count; index++) {
+        current = Expression.CreateOr(current, disjuncts[index]);
+      }
+      if (current.Type == null) {
+        current.Type = Type.Bool;
+      }
+      return current;
+    }
+
     // ------------------- Expression rewriting: comprehensions -------------------
 
     private bool SimplifySetComprehension(SetComprehension setComprehension, PartialEvalState state) {
       setComprehension.Range = SimplifyExpression(setComprehension.Range, state);
       setComprehension.Term = SimplifyExpression(setComprehension.Term, state);
       setComprehension.Bounds = SimplifyBounds(setComprehension.Bounds, state);
+      if (TrySimplifyMapKeySetComprehension(setComprehension, out var keySetDisplay)) {
+        SetReplacement(setComprehension, keySetDisplay);
+        return false;
+      }
       if (engine.TryMaterializeSetComprehension(setComprehension, out var setDisplay)) {
         SetReplacement(setComprehension, setDisplay);
       }
       return false;
+    }
+
+    private bool TrySimplifyMapKeySetComprehension(SetComprehension setComprehension, out SetDisplayExpr setDisplay) {
+      setDisplay = null;
+      if (setComprehension.BoundVars.Count != 1 || setComprehension.Range == null) {
+        return false;
+      }
+
+      var boundVar = setComprehension.BoundVars[0];
+      if (!QuantifierBounds.IsBoundVar(setComprehension.Term, boundVar)) {
+        return false;
+      }
+
+      var conjuncts = new List<Expression>();
+      QuantifierBounds.CollectConjuncts(setComprehension.Range, conjuncts);
+
+      MapDisplayExpr mapDisplay = null;
+      foreach (var conjunct in conjuncts) {
+        var normalized = QuantifierBounds.NormalizeForPattern(conjunct);
+
+        if (TryMatchBoundVarMapMembership(normalized, boundVar, out var membershipMap)) {
+          if (mapDisplay != null && !MapDisplayLiteralsEqual(mapDisplay, membershipMap)) {
+            return false;
+          }
+          mapDisplay = membershipMap;
+          continue;
+        }
+
+        if (!TryMatchPositiveMapValueConstraint(normalized, boundVar, mapDisplay, out var valueMap)) {
+          return false;
+        }
+
+        if (mapDisplay == null) {
+          mapDisplay = valueMap;
+        }
+      }
+
+      if (mapDisplay == null) {
+        return false;
+      }
+
+      var keys = new List<Expression>();
+      foreach (var entry in mapDisplay.Elements) {
+        if (!Expression.IsIntLiteral(entry.B, out var multiplicity)) {
+          return false;
+        }
+
+        if (multiplicity > 0) {
+          keys.Add(entry.A);
+        }
+      }
+
+      setDisplay = CreateSetDisplayLiteral(setComprehension.Origin, keys, setComprehension.Type);
+      return true;
+    }
+
+    private static bool TryMatchBoundVarMapMembership(Expression expr, BoundVar boundVar, out MapDisplayExpr mapDisplay) {
+      mapDisplay = null;
+      if (expr is not BinaryExpr binaryExpr) {
+        return false;
+      }
+
+      var isInMap = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.InMap || binaryExpr.Op == BinaryExpr.Opcode.In;
+      if (!isInMap || !QuantifierBounds.IsBoundVar(binaryExpr.E0, boundVar)) {
+        return false;
+      }
+
+      if (!TryGetMapDisplayLiteral(binaryExpr.E1, out var mapLiteral) ||
+          !AllMapKeysAreLiterals(mapLiteral) ||
+          !AllElementsAreLiterals(mapLiteral)) {
+        return false;
+      }
+
+      mapDisplay = mapLiteral;
+      return true;
+    }
+
+    private static bool TryMatchPositiveMapValueConstraint(Expression expr, BoundVar boundVar, MapDisplayExpr expectedMap,
+      out MapDisplayExpr mapDisplay) {
+      mapDisplay = null;
+      if (expr is not BinaryExpr binaryExpr) {
+        return false;
+      }
+
+      var isGt = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Gt || binaryExpr.Op == BinaryExpr.Opcode.Gt;
+      if (!isGt) {
+        return false;
+      }
+
+      if (TryGetMapSelectOverBoundVar(binaryExpr.E0, boundVar, expectedMap, out mapDisplay) &&
+          Expression.IsIntLiteral(binaryExpr.E1, out var rightLiteral) &&
+          rightLiteral == 0) {
+        return true;
+      }
+
+      if (TryGetMapSelectOverBoundVar(binaryExpr.E1, boundVar, expectedMap, out mapDisplay) &&
+          Expression.IsIntLiteral(binaryExpr.E0, out var leftLiteral) &&
+          leftLiteral == 0) {
+        return true;
+      }
+
+      mapDisplay = null;
+      return false;
+    }
+
+    private static bool TryGetMapSelectOverBoundVar(Expression expr, BoundVar boundVar, MapDisplayExpr expectedMap,
+      out MapDisplayExpr mapDisplay) {
+      mapDisplay = null;
+      expr = QuantifierBounds.NormalizeForPattern(expr);
+      if (expr is not SeqSelectExpr { SelectOne: true, E0: not null, E1: null } selectExpr) {
+        return false;
+      }
+
+      if (!QuantifierBounds.IsBoundVar(selectExpr.E0, boundVar)) {
+        return false;
+      }
+
+      if (!TryGetMapDisplayLiteral(selectExpr.Seq, out var mapLiteral) ||
+          !AllMapKeysAreLiterals(mapLiteral) ||
+          !AllElementsAreLiterals(mapLiteral)) {
+        return false;
+      }
+
+      if (expectedMap != null && !MapDisplayLiteralsEqual(expectedMap, mapLiteral)) {
+        return false;
+      }
+
+      mapDisplay = mapLiteral;
+      return true;
     }
 
     private bool SimplifyMapComprehension(MapComprehension mapComprehension, PartialEvalState state) {
