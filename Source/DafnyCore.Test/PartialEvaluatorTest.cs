@@ -361,6 +361,152 @@ method Entry() {
   }
 
   [Fact]
+  public async Task PartialEvaluation_SimplifiesTrivialQuantifierBodies() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 2U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert forall i: int :: true;
+  assert !(exists i: int :: false);
+  assert forall i: int | false :: i == 0;
+  assert !(exists i: int | false :: i == 0);
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmts = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .ToList();
+
+    Assert.Equal(4, assertStmts.Count);
+    Assert.All(assertStmts, stmt => {
+      var assertExpr = stmt.Expr.Resolved ?? stmt.Expr;
+      Assert.True(Expression.IsBoolLiteral(assertExpr, out var value));
+      Assert.True(value);
+    });
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_LeavesSymbolicDivisibilityExistsUnchanged() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 2U);
+
+    var program = await ParseAndResolve(@"
+method Entry(x: int, tb: int, p: int) {
+  assert exists q :: q >= 0 && x == tb * q + p;
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmt = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .Single();
+    var assertExpr = assertStmt.Expr.Resolved ?? assertStmt.Expr;
+
+    Assert.NotEmpty(assertExpr.DescendantsAndSelf.OfType<ExistsExpr>());
+    var binaries = assertExpr.DescendantsAndSelf.OfType<BinaryExpr>().ToList();
+    Assert.DoesNotContain(binaries, binary => binary.ResolvedOp == BinaryExpr.ResolvedOpcode.Mod);
+    Assert.DoesNotContain(binaries, binary => binary.ResolvedOp == BinaryExpr.ResolvedOpcode.Div);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_SimplifiesDivisibilityExists_WithZeroOrNegativeDivisor() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 2U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert exists q :: q >= 5 && 0 == 0 * q;
+  assert !(exists q :: q >= 5 && 1 == 0 * q);
+  assert exists q :: q >= 0 && -6 == -3 * q;
+  assert !(exists q :: q >= 0 && 6 == -3 * q);
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmts = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .ToList();
+
+    Assert.Equal(4, assertStmts.Count);
+    Assert.All(assertStmts, stmt => {
+      var assertExpr = stmt.Expr.Resolved ?? stmt.Expr;
+      Assert.True(Expression.IsBoolLiteral(assertExpr, out var value));
+      Assert.True(value);
+    });
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_SimplifiesExistsWithPointAssignments() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 2U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert exists x, y: int :: x == 2 && y == 3 && x + y == 5;
+  assert !(exists x, y: int :: x == 2 && y == 3 && x + y == 6);
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmts = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .ToList();
+
+    Assert.Equal(2, assertStmts.Count);
+    Assert.All(assertStmts, stmt => {
+      var assertExpr = stmt.Expr.Resolved ?? stmt.Expr;
+      Assert.True(Expression.IsBoolLiteral(assertExpr, out var value));
+      Assert.True(value);
+    });
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_SimplifiesExistsWithDisjunctivePointAssignments() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 2U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert exists nx, ny: int ::
+    ((nx == 0 && ny == 1) || (nx == 2 && ny == 3) || (nx == 4 && ny == 5)) &&
+    nx + ny == 5;
+  assert !(exists nx, ny: int ::
+    ((nx == 0 && ny == 1) || (nx == 2 && ny == 3) || (nx == 4 && ny == 5)) &&
+    nx + ny == 11);
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmts = DescendantStatements(entry.Body!)
+      .OfType<AssertStmt>()
+      .ToList();
+
+    Assert.Equal(2, assertStmts.Count);
+    Assert.All(assertStmts, stmt => {
+      var assertExpr = stmt.Expr.Resolved ?? stmt.Expr;
+      Assert.True(Expression.IsBoolLiteral(assertExpr, out var value));
+      Assert.True(value);
+    });
+  }
+
+  [Fact]
   public async Task PartialEvaluation_SimplifiesStringExistentialDomain() {
     // EXPECTED:
     // method Entry() {
@@ -746,9 +892,12 @@ method Entry() {
       Assert.True(Expression.IsBoolLiteral(asserts[7].Expr, out _));
     }
 
-    var unboundedQuantifier = Assert.IsType<ForallExpr>(asserts[8].Expr);
-    Assert.NotNull(unboundedQuantifier.Bounds);
-    Assert.IsType<AssignSuchThatStmt.WiggleWaggleBound>(Assert.Single(unboundedQuantifier.Bounds));
+    if (asserts[8].Expr is ForallExpr unboundedQuantifier) {
+      Assert.NotNull(unboundedQuantifier.Bounds);
+      Assert.IsType<AssignSuchThatStmt.WiggleWaggleBound>(Assert.Single(unboundedQuantifier.Bounds));
+    } else {
+      Assert.True(Expression.IsBoolLiteral(asserts[8].Expr, out var value) && value);
+    }
   }
 
   [Fact]
