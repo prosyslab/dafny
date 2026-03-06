@@ -7,7 +7,7 @@ using System.Text;
 namespace Microsoft.Dafny;
 
 internal sealed partial class PartialEvaluatorEngine {
-  private sealed class PartialEvalState {
+  internal sealed class PartialEvalState {
     public int Depth { get; }
     public HashSet<Function> InlineStack { get; }
     public HashSet<string> InlineCallStack { get; }
@@ -824,6 +824,10 @@ internal sealed partial class PartialEvaluatorEngine {
       }
       if (TrySimplifyArbitraryElement(callExpr, out var simplifiedElement)) {
         SetReplacement(callExpr, simplifiedElement);
+        return false;
+      }
+      if (engine.HelperInterpreter.TryInterpret(callExpr, SimplifyExpression, state, out var interpreted)) {
+        SetReplacement(callExpr, interpreted);
         return false;
       }
       if (state.Depth > 0 && engine.TryInlineCall(callExpr, state, this, out var inlined)) {
