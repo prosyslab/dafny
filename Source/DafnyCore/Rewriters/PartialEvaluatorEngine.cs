@@ -15,8 +15,11 @@ internal sealed partial class PartialEvaluatorEngine {
   private readonly SystemModuleManager systemModuleManager;
   private readonly uint inlineDepth;
   private readonly VisibilityScope effectiveScope;
+  private readonly HelperFunctionInterpreter helperInterpreter;
   private readonly Dictionary<string, CachedLiteral> inlineCallCache = new(StringComparer.Ordinal);
   private QuantifierBounds quantifierBounds;
+
+  internal HelperFunctionInterpreter HelperInterpreter => helperInterpreter;
 
   // ------------------- Construction and entry points -------------------
 
@@ -30,6 +33,7 @@ internal sealed partial class PartialEvaluatorEngine {
     this.systemModuleManager = systemModuleManager;
     this.inlineDepth = inlineDepth;
     this.effectiveScope = effectiveScope ?? module.VisibilityScope;
+    helperInterpreter = new HelperFunctionInterpreter(this, systemModuleManager);
   }
 
   private PartialEvalState CreateInitialState() {
@@ -1167,7 +1171,7 @@ internal sealed partial class PartialEvaluatorEngine {
 
   // ------------------- Literal constructors -------------------
 
-  private static LiteralExpr CreateIntLiteral(IOrigin origin, BigInteger value) {
+  internal static LiteralExpr CreateIntLiteral(IOrigin origin, BigInteger value) {
     return new LiteralExpr(origin, value) { Type = Type.Int };
   }
 
@@ -1175,15 +1179,15 @@ internal sealed partial class PartialEvaluatorEngine {
     return new LiteralExpr(origin, value) { Type = type };
   }
 
-  private static LiteralExpr CreateCharLiteral(IOrigin origin, string value, Type type) {
+  internal static LiteralExpr CreateCharLiteral(IOrigin origin, string value, Type type) {
     return new CharLiteralExpr(origin, value) { Type = type };
   }
 
-  private static LiteralExpr CreateStringLiteral(IOrigin origin, string value, Type type, bool isVerbatim) {
+  internal static LiteralExpr CreateStringLiteral(IOrigin origin, string value, Type type, bool isVerbatim) {
     return new StringLiteralExpr(origin, value, isVerbatim) { Type = type };
   }
 
-  private static SeqDisplayExpr CreateSeqDisplayLiteral(IOrigin origin, List<Expression> elements, Type type) {
+  internal static SeqDisplayExpr CreateSeqDisplayLiteral(IOrigin origin, List<Expression> elements, Type type) {
     return new SeqDisplayExpr(origin, elements) { Type = type };
   }
 
@@ -1384,7 +1388,7 @@ internal sealed partial class PartialEvaluatorEngine {
     return IsLiteralLike(expr) || expr is LambdaExpr;
   }
 
-  private static bool AreAllInlineableArguments(IEnumerable<Expression> args) {
+  internal static bool AreAllInlineableArguments(IEnumerable<Expression> args) {
     foreach (var arg in args) {
       if (!IsInlineableArgument(arg)) {
         return false;
