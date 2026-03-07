@@ -629,7 +629,8 @@ internal sealed partial class PartialEvaluatorEngine {
         return false;
       }
 
-      var hasFunctionCallInRange = ContainsAnyFunctionCall(setComprehension.Range);
+      var effectiveRange = QuantifierBounds.ConjoinWithImpliedTypeConstraints(setComprehension.BoundVars, setComprehension.Range, setComprehension.Origin);
+      var hasFunctionCallInRange = ContainsAnyFunctionCall(effectiveRange);
 
       if (!TryGetFiniteIntBoundFromComprehension(setComprehension, out var lower, out var upper)) {
         return false;
@@ -653,9 +654,7 @@ internal sealed partial class PartialEvaluatorEngine {
           [boundVar] = CreateIntLiteral(setComprehension.Origin, value, boundVar.Type)
         };
         var substituter = new Substituter(null, substMap, null, null, engine.systemModuleManager);
-        var instantiatedRange = setComprehension.Range == null
-          ? Expression.CreateBoolLiteral(setComprehension.Origin, true)
-          : substituter.Substitute(setComprehension.Range);
+        var instantiatedRange = substituter.Substitute(effectiveRange);
         var simplifiedRange = SimplifyExpression(instantiatedRange, simplificationState);
 
         Expression addend;
@@ -980,6 +979,10 @@ internal sealed partial class PartialEvaluatorEngine {
         return false;
       }
 
+      var effectiveAntecedent = QuantifierBounds.ConjoinWithImpliedTypeConstraints(forallExpr.BoundVars, implication.E0, forallExpr.Origin);
+      var effectiveBody = Expression.CreateImplies(effectiveAntecedent, implication.E1);
+      effectiveBody.Type = Type.Bool;
+
       const int peelCount = 1;
       var simplifyState = state.WithDepth(Math.Max(0, state.Depth - 1));
       var instantiatedConjuncts = new List<Expression>(peelCount + 1);
@@ -989,7 +992,7 @@ internal sealed partial class PartialEvaluatorEngine {
           [boundVar] = CreateIntLiteral(forallExpr.Origin, value, boundVar.Type)
         };
         var substituter = new Substituter(null, substMap, null, null, engine.systemModuleManager);
-        var instantiatedBody = substituter.Substitute(implication.E1);
+        var instantiatedBody = substituter.Substitute(effectiveBody);
         var simplifiedBody = SimplifyExpression(instantiatedBody, simplifyState);
         if (Expression.IsBoolLiteral(simplifiedBody, out var bodyValue)) {
           if (!bodyValue) {
@@ -1051,6 +1054,7 @@ internal sealed partial class PartialEvaluatorEngine {
       var combined = existsExpr.Range == null
         ? existsExpr.Term
         : Expression.CreateAnd(existsExpr.Range, existsExpr.Term);
+      combined = QuantifierBounds.ConjoinWithImpliedTypeConstraints(existsExpr.BoundVars, combined, existsExpr.Origin);
       var conjuncts = new List<Expression>();
       QuantifierBounds.CollectConjuncts(combined, conjuncts);
 
@@ -1102,6 +1106,7 @@ internal sealed partial class PartialEvaluatorEngine {
       var combined = existsExpr.Range == null
         ? existsExpr.Term
         : Expression.CreateAnd(existsExpr.Range, existsExpr.Term);
+      combined = QuantifierBounds.ConjoinWithImpliedTypeConstraints(existsExpr.BoundVars, combined, existsExpr.Origin);
       var conjuncts = new List<Expression>();
       QuantifierBounds.CollectConjuncts(combined, conjuncts);
 
@@ -1251,7 +1256,7 @@ internal sealed partial class PartialEvaluatorEngine {
         return false;
       }
 
-      var logicalBody = forallExpr.LogicalBody(bypassSplitQuantifier: true);
+      var logicalBody = QuantifierBounds.GetLogicalBodyWithImpliedTypeConstraints(forallExpr);
       if (logicalBody == null) {
         return false;
       }
@@ -1959,7 +1964,7 @@ internal sealed partial class PartialEvaluatorEngine {
       setComprehension.Range = SimplifyExpression(setComprehension.Range, state);
       setComprehension.Term = SimplifyExpression(setComprehension.Term, state);
       setComprehension.Bounds = SimplifyBounds(setComprehension.Bounds, state);
-      if (TrySimplifyMapKeySetComprehension(setComprehension, out var keySetDisplay)) {
+      if (TrySimplifyMapKeySetComprehension(setComprehension, state, out var keySetDisplay)) {
         SetReplacement(setComprehension, keySetDisplay);
         return false;
       }
@@ -1969,7 +1974,18 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
-    private bool TrySimplifyMapKeySetComprehension(SetComprehension setComprehension, out SetDisplayExpr setDisplay) {
+    private bool IsInImpliedTypeDomain(BoundVar boundVar, Expression value, PartialEvalState state) {
+      var typeConstraint = QuantifierBounds.GetImpliedTypeConstraint(boundVar);
+      var substMap = new Dictionary<IVariable, Expression>(1) {
+        [boundVar] = value
+      };
+      var substituter = new Substituter(null, substMap, null, null, engine.systemModuleManager);
+      var instantiatedConstraint = substituter.Substitute(typeConstraint);
+      var simplifiedConstraint = SimplifyExpression(instantiatedConstraint, state.WithDepth(Math.Max(0, state.Depth - 1)));
+      return Expression.IsBoolLiteral(simplifiedConstraint, out var isInDomain) && isInDomain;
+    }
+
+    private bool TrySimplifyMapKeySetComprehension(SetComprehension setComprehension, PartialEvalState state, out SetDisplayExpr setDisplay) {
       setDisplay = null;
       if (setComprehension.BoundVars.Count != 1 || setComprehension.Range == null) {
         return false;
@@ -2008,13 +2024,17 @@ internal sealed partial class PartialEvaluatorEngine {
         return false;
       }
 
+      if (!TryNormalizeLiteralMapEntries(mapDisplay, out var normalizedEntries)) {
+        return false;
+      }
+
       var keys = new List<Expression>();
-      foreach (var entry in mapDisplay.Elements) {
+      foreach (var entry in normalizedEntries) {
         if (!Expression.IsIntLiteral(entry.B, out var multiplicity)) {
           return false;
         }
 
-        if (multiplicity > 0) {
+        if (multiplicity > 0 && IsInImpliedTypeDomain(boundVar, entry.A, state)) {
           keys.Add(entry.A);
         }
       }
@@ -2256,27 +2276,8 @@ internal sealed partial class PartialEvaluatorEngine {
 
     private static bool TrySimplifyArbitraryElement(FunctionCallExpr callExpr, out Expression simplified) {
       simplified = null;
-      if (callExpr.Function == null || !string.Equals(callExpr.Function.Name, "ArbitraryElement", StringComparison.Ordinal)) {
-        return false;
-      }
-      if (callExpr.Args.Count != 1) {
-        return false;
-      }
-      if (!TryGetSetDisplayLiteral(callExpr.Args[0], out var setDisplay)) {
-        return false;
-      }
-      if (!AllElementsAreLiterals(setDisplay.Elements)) {
-        return false;
-      }
-      var distinct = new LiteralSet(setDisplay.Elements);
-      if (distinct.Count != 1) {
-        return false;
-      }
-      simplified = distinct.Elements[0];
-      if (simplified.Type == null) {
-        simplified.Type = callExpr.Type;
-      }
-      return true;
+      // This rewrite stays disabled until we can compare the exact builtin declaration identity.
+      return false;
     }
 
     private static bool TryGetSliceBounds(SeqSelectExpr expr, int length, out int start, out int end) {

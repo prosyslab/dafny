@@ -1,3 +1,4 @@
+using System.Numerics;
 using System.Reflection;
 using Microsoft.Dafny;
 
@@ -158,12 +159,6 @@ function {:fuel 100} FoldI<T, U>(s: seq<T>, unit: U, f: (int, U, T) -> U): U
   FoldIFrom(0, s, unit, f)
 }
 
-function {:fuel 100} Fold_i<T, U>(from: int, s: seq<T>, unit: U, f: (int, U, T) -> U): U
-  decreases *
-{
-  FoldIFrom(from, s, unit, f)
-}
-
 function {:fuel 100} Filter<T>(s: seq<T>, p: T -> bool): seq<T>
   decreases *
 {
@@ -182,12 +177,6 @@ function {:fuel 100} FilterI<T>(s: seq<T>, p: (int, T) -> bool): seq<T>
   decreases *
 {
   FilterIFrom(0, s, p)
-}
-
-function {:fuel 100} Filter_i<T>(from: int, s: seq<T>, p: (int, T) -> bool): seq<T>
-  decreases *
-{
-  FilterIFrom(from, s, p)
 }
 
 predicate {:fuel 100} IsDigit(c: char)
@@ -400,8 +389,9 @@ function {:fuel 100} StringToInt(s: string): int
     return (interpreted, args[3] as Expression);
   }
 
-  private static async Task AssertInterpretsToInt(string methodSignature, string methodBody, string functionName, int expected) {
-    var (interpreted, interpretedExpression) = await TryInterpret(methodSignature, methodBody, functionName);
+  private static async Task AssertInterpretsToInt(string methodSignature, string methodBody, string functionName, int expected,
+    string extraDeclarations = "") {
+    var (interpreted, interpretedExpression) = await TryInterpret(methodSignature, methodBody, functionName, extraDeclarations);
     Assert.True(interpreted);
     Assert.NotNull(interpretedExpression);
     Assert.True(Expression.IsIntLiteral(interpretedExpression!, out var value));
@@ -602,6 +592,20 @@ function {:fuel 100} StringToInt(s: string): int
   }
 
   [Fact]
+  public void TestModuloWithDivisibleNegativeDividend() {
+    var interpreterType = typeof(Program).Assembly.GetType("Microsoft.Dafny.HelperFunctionInterpreter");
+    Assert.NotNull(interpreterType);
+
+    var moduloMethod = interpreterType!.GetMethod(
+      "ComputeDafnyModulo",
+      BindingFlags.Static | BindingFlags.NonPublic);
+    Assert.NotNull(moduloMethod);
+
+    var result = moduloMethod!.Invoke(null, new object[] { new BigInteger(-4), new BigInteger(2) });
+    Assert.Equal(BigInteger.Zero, Assert.IsType<BigInteger>(result));
+  }
+
+  [Fact]
   public async Task TestLCMBasic() {
     await AssertInterpretsToInt("method Entry()", "assert LCM(4, 6) == 12;", "LCM", 12);
   }
@@ -770,11 +774,6 @@ function {:fuel 100} StringToInt(s: string): int
   }
 
   [Fact]
-  public async Task TestFold_iBasic() {
-    await AssertInterpretsToInt("method Entry()", "assert Fold_i(3, [2, 3], 1, (i, acc, x) => acc + i + x) == 13;", "Fold_i", 13);
-  }
-
-  [Fact]
   public async Task TestFilterBasic() {
     await AssertInterpretsToIntSeq("method Entry()", "assert Filter([1, 2, 3, 4], x => x % 2 == 0) == [2, 4];", "Filter", 2, 4);
   }
@@ -797,11 +796,6 @@ function {:fuel 100} StringToInt(s: string): int
   [Fact]
   public async Task TestFilterIBasic() {
     await AssertInterpretsToIntSeq("method Entry()", "assert FilterI([10, 11, 12, 13], (i, x) => i % 2 == 1) == [11, 13];", "FilterI", 11, 13);
-  }
-
-  [Fact]
-  public async Task TestFilter_iBasic() {
-    await AssertInterpretsToIntSeq("method Entry()", "assert Filter_i(1, [10, 11, 12, 13], (i, x) => i % 2 == 0) == [11, 13];", "Filter_i", 11, 13);
   }
 
   [Fact]

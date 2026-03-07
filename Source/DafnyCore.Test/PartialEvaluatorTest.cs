@@ -74,6 +74,18 @@ public class PartialEvaluatorTest {
     return (verified, totalStats);
   }
 
+  private static DafnyOptions CreatePartialEvalOptions(string entry = "Entry", uint inlineDepth = 2U,
+    uint? unrollBoundedQuantifiers = null) {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, entry);
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, inlineDepth);
+    if (unrollBoundedQuantifiers.HasValue) {
+      options.Set(CommonOptionBag.UnrollBoundedQuantifiers, unrollBoundedQuantifiers.Value);
+    }
+    return options;
+  }
+
   private static IEnumerable<Statement> DescendantStatements(Statement root) {
     var stack = new Stack<Statement>();
     stack.Push(root);
@@ -287,6 +299,36 @@ method Entry() {
     Assert.DoesNotContain("SpecSeq", callNames);
     Assert.DoesNotContain("SpecSet", callNames);
     Assert.DoesNotContain("SpecMap", callNames);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_CachedLiteralsPreserveOriginalTypes() {
+    var options = CreatePartialEvalOptions();
+
+    var program = await ParseAndResolve(@"
+function BvValue(): bv8 { 3 }
+
+method Entry() {
+  var first: bv8 := BvValue();
+  var second: bv8 := BvValue();
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var declarations = Assert.IsType<BlockStmt>(entry.Body).Body.OfType<VarDeclStmt>().ToList();
+    Assert.Equal(2, declarations.Count);
+
+    foreach (var declaration in declarations) {
+      var assign = Assert.IsType<AssignStatement>(declaration.Assign);
+      var rhs = Assert.IsType<ExprRhs>(Assert.Single(assign.Rhss)).Expr;
+      Assert.True(Expression.IsIntLiteral(rhs, out var value));
+      Assert.Equal(3, (int)value);
+
+      var bitvectorType = rhs.Type?.NormalizeExpand().AsBitVectorType;
+      Assert.NotNull(bitvectorType);
+      Assert.Equal(8, bitvectorType!.Width);
+    }
   }
 
   [Fact]
@@ -504,6 +546,113 @@ method Entry() {
       Assert.True(Expression.IsBoolLiteral(assertExpr, out var value));
       Assert.True(value);
     });
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_PointAssignmentsRespectSubsetTypeDomains() {
+    var options = CreatePartialEvalOptions();
+
+    var (verified, _) = await ParseResolveAndVerify(@"
+type Pos = x: int | x > 0 witness 1
+
+method Entry() {
+  assert !(exists x: Pos :: x == 0);
+}
+", options);
+
+    Assert.True(verified);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_DisjunctivePointAssignmentsRespectSubsetTypeDomains() {
+    var options = CreatePartialEvalOptions();
+
+    var (verified, _) = await ParseResolveAndVerify(@"
+type Pos = x: int | x > 0 witness 1
+
+method Entry() {
+  assert !(exists x: Pos :: x == 0 || x == -1);
+}
+", options);
+
+    Assert.True(verified);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_FiniteSupportForallRespectsSubsetTypeDomains() {
+    var options = CreatePartialEvalOptions();
+
+    var (verified, _) = await ParseResolveAndVerify(@"
+type Pos = x: int | x > 0 witness 1
+
+method Entry() {
+  assert forall x: Pos :: x != 0;
+}
+", options);
+
+    Assert.True(verified);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_PeeledForallRespectsSubsetTypeDomains() {
+    var options = CreatePartialEvalOptions();
+
+    var (verified, _) = await ParseResolveAndVerify(@"
+type Pos = x: int | x > 0 witness 1
+
+method Entry() {
+  assert forall x: Pos :: x >= 0 ==> x != 0;
+}
+", options);
+
+    Assert.True(verified);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_IdentitySetCardinalityRespectsSubsetTypeDomains() {
+    var options = CreatePartialEvalOptions();
+
+    var (verified, _) = await ParseResolveAndVerify(@"
+type Pos = x: int | x > 0 witness 1
+
+method Entry() {
+  assert |set x: Pos | -1 <= x <= 1 :: x| == 1;
+}
+", options);
+
+    Assert.True(verified);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_MaterializedSetComprehensionRespectsSubsetTypeDomains() {
+    var options = CreatePartialEvalOptions(unrollBoundedQuantifiers: 20U);
+
+    var (verified, _) = await ParseResolveAndVerify(@"
+type Pos = x: int | x > 0 witness 1
+
+method Entry() {
+  assert (set x: Pos | x in {0, 1, 2} :: x) == {1, 2};
+}
+", options);
+
+    Assert.True(verified);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_DoesNotRewriteUserDefinedArbitraryElementByName() {
+    var options = CreatePartialEvalOptions();
+
+    var (verified, _) = await ParseResolveAndVerify(@"
+function ArbitraryElement(s: set<int>): int {
+  0
+}
+
+method Entry() {
+  assert ArbitraryElement({1}) == 0;
+}
+", options);
+
+    Assert.True(verified);
   }
 
   [Fact]
@@ -1092,6 +1241,40 @@ function Entry(): bool {
   }
 
   [Fact]
+  public async Task PartialEvaluation_CanonicalizesEscapedStringEqualityAndPrefix() {
+    var options = CreatePartialEvalOptions(inlineDepth: 1U);
+
+    var program = await ParseAndResolve(@"
+function Entry(): bool {
+  ""\u0041"" == ""A"" &&
+  ""\u0041"" <= ""AB"" &&
+  ""\u0041"" < ""AB""
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Function>().Where(f => f.Name == "Entry"));
+    Assert.True(Expression.IsBoolLiteral(entry.Body!, out var value) && value);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_CanonicalizesEscapedStringsInCollectionOperations() {
+    var options = CreatePartialEvalOptions(inlineDepth: 1U, unrollBoundedQuantifiers: 20U);
+
+    var program = await ParseAndResolve(@"
+function Entry(): bool {
+  {""\u0041""} == {""A""} &&
+  map[""\u0041"" := 1] == map[""A"" := 1] &&
+  (set s: string | s in {""\u0041"", ""A""} :: s) == {""A""}
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Function>().Where(f => f.Name == "Entry"));
+    Assert.True(Expression.IsBoolLiteral(entry.Body!, out var value) && value);
+  }
+
+  [Fact]
   public async Task PartialEvaluation_FoldsSeqDisplayOperations() {
     // EXPECTED:
     // function Entry(): bool { true }
@@ -1646,6 +1829,26 @@ method Entry() {
   }
 
   [Fact]
+  public async Task PartialEvaluation_UsesEuclideanModuloForDivisibleNegativeDividend() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 1U);
+
+    var program = await ParseAndResolve(@"
+method Entry() {
+  assert -4 % 2 == 0;
+}
+", options);
+
+    var defaultClass = Assert.Single(program.DefaultModuleDef.TopLevelDecls.OfType<DefaultClassDecl>());
+    var entry = Assert.Single(defaultClass.Members.OfType<Method>().Where(m => m.Name == "Entry"));
+    var assertStmt = Assert.Single(Assert.IsType<BlockStmt>(entry.Body).Body.OfType<AssertStmt>());
+
+    Assert.True(Expression.IsBoolLiteral(assertStmt.Expr, out var value) && value);
+  }
+
+  [Fact]
   public async Task PartialEvaluation_FoldsMapBitvectorAndMapCardOperations() {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
@@ -1673,6 +1876,19 @@ function Entry(): bool {
     Assert.NotNull(entry.Body);
 
     Assert.True(Expression.IsBoolLiteral(entry.Body!, out var value) && value);
+  }
+
+  [Fact]
+  public async Task PartialEvaluation_MapKeySetComprehensionUsesLastWriteWinsNormalization() {
+    var options = CreatePartialEvalOptions(unrollBoundedQuantifiers: 20U);
+
+    var (verified, _) = await ParseResolveAndVerify(@"
+method Entry() {
+  assert (set x: int | x in map[1 := 1, 1 := 0] && map[1 := 1, 1 := 0][x] > 0 :: x) == {};
+}
+", options);
+
+    Assert.True(verified);
   }
 
   [Fact]

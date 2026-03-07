@@ -382,7 +382,7 @@ internal sealed partial class PartialEvaluatorEngine {
           // Match Dafny integer folding semantics: Euclidean modulo.
           var divisor = BigInteger.Abs(right);
           var remainder = left % divisor;
-          if (left < 0) {
+          if (remainder < 0) {
             remainder += divisor;
           }
           return CreateIntLiteral(binary.Origin, remainder);
@@ -510,8 +510,10 @@ internal sealed partial class PartialEvaluatorEngine {
   }
 
   private Expression SimplifySeqEquality(BinaryExpr binary, bool isEq) {
-    if (TryGetStringLiteral(binary.E0, out var leftString, out _) && TryGetStringLiteral(binary.E1, out var rightString, out _)) {
-      return CreateBoolLiteral(binary.Origin, isEq ? leftString == rightString : leftString != rightString);
+    if (TryGetStringLiteral(binary.E0, out var leftString, out var leftVerbatim) &&
+        TryGetStringLiteral(binary.E1, out var rightString, out var rightVerbatim)) {
+      var equal = StringLiteralsSemanticallyEqual(leftString, leftVerbatim, rightString, rightVerbatim);
+      return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
     }
 
     if (TryGetSeqDisplayLiteral(binary.E0, out var leftSeq) && TryGetSeqDisplayLiteral(binary.E1, out var rightSeq) &&
@@ -530,9 +532,11 @@ internal sealed partial class PartialEvaluatorEngine {
   }
 
   private static Expression SimplifySeqPrefix(BinaryExpr binary, bool properPrefix) {
-    if (TryGetStringLiteral(binary.E0, out var leftString, out _) && TryGetStringLiteral(binary.E1, out var rightString, out _)) {
-      var isPrefix = rightString.StartsWith(leftString, StringComparison.Ordinal);
-      var isProper = isPrefix && leftString.Length < rightString.Length;
+    if (TryGetStringLiteral(binary.E0, out var leftString, out var leftVerbatim) &&
+        TryGetStringLiteral(binary.E1, out var rightString, out var rightVerbatim)) {
+      var leftCodePoints = GetSemanticStringCodePoints(leftString, leftVerbatim);
+      var rightCodePoints = GetSemanticStringCodePoints(rightString, rightVerbatim);
+      var isPrefix = CodePointSequenceHasPrefix(leftCodePoints, rightCodePoints, out var isProper);
       return CreateBoolLiteral(binary.Origin, properPrefix ? isProper : isPrefix);
     }
 
@@ -1430,6 +1434,14 @@ internal sealed partial class PartialEvaluatorEngine {
     if (TryGetCharLiteral(left, out var leftChar) && TryGetCharLiteral(right, out var rightChar)) {
       return leftChar == rightChar;
     }
+    if (left is StringLiteralExpr leftStringLiteral && right is StringLiteralExpr rightStringLiteral &&
+        leftStringLiteral.Value is string leftStringValue && rightStringLiteral.Value is string rightStringValue) {
+      return StringLiteralsSemanticallyEqual(
+        leftStringValue,
+        leftStringLiteral.IsVerbatim,
+        rightStringValue,
+        rightStringLiteral.IsVerbatim);
+    }
     if (left is LiteralExpr leftLiteral && right is LiteralExpr rightLiteral) {
       return Equals(leftLiteral.Value, rightLiteral.Value);
     }
@@ -1485,6 +1497,39 @@ internal sealed partial class PartialEvaluatorEngine {
       }
     }
     return true;
+  }
+
+  private static bool CodePointSequenceHasPrefix(IReadOnlyList<int> prefix, IReadOnlyList<int> sequence, out bool isProper) {
+    isProper = false;
+    if (prefix.Count > sequence.Count) {
+      return false;
+    }
+    for (var index = 0; index < prefix.Count; index++) {
+      if (prefix[index] != sequence[index]) {
+        return false;
+      }
+    }
+    isProper = prefix.Count < sequence.Count;
+    return true;
+  }
+
+  private static List<int> GetSemanticStringCodePoints(string value, bool isVerbatim) {
+    return Util.UnescapedCharacters(DafnyOptions.DefaultImmutableOptions, value, isVerbatim).ToList();
+  }
+
+  private static bool StringLiteralsSemanticallyEqual(string leftValue, bool leftVerbatim, string rightValue, bool rightVerbatim) {
+    var leftCodePoints = GetSemanticStringCodePoints(leftValue, leftVerbatim);
+    var rightCodePoints = GetSemanticStringCodePoints(rightValue, rightVerbatim);
+    return CodePointSequencesEqual(leftCodePoints, rightCodePoints);
+  }
+
+  private static int ComputeSemanticStringHash(string value, bool isVerbatim) {
+    var hash = new HashCode();
+    hash.Add(typeof(StringLiteralExpr));
+    foreach (var codePoint in GetSemanticStringCodePoints(value, isVerbatim)) {
+      hash.Add(codePoint);
+    }
+    return hash.ToHashCode();
   }
 
   private static bool TupleLiteralsEqual(DatatypeValue left, DatatypeValue right) {
@@ -1670,12 +1715,12 @@ internal sealed partial class PartialEvaluatorEngine {
       }
 
       if (Expression.IsIntLiteral(literal, out var intValue)) {
-        cached = new CachedLiteral(CachedLiteralKind.Int, intValue, default, default, default);
+        cached = new CachedLiteral(CachedLiteralKind.Int, intValue, default, default, literal.Type);
         return true;
       }
 
       if (Expression.IsBoolLiteral(literal, out var boolValue)) {
-        cached = new CachedLiteral(CachedLiteralKind.Bool, default, boolValue, default, default);
+        cached = new CachedLiteral(CachedLiteralKind.Bool, default, boolValue, default, literal.Type);
         return true;
       }
 
@@ -1694,12 +1739,17 @@ internal sealed partial class PartialEvaluatorEngine {
 
     public Expression CreateLiteral(IOrigin origin) {
       return Kind switch {
-        CachedLiteralKind.Int => CreateIntLiteral(origin, IntValue),
-        CachedLiteralKind.Bool => Expression.CreateBoolLiteral(origin, BoolValue),
+        CachedLiteralKind.Int => CreateIntLiteral(origin, IntValue, LiteralType),
+        CachedLiteralKind.Bool => SetLiteralType(CreateBoolLiteral(origin, BoolValue), LiteralType),
         CachedLiteralKind.Char => CreateCharLiteral(origin, StringValue, LiteralType),
         CachedLiteralKind.String => CreateStringLiteral(origin, StringValue, LiteralType, BoolValue),
         _ => null
       };
+    }
+
+    private static Expression SetLiteralType(Expression literal, Type literalType) {
+      literal.Type = literalType;
+      return literal;
     }
   }
 
@@ -1728,6 +1778,9 @@ internal sealed partial class PartialEvaluatorEngine {
     private static int ComputeHash(Expression expr) {
       if (expr is CharLiteralExpr && TryGetCharLiteral(expr, out var ch)) {
         return HashCode.Combine(typeof(CharLiteralExpr), (int)ch);
+      }
+      if (expr is StringLiteralExpr stringLiteral && stringLiteral.Value is string stringValue) {
+        return ComputeSemanticStringHash(stringValue, stringLiteral.IsVerbatim);
       }
       if (expr is LiteralExpr lit) {
         return HashCode.Combine(typeof(LiteralExpr), lit.Value);

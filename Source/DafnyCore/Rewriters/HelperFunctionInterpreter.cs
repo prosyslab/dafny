@@ -88,11 +88,9 @@ internal sealed class HelperFunctionInterpreter {
     RegisterHandler(moduleFullName, "Fold", TryInterpretFold);
     RegisterHandler(moduleFullName, "FoldIFrom", TryInterpretFoldIFrom);
     RegisterHandler(moduleFullName, "FoldI", TryInterpretFoldI);
-    RegisterHandler(moduleFullName, "Fold_i", TryInterpretFold_i);
     RegisterHandler(moduleFullName, "Filter", TryInterpretFilter);
     RegisterHandler(moduleFullName, "FilterIFrom", TryInterpretFilterIFrom);
     RegisterHandler(moduleFullName, "FilterI", TryInterpretFilterI);
-    RegisterHandler(moduleFullName, "Filter_i", TryInterpretFilter_i);
     RegisterHandler(moduleFullName, "IsSorted", TryInterpretIsSorted);
     RegisterHandler(moduleFullName, "IsSortedDesc", TryInterpretIsSortedDesc);
     RegisterHandler(moduleFullName, "Count", TryInterpretCount);
@@ -1063,15 +1061,6 @@ internal sealed class HelperFunctionInterpreter {
     return true;
   }
 
-  private bool TryInterpretFold_i(
-    FunctionCallExpr callExpr,
-    Func<Expression, PartialEvaluatorEngine.PartialEvalState, Expression> simplifyExpression,
-    PartialEvaluatorEngine.PartialEvalState state,
-    out Expression interpreted) {
-    interpreted = null;
-    return TryInterpretFoldIFrom(callExpr, simplifyExpression, state, out interpreted);
-  }
-
   private bool TryInterpretFilter(
     FunctionCallExpr callExpr,
     Func<Expression, PartialEvaluatorEngine.PartialEvalState, Expression> simplifyExpression,
@@ -1172,15 +1161,6 @@ internal sealed class HelperFunctionInterpreter {
 
     interpreted = CreateSeqResult(callExpr.Origin, filtered, callExpr.Type);
     return true;
-  }
-
-  private bool TryInterpretFilter_i(
-    FunctionCallExpr callExpr,
-    Func<Expression, PartialEvaluatorEngine.PartialEvalState, Expression> simplifyExpression,
-    PartialEvaluatorEngine.PartialEvalState state,
-    out Expression interpreted) {
-    interpreted = null;
-    return TryInterpretFilterIFrom(callExpr, simplifyExpression, state, out interpreted);
   }
 
   private bool TryInterpretIsSorted(
@@ -1580,7 +1560,7 @@ internal sealed class HelperFunctionInterpreter {
   private static BigInteger ComputeDafnyModulo(BigInteger left, BigInteger right) {
     var divisor = BigInteger.Abs(right);
     var remainder = left % divisor;
-    if (left < 0) {
+    if (remainder < 0) {
       remainder += divisor;
     }
 
