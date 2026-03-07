@@ -63,6 +63,48 @@ internal sealed class QuantifierBounds {
     return expr;
   }
 
+  internal static Expression GetImpliedTypeConstraint(BoundVar boundVar) {
+    var constraint = ModuleResolver.GetImpliedTypeConstraint(boundVar, boundVar.Type);
+    constraint.Type ??= Type.Bool;
+    return constraint;
+  }
+
+  internal static Expression ConjoinWithImpliedTypeConstraints(IReadOnlyList<BoundVar> boundVars, Expression? range, IOrigin origin) {
+    Expression? combined = range;
+    foreach (var boundVar in boundVars) {
+      var constraint = GetImpliedTypeConstraint(boundVar);
+      if (Expression.IsBoolLiteral(constraint, out var isTrue) && isTrue) {
+        continue;
+      }
+
+      combined = combined == null ? constraint : Expression.CreateAnd(constraint, combined);
+      combined.Type = Type.Bool;
+    }
+
+    if (combined == null) {
+      combined = Expression.CreateBoolLiteral(origin, true);
+      combined.Type = Type.Bool;
+    } else {
+      combined.Type ??= Type.Bool;
+    }
+
+    return combined;
+  }
+
+  internal static Expression GetLogicalBodyWithImpliedTypeConstraints(QuantifierExpr quantifierExpr) {
+    var effectiveRange = ConjoinWithImpliedTypeConstraints(quantifierExpr.BoundVars, quantifierExpr.Range, quantifierExpr.Origin);
+    if (Expression.IsBoolLiteral(effectiveRange, out var rangeValue) && rangeValue) {
+      quantifierExpr.Term.Type ??= Type.Bool;
+      return quantifierExpr.Term;
+    }
+
+    var logicalBody = quantifierExpr is ExistsExpr
+      ? Expression.CreateAnd(effectiveRange, quantifierExpr.Term)
+      : Expression.CreateImplies(effectiveRange, quantifierExpr.Term);
+    logicalBody.Type = Type.Bool;
+    return logicalBody;
+  }
+
   internal static void CollectConjuncts(Expression expr, List<Expression> conjuncts) {
     expr = NormalizeForPattern(expr);
     if (expr is BinaryExpr binaryExpr && IsConjunction(binaryExpr)) {
@@ -124,6 +166,10 @@ internal sealed class QuantifierBounds {
       return true;
     }
     switch (left) {
+      case StringLiteralExpr leftString when right is StringLiteralExpr rightString
+        && leftString.Value is string leftStringValue
+        && rightString.Value is string rightStringValue:
+        return StringLiteralsSemanticallyEqual(leftStringValue, leftString.IsVerbatim, rightStringValue, rightString.IsVerbatim);
       case LiteralExpr leftLiteral when right is LiteralExpr rightLiteral:
         return leftLiteral.GetType() == rightLiteral.GetType() && Equals(leftLiteral.Value, rightLiteral.Value);
       case DisplayExpression leftDisplay when right is DisplayExpression rightDisplay:
@@ -187,6 +233,9 @@ internal sealed class QuantifierBounds {
 
     private static int ComputeHash(Expression expr) {
       expr = StripConcreteSyntax(expr);
+      if (expr is StringLiteralExpr stringLiteral && stringLiteral.Value is string stringValue) {
+        return ComputeSemanticStringHash(stringValue, stringLiteral.IsVerbatim);
+      }
       if (expr is LiteralExpr literal) {
         return HashCode.Combine(literal.GetType(), literal.Value);
       }
@@ -223,6 +272,33 @@ internal sealed class QuantifierBounds {
       }
       return expr.GetType().GetHashCode();
     }
+  }
+
+  private static List<int> GetSemanticStringCodePoints(string value, bool isVerbatim) {
+    return Util.UnescapedCharacters(DafnyOptions.DefaultImmutableOptions, value, isVerbatim).ToList();
+  }
+
+  private static bool StringLiteralsSemanticallyEqual(string leftValue, bool leftVerbatim, string rightValue, bool rightVerbatim) {
+    var leftCodePoints = GetSemanticStringCodePoints(leftValue, leftVerbatim);
+    var rightCodePoints = GetSemanticStringCodePoints(rightValue, rightVerbatim);
+    if (leftCodePoints.Count != rightCodePoints.Count) {
+      return false;
+    }
+    for (var index = 0; index < leftCodePoints.Count; index++) {
+      if (leftCodePoints[index] != rightCodePoints[index]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static int ComputeSemanticStringHash(string value, bool isVerbatim) {
+    var hash = new HashCode();
+    hash.Add(typeof(StringLiteralExpr));
+    foreach (var codePoint in GetSemanticStringCodePoints(value, isVerbatim)) {
+      hash.Add(codePoint);
+    }
+    return hash.ToHashCode();
   }
 
   private static bool AddUniqueLiteral(List<Expression> uniques, HashSet<Expression> uniqueSet, Expression candidate) {
@@ -272,7 +348,7 @@ internal sealed class QuantifierBounds {
     }
 
     var bounds = TryGetBoundsOrDiscover(quantifierExpr.BoundVars, quantifierExpr.Bounds,
-      () => quantifierExpr.LogicalBody(bypassSplitQuantifier: true), quantifierExpr is ExistsExpr);
+      () => GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr), quantifierExpr is ExistsExpr);
     if (bounds == null || bounds.Count != quantifierExpr.BoundVars.Count) {
       return false;
     }
@@ -324,7 +400,7 @@ internal sealed class QuantifierBounds {
 
     // Use the original logical body and simplify per-instance after substitution. This naturally drops
     // guaranteed bounds like 0 <= i < N from the instantiated formula.
-    var logicalBody = quantifierExpr.LogicalBody(bypassSplitQuantifier: true);
+    var logicalBody = GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr);
     if (logicalBody.Type == null) {
       logicalBody.Type = Type.Bool;
     }
@@ -440,8 +516,9 @@ internal sealed class QuantifierBounds {
       return false;
     }
 
+    var effectiveRange = ConjoinWithImpliedTypeConstraints(setComprehension.BoundVars, setComprehension.Range, setComprehension.Origin);
     var bounds = TryGetBoundsOrDiscover(setComprehension.BoundVars, setComprehension.Bounds,
-      () => setComprehension.Range, polarity: true);
+      () => effectiveRange, polarity: true);
     if (bounds == null || bounds.Count != setComprehension.BoundVars.Count) {
       return false;
     }
@@ -449,7 +526,7 @@ internal sealed class QuantifierBounds {
       if (setComprehension.Range == null) {
         return false;
       }
-      var discovered = ModuleResolver.DiscoverBestBounds_MultipleVars(setComprehension.BoundVars, setComprehension.Range, true);
+      var discovered = ModuleResolver.DiscoverBestBounds_MultipleVars(setComprehension.BoundVars, effectiveRange, true);
       if (discovered == null || discovered.Count != setComprehension.BoundVars.Count) {
         return false;
       }
@@ -461,8 +538,8 @@ internal sealed class QuantifierBounds {
       var bv = setComprehension.BoundVars[i];
       var bound = bounds[i];
       ConcreteDomain domain;
-      if (bv.Type.NormalizeExpand().IsCharType && setComprehension.Range != null &&
-          TryGetConcreteCharDomainFromRange(setComprehension.Range, bv, out var charDomain)) {
+      if (bv.Type.NormalizeExpand().IsCharType &&
+          TryGetConcreteCharDomainFromRange(effectiveRange, bv, out var charDomain)) {
         domain = charDomain;
       } else if (!TryGetConcreteDomain(bv, bound, simplify, out domain)) {
         return false;
@@ -477,7 +554,7 @@ internal sealed class QuantifierBounds {
     var results = new List<Expression>();
     var substMap = new Dictionary<IVariable, Expression>();
     var typeMap = new Dictionary<TypeParameter, Type>();
-    var range = setComprehension.Range;
+    var range = effectiveRange;
     var term = setComprehension.Term;
 
     bool HandleInstance(Substituter substituter) {
@@ -522,8 +599,9 @@ internal sealed class QuantifierBounds {
       return false;
     }
 
+    var effectiveRange = ConjoinWithImpliedTypeConstraints(mapComprehension.BoundVars, mapComprehension.Range, mapComprehension.Origin);
     var bounds = TryGetBoundsOrDiscover(mapComprehension.BoundVars, mapComprehension.Bounds,
-      () => mapComprehension.Range, polarity: true);
+      () => effectiveRange, polarity: true);
     if (bounds == null || bounds.Count != mapComprehension.BoundVars.Count) {
       return false;
     }
@@ -562,7 +640,7 @@ internal sealed class QuantifierBounds {
       if (maxInstances > 0 && resultEntries.Count >= maxInstances) {
         return false;
       }
-      if (!TryEvaluateRangeToBool(mapComprehension.Range, substituter, simplify, out var rangeValue)) {
+      if (!TryEvaluateRangeToBool(effectiveRange, substituter, simplify, out var rangeValue)) {
         return false;
       }
       if (!rangeValue) {
@@ -606,8 +684,9 @@ internal sealed class QuantifierBounds {
   private bool TryMaterializeMapComprehensionKeys(MapComprehension mapComprehension, Func<Expression, Expression> simplify,
     out List<Expression> keys) {
     keys = null!;
+    var effectiveRange = ConjoinWithImpliedTypeConstraints(mapComprehension.BoundVars, mapComprehension.Range, mapComprehension.Origin);
     var bounds = TryGetBoundsOrDiscover(mapComprehension.BoundVars, mapComprehension.Bounds,
-      () => mapComprehension.Range, polarity: true);
+      () => effectiveRange, polarity: true);
     if (bounds == null || bounds.Count != mapComprehension.BoundVars.Count) {
       return false;
     }
@@ -640,7 +719,7 @@ internal sealed class QuantifierBounds {
     var resultKeySet = new HashSet<Expression>(LiteralExpressionStructuralComparer.Instance);
     var substMap = new Dictionary<IVariable, Expression>();
     var typeMap = new Dictionary<TypeParameter, Type>();
-    var range = mapComprehension.Range;
+    var range = effectiveRange;
 
     bool HandleInstance(Substituter substituter) {
       if (!TryEvaluateRangeToBool(range, substituter, simplify, out var rangeValue)) {
@@ -1062,7 +1141,7 @@ internal sealed class QuantifierBounds {
       boundVarIndices[bv] = i;
     }
 
-    var logicalBody = quantifierExpr.LogicalBody(bypassSplitQuantifier: true);
+    var logicalBody = GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr);
     Expression rangeExpr = logicalBody;
     if (quantifierExpr is ForallExpr && logicalBody is BinaryExpr impExpr && IsImplication(impExpr)) {
       rangeExpr = impExpr.E0;
@@ -1123,7 +1202,7 @@ internal sealed class QuantifierBounds {
       }
     }
 
-    var logicalBody = quantifierExpr.LogicalBody(bypassSplitQuantifier: true);
+    var logicalBody = GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr);
     Expression rangeExpr = logicalBody;
     if (quantifierExpr is ForallExpr && logicalBody is BinaryExpr impExpr && IsImplication(impExpr)) {
       rangeExpr = impExpr.E0;
