@@ -51,11 +51,12 @@ public class CommonOptionBag {
       IsHidden = true
     };
 
-  public static readonly Option<uint> UnrollBoundedQuantifiers = new("--unroll-bounded-quantifiers", () => 0,
+  public static readonly Option<uint?> UnrollBoundedQuantifiers = new("--unroll-bounded-quantifiers", () => null,
     @"
 When verifying, expand bounded `forall`/`exists` quantifiers over `int` and `nat` by enumerating all values when the bounds are concrete.
 The argument is a per-quantifier limit on the total number of instantiated cases.
-0 (default) means no per-quantifier cap.".TrimStart()
+If this option is omitted, bounded-quantifier unrolling is disabled.
+0 means no per-quantifier cap.".TrimStart()
   ) {
     ArgumentHelpName = "max-instances"
   };
