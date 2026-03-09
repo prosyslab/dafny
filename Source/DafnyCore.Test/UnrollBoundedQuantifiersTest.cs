@@ -241,7 +241,10 @@ public class UnrollBoundedQuantifiersTest {
       .Any(binary => opcodeSet.Contains(binary.ResolvedOp));
   }
 
-  private static object CreateUnrollEngine(Program program, uint maxInstances) {
+  private static object CreateUnrollEngine(Program program, uint? maxInstances) {
+    if (maxInstances == null) {
+      throw new InvalidOperationException("Expected unroll-bounded-quantifiers to be set.");
+    }
     var rewriterType = typeof(UnrollBoundedQuantifiersRewriter);
     var partialEvaluatorType = rewriterType.Assembly.GetType("Microsoft.Dafny.PartialEvaluatorEngine");
     if (partialEvaluatorType == null) {
@@ -276,7 +279,7 @@ public class UnrollBoundedQuantifiersTest {
     if (ctor == null) {
       throw new InvalidOperationException("UnrollEngine constructor not found via reflection.");
     }
-    return ctor.Invoke(new object[] { program.SystemModuleManager, maxInstances, partialEvaluator });
+    return ctor.Invoke([program.SystemModuleManager, maxInstances.Value, partialEvaluator]);
   }
 
   private static Expression InvokeRewriteExpr(object engine, Expression expr) {
