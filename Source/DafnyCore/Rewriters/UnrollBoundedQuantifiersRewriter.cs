@@ -17,14 +17,14 @@ public sealed class UnrollBoundedQuantifiersRewriter : IRewriter {
   }
 
   internal override void PostResolveIntermediate(ModuleDefinition moduleDefinition) {
-    if (!Reporter.Options.Options.OptionArguments.ContainsKey(CommonOptionBag.UnrollBoundedQuantifiers)) {
+    var maxInstances = Reporter.Options.Get(CommonOptionBag.UnrollBoundedQuantifiers);
+    if (maxInstances == null) {
       return;
     }
-    var maxInstances = Reporter.Options.Get(CommonOptionBag.UnrollBoundedQuantifiers);
     var inlineDepth = Reporter.Options.Get(CommonOptionBag.PartialEvalInlineDepth);
     var effectiveScope = Type.GetScope() ?? moduleDefinition.VisibilityScope;
     var partialEvaluator = new PartialEvaluatorEngine(Reporter.Options, moduleDefinition, program.SystemModuleManager, inlineDepth, effectiveScope);
-    var engine = new UnrollEngine(program.SystemModuleManager, maxInstances, partialEvaluator);
+    var engine = new UnrollEngine(program.SystemModuleManager, maxInstances.Value, partialEvaluator);
     foreach (var decl in ModuleDefinition.AllCallablesIncludingPrefixDeclarations(moduleDefinition.TopLevelDecls)) {
       engine.Rewrite(decl);
     }

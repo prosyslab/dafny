@@ -71,9 +71,8 @@ internal sealed partial class PartialEvaluatorEngine {
   // ------------------- Quantifier bounds / finite materialization -------------------
 
   private uint GetPartialEvalUnrollCap() {
-    return options.Options.OptionArguments.ContainsKey(CommonOptionBag.UnrollBoundedQuantifiers)
-      ? options.Get(CommonOptionBag.UnrollBoundedQuantifiers)
-      : DefaultPartialEvalUnrollCap;
+    var unrollBoundedQuantifiers = options.Get(CommonOptionBag.UnrollBoundedQuantifiers);
+    return unrollBoundedQuantifiers ?? DefaultPartialEvalUnrollCap;
   }
 
   private QuantifierBounds GetQuantifierBounds() {
