@@ -332,6 +332,12 @@ true - Print debug information for the new type system.".TrimStart()) {
     "(experimental) Enable parser support for natural-language blocks.") {
     IsHidden = true
   };
+  public static readonly Option<DirectoryInfo> NaturalLanguageIntermediateProductsDirectory =
+    new("--natural-language-intermediate-products-directory",
+      "(experimental) Directory where natural-language intermediate artifacts are emitted.") {
+      ArgumentHelpName = "directory",
+      IsHidden = true
+    };
   public static readonly Option<bool> SpillTranslation = new("--spill-translation",
     @"In case the Dafny source code is translated to another language, emit that translation.") {
   };
@@ -702,6 +708,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
     OptionRegistry.RegisterGlobalOption(UseStandardLibraries, OptionCompatibility.OptionLibraryImpliesLocalError);
     OptionRegistry.RegisterGlobalOption(Referrers, OptionCompatibility.CheckOptionMatches);
     OptionRegistry.RegisterGlobalOption(NaturalLanguageBlocks, OptionCompatibility.CheckOptionMatches);
+    OptionRegistry.RegisterOption(NaturalLanguageIntermediateProductsDirectory, OptionScope.Cli);
     OptionRegistry.RegisterOption(TranslateStandardLibrary, OptionScope.Cli);
     OptionRegistry.RegisterOption(WarnAsErrors, OptionScope.Cli);
     OptionRegistry.RegisterOption(SuppressWarnings, OptionScope.Cli);

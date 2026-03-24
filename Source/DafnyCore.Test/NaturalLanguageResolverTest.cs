@@ -9,9 +9,6 @@ namespace DafnyCore.Test;
 
 public class NaturalLanguageResolverTest {
   private const string FullFilePath = "untitled:NaturalLanguageResolverTest";
-  private const string UnsupportedNaturalLanguageBlocksDiagnostic =
-    "Natural-language blocks are parsed experimentally, but semantics are not supported yet";
-
   private static async Task<(Program Program, BatchErrorReporter Reporter)> ParseAndResolve(string dafnyProgramText,
     DafnyOptions options) {
     var rootUri = new Uri(FullFilePath);
@@ -44,7 +41,7 @@ public class NaturalLanguageResolverTest {
   [Theory]
   [InlineData(false)]
   [InlineData(true)]
-  public async Task NaturalLanguageBlocks_ReportDeterministicResolverDiagnostics_InLegacyAndPreType(bool typeSystemRefresh) {
+  public async Task NaturalLanguageBlocks_DoNotReportPlaceholderWarnings_InLegacyAndPreType(bool typeSystemRefresh) {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     options.Set(CommonOptionBag.NaturalLanguageBlocks, true);
@@ -60,11 +57,10 @@ method UsesNaturalLanguageBlocks() {
     var diagnostics = reporter.AllMessages
       .Where(message => message.Level == ErrorLevel.Warning)
       .Where(message => message.Source == MessageSource.Resolver)
-      .Where(message => message.Message.Contains(UnsupportedNaturalLanguageBlocksDiagnostic))
       .ToList();
 
     Assert.Equal(0, reporter.ErrorCount);
-    Assert.Equal(2, diagnostics.Count);
+    Assert.Empty(diagnostics);
   }
 
   [Theory]

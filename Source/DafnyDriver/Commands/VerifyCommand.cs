@@ -60,6 +60,11 @@ public static class VerifyCommand {
       options.TrackVerificationCoverage = true;
     }
 
+    var preparationExitValue = await SynchronousCliCompilation.PrepareOptionsForCliCompilationAsync(options);
+    if (preparationExitValue != ExitValue.SUCCESS) {
+      return (int)preparationExitValue;
+    }
+
     var compilation = CliCompilation.Create(options);
     compilation.Start();
 

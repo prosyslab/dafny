@@ -116,7 +116,8 @@ public static class DafnyCommands {
     CommonOptionBag.LogLocation,
     CommonOptionBag.CheckSourceLocationConsistency,
     CommonOptionBag.Referrers,
-    CommonOptionBag.NaturalLanguageBlocks
+    CommonOptionBag.NaturalLanguageBlocks,
+    CommonOptionBag.NaturalLanguageIntermediateProductsDirectory
   });
 
   public static IReadOnlyList<Option> ResolverOptions = new List<Option>(new Option[] {
