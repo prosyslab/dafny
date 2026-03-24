@@ -18,9 +18,6 @@ using ResolutionContext = Microsoft.Dafny.ResolutionContext;
 namespace Microsoft.Dafny {
   public partial class PreTypeResolver {
     // ---------------------------------------- Expressions ----------------------------------------
-    private const string UnsupportedNaturalLanguageBlocksDiagnostic =
-      "Natural-language blocks are parsed experimentally, but semantics are not supported yet";
-
     public void ResolveExpression(Expression expr, ResolutionContext resolutionContext) {
       Contract.Requires(expr != null);
       Contract.Requires(resolutionContext != null);
@@ -833,7 +830,6 @@ namespace Microsoft.Dafny {
             break;
           }
         case NaturalLanguageExpression naturalLanguageExpression: {
-            ReportWarning(naturalLanguageExpression.Origin, UnsupportedNaturalLanguageBlocksDiagnostic);
             naturalLanguageExpression.PreType = CreatePreTypeProxy("natural-language expression");
             break;
           }
