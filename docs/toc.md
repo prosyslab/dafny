@@ -23,8 +23,9 @@ This page contains links to Dafny documentation.
    * Dafny [Quick Reference](./QuickReference)
    * [Getting started tutorial](./OnlineTutorial/guide), focusing mostly on simple imperative programs
    * [Dafny blog](https://dafny.org/blog)
-* Detailed documents for programmers
+ * Detailed documents for programmers
    * [**Dafny Reference Manual**](DafnyRef/DafnyRef)
+   * [AST dump JSON schema](AstDumpSchema)
    * [FAQs](HowToFAQ/index)
    * [Explanations of Error and Warning messages](HowToFAQ/Errors)
    * [Verification optimization guide](VerificationOptimization/VerificationOptimization)
