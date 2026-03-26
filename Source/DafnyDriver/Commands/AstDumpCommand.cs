@@ -1,21 +1,27 @@
 using System;
 using System.Collections.Generic;
 using System.CommandLine;
-using System.Diagnostics.Contracts;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Threading.Tasks;
 using DafnyCore;
+using DafnyDriver.Commands;
 
 namespace Microsoft.Dafny;
 
 public static class AstDumpCommand {
 
-  static AstDumpCommand() { }
+  public static readonly Option<FileInfo> Output = new("--output",
+    "Path to the JSON file that will receive the resolved AST dump");
 
-  public static IEnumerable<Option> Options => new Option[] { }.Concat(DafnyCommands.ParserOptions);
+  static AstDumpCommand() {
+    OptionRegistry.RegisterOption(Output, OptionScope.Cli);
+  }
+
+  public static IEnumerable<Option> Options => new Option[] { Output }
+    .Concat(DafnyCommands.ResolverOptions)
+    .Concat(DafnyCommands.ConsoleOutputOptions);
 
   public static Command Create() {
     var result = new Command("ast-dump", @"Ast dump the dafny file.");
@@ -35,59 +41,44 @@ public static class AstDumpCommand {
   }
 
   public static async Task<ExitValue> DoDumping(DafnyOptions options) {
-    var (code, dafnyFiles, _) = await SynchronousCliCompilation.GetDafnyFiles(options);
-    if (code != 0) {
-      return code;
+    options.AllowSourceFolders = true;
+    var outputFile = options.Get(Output) ?? GetDefaultOutputFile(options);
+
+    var compilation = CliCompilation.Create(options);
+    compilation.Start();
+
+    var resolution = await compilation.Resolution;
+    var exitValue = await compilation.GetAndReportExitValue();
+    if (resolution is not { HasErrors: false }) {
+      return exitValue;
     }
-    var errorWriter = options.ErrorWriter;
-    var dafnyFileNames = DafnyFile.FileNames(dafnyFiles);
-    string programName = dafnyFileNames.Count == 1 ? dafnyFileNames[0] : "the_program";
 
-    var exitValue = ExitValue.SUCCESS;
-    Contract.Assert(dafnyFiles.Count > 0 || options.SourceFolders.Count > 0);
-    var folderFiles = options.SourceFolders.Select(folderPath => GetFilesForFolder(options, folderPath)).SelectMany(x => x);
-    dafnyFiles = dafnyFiles.Concat(folderFiles).ToList();
-
-    var failedToParseFiles = new List<string>();
-    var emptyFiles = new List<string>();
-
-    foreach (var file in dafnyFiles) {
-      var dafnyFile = file;
-      var content = dafnyFile.GetContent();
-      var originalText = await content.Reader.ReadToEndAsync();
-      content.Reader.Close(); // Manual closing because we want to overwrite
-      dafnyFile.GetContent = () => content with { Reader = new StringReader(originalText) };
-      // Might not be totally optimized but let's do that for now
-      var (dafnyProgram, err) = await DafnyMain.Parse(new List<DafnyFile> { dafnyFile }, programName, options);
-      if (err != null) {
-        exitValue = ExitValue.DAFNY_ERROR;
-        await errorWriter.WriteLineAsync(err);
-        failedToParseFiles.Add(dafnyFile.BaseName);
-      } else {
-        var firstToken = dafnyProgram.GetFirstTokenForUri(file.Uri);
-        var result = originalText;
-        JsonNode json = new JsonObject();
-        AstPrinter pr = new AstPrinter(json, dafnyProgram.Options);
-        pr.PrintProgram(dafnyProgram, false);
-        if (firstToken != null) {
-          result = Formatting.__default.ReindentProgramFromFirstToken(firstToken,
-            IndentationFormatter.ForProgram(dafnyProgram, file.Uri));
-        } else {
-          // TODO: is this necessary? there already is a warning about files containing no code
-          if (options.Verbose) {
-            await options.ErrorWriter.WriteLineAsync(dafnyFile.BaseName + " was empty.");
-          }
-
-          emptyFiles.Add(options.GetPrintPath(dafnyFile.FilePath));
-        }
+    try {
+      if (outputFile.DirectoryName is { Length: > 0 }) {
+        Directory.CreateDirectory(outputFile.DirectoryName);
       }
+
+      var json = ResolvedAstJsonSerializer.Serialize(resolution.ResolvedProgram);
+      var serialized = json.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+      await File.WriteAllTextAsync(outputFile.FullName, serialized);
+      if (options.Verbose || options.Get(Output) == null) {
+        await options.OutputWriter.Status($"Resolved AST JSON written to {outputFile.FullName}");
+      }
+      return exitValue;
+    } catch (Exception exception) {
+      await options.OutputWriter.Status($"Failed to write AST dump: {exception.Message}");
+      return ExitValue.DAFNY_ERROR;
     }
-    return exitValue;
   }
 
-  public static IEnumerable<DafnyFile> GetFilesForFolder(DafnyOptions options, string folderPath) {
-    return Directory.GetFiles(folderPath, "*.dfy", SearchOption.AllDirectories)
-      .Select(name => DafnyFile.HandleDafnyFile(OnDiskFileSystem.Instance,
-        new ConsoleErrorReporter(options), options, new Uri(name), Token.Cli));
+  private static FileInfo GetDefaultOutputFile(DafnyOptions options) {
+    if (options.CliRootSourceUris.Count == 1 && options.CliRootSourceUris[0].IsFile) {
+      var inputPath = options.CliRootSourceUris[0].LocalPath;
+      var directory = Path.GetDirectoryName(inputPath) ?? Directory.GetCurrentDirectory();
+      var fileNameWithoutExtension = Path.GetFileNameWithoutExtension(inputPath);
+      return new FileInfo(Path.Combine(directory, fileNameWithoutExtension + ".ast.json"));
+    }
+
+    return new FileInfo(Path.Combine(Directory.GetCurrentDirectory(), "dafny-ast.json"));
   }
 }
