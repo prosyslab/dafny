@@ -1,0 +1,4 @@
+complexity.dfy(8,7): method Simple score=0
+complexity.dfy(12,7): method Nested score=6
+complexity.dfy(24,7): method ProofExcluded score=1
+complexity.dfy(37,2): function-by-method ByMethod score=1
