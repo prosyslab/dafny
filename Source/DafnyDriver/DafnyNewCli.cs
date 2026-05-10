@@ -38,6 +38,7 @@ public static class DafnyNewCli {
     AddCommand(TranslateCommand.Create());
     AddCommand(FormatCommand.Create());
     AddCommand(DocCommand.Create());
+    AddCommand(ComplexityCommand.Create());
     AddCommand(MeasureComplexityCommand.Create());
     AddCommand(ServerCommand.Instance);
     AddCommand(TestCommand.Create());
