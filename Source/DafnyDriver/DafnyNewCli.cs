@@ -51,6 +51,7 @@ public static class DafnyNewCli {
     AddCommand(SimplifyCommand.Create());
     AddCommand(DefinitionAnalysisCommand.Create());
     AddCommand(WpContextCommand.Create());
+    AddCommand(WpLoopContextCommand.Create());
     AddCommand(ProofRemoverCommand.Create());
 
     OptionRegistry.CheckOptionsAreKnown(AllOptions);
