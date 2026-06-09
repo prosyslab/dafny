@@ -125,9 +125,9 @@ public static class WpContextAnalysis {
       .SelectMany(moduleDefinition => moduleDefinition.TopLevelDecls.OfType<TopLevelDeclWithMembers>())
       .SelectMany(topLevelDecl => topLevelDecl.Members.OfType<MethodOrConstructor>())
       .Where(method => method.StartToken.ActualFilename != null)
-      .Where(method => WpContextSourceTools.SameFile(method, sourceFullPath))
+      .Where(method => IsVisibleMethod(method, sourceFullPath))
       .OrderBy(method => method.FullDafnyName)
-      .Select(method => VisibleMethod(sourceText, method));
+      .Select(method => VisibleMethod(sourceFullPath, sourceText, method));
 
     return functions.Concat(methods).ToList();
   }
@@ -170,7 +170,18 @@ public static class WpContextAnalysis {
     );
   }
 
-  private static WpVisibleDeclaration VisibleMethod(string sourceText, MethodOrConstructor method) {
+  private static bool IsVisibleMethod(MethodOrConstructor method, string sourceFullPath) {
+    return WpContextSourceTools.SameFile(method, sourceFullPath) || IsIncludedIoAppendMethod(method);
+  }
+
+  private static bool IsIncludedIoAppendMethod(MethodOrConstructor method) {
+    return method.FullDafnyName is "BenchIO.IO.AppendStdout" or "BenchIO.IO.AppendStderr";
+  }
+
+  private static WpVisibleDeclaration VisibleMethod(string sourceFullPath, string sourceText, MethodOrConstructor method) {
+    var signature = WpContextSourceTools.SameFile(method, sourceFullPath)
+      ? NormalizedSignature(sourceText, method)
+      : NormalizedSignature(method);
     return new WpVisibleDeclaration(
       Name: method.Name,
       FullName: method.FullDafnyName,
@@ -178,7 +189,7 @@ public static class WpContextAnalysis {
       Line: method.Origin.line,
       Column: method.Origin.col,
       Ghost: method.IsGhost,
-      Signature: NormalizedSignature(sourceText, method),
+      Signature: signature,
       SourcePath: Path.GetFullPath(method.StartToken.ActualFilename!),
       DeclarationSpan: WpContextSourceTools.SourceSpan(method),
       ContractSpan: WpContextSourceTools.HeaderSpan(method),
@@ -199,13 +210,7 @@ public static class WpContextAnalysis {
       return function.Name;
     }
 
-    var builder = new StringBuilder();
-    for (var token = function.StartToken; token != null && token.pos < function.BodyStartTok.pos; token = token.Next) {
-      builder.Append(token.LeadingTrivia);
-      builder.Append(token.val);
-      builder.Append(token.TrailingTrivia);
-    }
-    return string.Join(" ", builder.ToString().Split(default(string[]), StringSplitOptions.RemoveEmptyEntries));
+    return NormalizedSignatureFromTokens(function.StartToken, function.BodyStartTok, includeEndOrigin: false);
   }
 
   private static string NormalizedSignature(string sourceText, MethodOrConstructor method) {
@@ -214,5 +219,31 @@ public static class WpContextAnalysis {
       return method.Name;
     }
     return string.Join(" ", sourceText[method.StartToken.pos..end].Split(default(string[]), StringSplitOptions.RemoveEmptyEntries));
+  }
+
+  private static string NormalizedSignature(MethodOrConstructor method) {
+    var endOrigin = method.BodyStartTok == Token.NoToken ? method.EndToken : method.BodyStartTok;
+    if (endOrigin == Token.NoToken) {
+      return method.Name;
+    }
+
+    return NormalizedSignatureFromTokens(
+      method.StartToken,
+      endOrigin,
+      includeEndOrigin: method.BodyStartTok == Token.NoToken);
+  }
+
+  private static string NormalizedSignatureFromTokens(Token startToken, IOrigin endOrigin, bool includeEndOrigin) {
+    var builder = new StringBuilder();
+    for (var token = startToken; token != null && TokenInSignatureRange(token, endOrigin, includeEndOrigin); token = token.Next) {
+      builder.Append(token.LeadingTrivia);
+      builder.Append(token.val);
+      builder.Append(token.TrailingTrivia);
+    }
+    return string.Join(" ", builder.ToString().Split(default(string[]), StringSplitOptions.RemoveEmptyEntries));
+  }
+
+  private static bool TokenInSignatureRange(Token token, IOrigin endOrigin, bool includeEndOrigin) {
+    return includeEndOrigin ? token.pos <= endOrigin.pos : token.pos < endOrigin.pos;
   }
 }
