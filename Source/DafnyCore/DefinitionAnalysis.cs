@@ -28,7 +28,10 @@ public record DefinitionAnalysisResult(
   bool HasVarDeclaration,
   string BodyShape,
   bool HasBroadExitRangeDisjunct,
+  IReadOnlyList<string> TypeParameters,
+  IReadOnlyList<string> TypeParameterNames,
   IReadOnlyList<string> Parameters,
+  IReadOnlyList<string> ParameterNames,
   IReadOnlyList<string> SourceModules,
   IReadOnlyList<string> IncludedFiles,
   IReadOnlyList<string> LocalIncludedModules,
@@ -114,7 +117,10 @@ public static class DefinitionAnalysis {
       declaration.HasVarDeclaration,
       declaration.BodyShape,
       declaration.HasBroadExitRangeDisjunct,
+      declaration.TypeParameters,
+      declaration.TypeParameterNames,
       declaration.Parameters,
+      declaration.ParameterNames,
       sourceFacts.SourceModules,
       sourceFacts.IncludedFiles,
       sourceFacts.LocalIncludedModules,
@@ -586,7 +592,10 @@ internal sealed record DefinitionNode(
   bool HasVarDeclaration,
   string BodyShape,
   bool HasBroadExitRangeDisjunct,
+  IReadOnlyList<string> TypeParameters,
+  IReadOnlyList<string> TypeParameterNames,
   IReadOnlyList<string> Parameters,
+  IReadOnlyList<string> ParameterNames,
   IReadOnlyList<Expression> SpecificationExpressions,
   IReadOnlyList<string> CallNames,
   Expression? ExpressionBody,
@@ -618,7 +627,10 @@ internal sealed record DefinitionNode(
       false,
       DefinitionAnalysis.BodyShape(function.Body),
       ContainsBroadExitRangeDisjunct(specificationExpressions, function.Body, null),
+      TypeParameterTexts(function.TypeArgs),
+      TypeParameterNameTexts(function.TypeArgs),
       ParameterTexts(function),
+      ParameterNameTexts(function),
       specificationExpressions,
       CollectCallNameList(function.Body, null),
       function.Body,
@@ -650,7 +662,10 @@ internal sealed record DefinitionNode(
       DefinitionAnalysis.ContainsVarDeclaration(function.ByMethodBody),
       "",
       ContainsBroadExitRangeDisjunct([], null, function.ByMethodBody),
+      TypeParameterTexts(function.TypeArgs),
+      TypeParameterNameTexts(function.TypeArgs),
       ParameterTexts(function),
+      ParameterNameTexts(function),
       [],
       CollectCallNameList(null, function.ByMethodBody),
       null,
@@ -683,7 +698,10 @@ internal sealed record DefinitionNode(
       DefinitionAnalysis.ContainsVarDeclaration(method.Body),
       "",
       ContainsBroadExitRangeDisjunct(specificationExpressions, null, method.Body),
+      TypeParameterTexts(method.TypeArgs),
+      TypeParameterNameTexts(method.TypeArgs),
       ParameterTexts(method),
+      ParameterNameTexts(method),
       specificationExpressions,
       CollectCallNameList(null, method.Body),
       null,
@@ -715,6 +733,9 @@ internal sealed record DefinitionNode(
       false,
       "",
       false,
+      TypeParameterTexts(datatype.TypeArgs),
+      TypeParameterNameTexts(datatype.TypeArgs),
+      [],
       [],
       [],
       [],
@@ -735,6 +756,24 @@ internal sealed record DefinitionNode(
   private static List<string> ParameterTexts(MethodOrFunction declaration) {
     return declaration.Ins
       .Select(formal => $"{formal.Name}: {formal.Type}")
+      .ToList();
+  }
+
+  private static List<string> ParameterNameTexts(MethodOrFunction declaration) {
+    return declaration.Ins
+      .Select(formal => formal.Name)
+      .ToList();
+  }
+
+  private static List<string> TypeParameterTexts(List<TypeParameter> typeParameters) {
+    return typeParameters
+      .Select(typeParameter => typeParameter.EntireRange.PrintOriginal())
+      .ToList();
+  }
+
+  private static List<string> TypeParameterNameTexts(List<TypeParameter> typeParameters) {
+    return typeParameters
+      .Select(typeParameter => typeParameter.Name)
       .ToList();
   }
 
