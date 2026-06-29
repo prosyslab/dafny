@@ -759,4 +759,3 @@ NoGhost - disable printing of functions, ghost methods, and proof
     OptionRegistry.RegisterOption(CheckSourceLocationConsistency, OptionScope.Cli);
   }
 }
-
