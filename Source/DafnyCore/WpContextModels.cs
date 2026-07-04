@@ -42,7 +42,14 @@ public record WpStatementContext(
   int InsertColumn,
   int InsertOffset,
   IReadOnlyList<WpInScopeLocal> InScopeLocals,
-  bool ReachesLoopBoundary
+  bool ReachesLoopBoundary,
+  IReadOnlyList<WpStatementBranch> Branches
+);
+
+public record WpStatementBranch(
+  string Label,
+  string? Guard,
+  IReadOnlyList<WpStatementContext> Statements
 );
 
 public record WpLoopContext(

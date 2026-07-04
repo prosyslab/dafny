@@ -61,7 +61,8 @@ public static class MethodSegmentContextAnalysis {
           sourceText,
           lineStarts,
           target,
-          reachesLoopBoundary: statement is WhileStmt))
+          reachesLoopBoundary: WpContextSourceTools.ContainsLoop(statement),
+          options: program.Options))
         .ToList(),
       InScopeLocals: WpContextSourceTools.InScopeLocals(target, target.BodyStartTok.line),
       VisibleDeclarations: WpContextAnalysis.VisibleDeclarations(program, sourceFullPath, sourceText)

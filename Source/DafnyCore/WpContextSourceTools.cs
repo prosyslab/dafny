@@ -122,7 +122,8 @@ internal static class WpContextSourceTools {
     string sourceText,
     IReadOnlyList<int> lineStarts,
     MethodOrConstructor method,
-    bool reachesLoopBoundary) {
+    bool reachesLoopBoundary,
+    DafnyOptions? options = null) {
     var insertOffset = OffsetForLineAndIndent(sourceText, lineStarts, statement.StartToken.line);
     var sourceSpan = SourceSpan(statement);
     if (sourceSpan == null) {
@@ -136,8 +137,87 @@ internal static class WpContextSourceTools {
       InsertColumn: ColumnForOffset(lineStarts, statement.StartToken.line, insertOffset),
       InsertOffset: insertOffset,
       InScopeLocals: InScopeLocals(method, statement.StartToken.line),
-      ReachesLoopBoundary: reachesLoopBoundary
+      ReachesLoopBoundary: reachesLoopBoundary,
+      Branches: options == null
+        ? new List<WpStatementBranch>()
+        : StatementBranches(statement, sourceText, lineStarts, method, options)
     );
+  }
+
+  public static bool ContainsLoop(Statement statement) {
+    return statement is LoopStmt || statement.SubStatements.Any(ContainsLoop);
+  }
+
+  private static IReadOnlyList<WpStatementBranch> StatementBranches(
+    Statement statement,
+    string sourceText,
+    IReadOnlyList<int> lineStarts,
+    MethodOrConstructor method,
+    DafnyOptions options) {
+    var branches = new List<WpStatementBranch>();
+    switch (statement) {
+      case IfStmt ifStmt: {
+          var guard = ifStmt.Guard == null ? null : Printer.ExprToString(options, ifStmt.Guard);
+          branches.Add(Branch("then", guard, ifStmt.Thn.Body, sourceText, lineStarts, method, options));
+          switch (ifStmt.Els) {
+            case BlockStmt elseBlock:
+              branches.Add(Branch("else", null, elseBlock.Body, sourceText, lineStarts, method, options));
+              break;
+            case Statement elseStatement:
+              branches.Add(Branch(
+                "else", null, new List<Statement> { elseStatement }, sourceText, lineStarts, method, options));
+              break;
+          }
+          break;
+        }
+      case OneBodyLoopStmt loopStmt when loopStmt.Body != null: {
+          var guard = loopStmt is WhileStmt { Guard: { } whileGuard }
+            ? Printer.ExprToString(options, whileGuard)
+            : null;
+          branches.Add(Branch("body", guard, loopStmt.Body.Body, sourceText, lineStarts, method, options));
+          break;
+        }
+      case NestedMatchStmt matchStmt: {
+          foreach (var matchCase in matchStmt.Cases) {
+            var label = PatternLabel(matchCase.Pat, options);
+            var body = matchCase.Body.Count == 1 && matchCase.Body[0] is BlockStmt caseBlock
+              ? caseBlock.Body
+              : matchCase.Body;
+            branches.Add(Branch(
+              $"case {label}", label, body, sourceText, lineStarts, method, options));
+          }
+          break;
+        }
+      case BlockStmt blockStmt:
+        branches.Add(Branch("block", null, blockStmt.Body, sourceText, lineStarts, method, options));
+        break;
+    }
+    return branches;
+  }
+
+  private static WpStatementBranch Branch(
+    string label,
+    string? guard,
+    IEnumerable<Statement> statements,
+    string sourceText,
+    IReadOnlyList<int> lineStarts,
+    MethodOrConstructor method,
+    DafnyOptions options) {
+    return new WpStatementBranch(
+      Label: label,
+      Guard: guard,
+      Statements: statements
+        .Select(child => StatementContext(child, sourceText, lineStarts, method, ContainsLoop(child), options))
+        .ToList()
+    );
+  }
+
+  private static string PatternLabel(ExtendedPattern pattern, DafnyOptions options) {
+    return pattern switch {
+      IdPattern idPattern => idPattern.Id,
+      LitPattern litPattern => Printer.ExprToString(options, litPattern.OrigLit),
+      _ => pattern.GetType().Name,
+    };
   }
 
   public static IReadOnlyList<WpInScopeLocal> InScopeLocals(MethodOrConstructor method, int insertLine) {
