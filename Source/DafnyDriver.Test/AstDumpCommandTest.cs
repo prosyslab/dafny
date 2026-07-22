@@ -223,6 +223,36 @@ public class AstDumpCommandTest {
     }
   }
 
+  [Fact]
+  public async Task AstDumpDistinguishesSequenceIndexesAndSliceBounds() {
+    var source = "method M(s: seq<int>) { assert s[0] == 0; assert s[..] == s; assert s[1..] == s; assert s[..1] == s; assert s[0..1] == s; }";
+    var file = Path.GetTempFileName() + ".dfy";
+    var output = Path.GetTempFileName() + ".json";
+    await File.WriteAllTextAsync(file, source);
+
+    try {
+      var options = DafnyOptions.CreateUsingOldParser(new StringWriter(), null, file);
+      options.Options.OptionArguments[AstDumpCommand.Output] = new FileInfo(output);
+
+      var exitValue = await AstDumpCommand.DoDumping(options);
+
+      Assert.Equal(ExitValue.SUCCESS, exitValue);
+      var json = JsonNode.Parse(await File.ReadAllTextAsync(output))!.AsObject();
+      var selections = EnumerateNodes(json["root"]!.AsObject())
+        .Where(node => node["kind"]?.GetValue<string>() == "seq_select" && node["selectOne"] != null)
+        .ToList();
+
+      Assert.Contains(selections, node => SelectionShape(node, true, true, false));
+      Assert.Contains(selections, node => SelectionShape(node, false, false, false));
+      Assert.Contains(selections, node => SelectionShape(node, false, true, false));
+      Assert.Contains(selections, node => SelectionShape(node, false, false, true));
+      Assert.Contains(selections, node => SelectionShape(node, false, true, true));
+    } finally {
+      File.Delete(file);
+      File.Delete(output);
+    }
+  }
+
   private static IEnumerable<JsonObject> EnumerateNodes(JsonObject node) {
     yield return node;
     foreach (var property in node) {
@@ -250,5 +280,11 @@ public class AstDumpCommandTest {
     Assert.False(string.IsNullOrEmpty(location["file"]!.GetValue<string>()));
     Assert.True(location["line"]!.GetValue<int>() > 0);
     Assert.True(location["column"]!.GetValue<int>() > 0);
+  }
+
+  private static bool SelectionShape(JsonObject node, bool selectOne, bool hasLowerBound, bool hasUpperBound) {
+    return node["selectOne"]!.GetValue<bool>() == selectOne &&
+           node["hasLowerBound"]!.GetValue<bool>() == hasLowerBound &&
+           node["hasUpperBound"]!.GetValue<bool>() == hasUpperBound;
   }
 }

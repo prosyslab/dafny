@@ -49,6 +49,7 @@ public static class ResolvedAstJsonSerializer {
         CallStmt callStmt => EmitCall(callStmt, visited),
         FunctionCallExpr functionCallExpr => EmitFunctionCall(functionCallExpr, visited),
         MemberSelectExpr memberSelectExpr => EmitMemberSelect(memberSelectExpr, visited),
+        SeqSelectExpr seqSelectExpr => EmitSeqSelect(seqSelectExpr, visited),
         BinaryExpr binaryExpr => EmitBinary(binaryExpr, visited),
         NegationExpression negationExpression => EmitNegation(negationExpression, visited),
         UnaryOpExpr unaryOpExpr => EmitUnary(unaryOpExpr, visited),
@@ -234,6 +235,15 @@ public static class ResolvedAstJsonSerializer {
       if (memberSelectExpr.Obj is not StaticReceiverExpr) {
         AddNode(result, "receiver", memberSelectExpr.Obj, visited);
       }
+      return result;
+    }
+
+    private JsonObject EmitSeqSelect(SeqSelectExpr seqSelectExpr, ISet<INode> visited) {
+      var result = CreateNode(seqSelectExpr, kind: "seq_select");
+      result["selectOne"] = seqSelectExpr.SelectOne;
+      result["hasLowerBound"] = seqSelectExpr.E0 != null;
+      result["hasUpperBound"] = seqSelectExpr.E1 != null;
+      AddNodes(result, "children", seqSelectExpr.Children.Where(ShouldIncludeChild), visited);
       return result;
     }
 
