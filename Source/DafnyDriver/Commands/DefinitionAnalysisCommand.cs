@@ -27,7 +27,7 @@ static class DefinitionAnalysisCommand {
 
   public static Command Create() {
     var result = new Command("definition-analysis",
-      "Report root-source function, method, and function-by-method dependencies from the resolved Dafny AST.");
+      "Report resolved Dafny declaration dependencies, source spans, paths, and local includes.");
     result.AddArgument(DafnyCommands.FilesArgument);
     foreach (var option in Options) {
       result.AddOption(option);

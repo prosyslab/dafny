@@ -16,6 +16,7 @@ public record DefinitionAnalysisResult(
   int Start,
   int? BodyStart,
   int End,
+  string SourcePath,
   bool Ghost,
   bool HasByMethod,
   bool HasLoop,
@@ -36,11 +37,20 @@ public record DefinitionAnalysisResult(
   IReadOnlyList<string> IncludedFiles,
   IReadOnlyList<string> LocalIncludedModules,
   IReadOnlyList<string> ImportedModules,
+  IReadOnlyList<DefinitionAnalysisInclude> LocalIncludes,
   bool Recursive,
   IReadOnlyList<string> RecursiveGroup,
   IReadOnlyList<string> Callees,
   IReadOnlyList<string> CallSequence,
-  IReadOnlyList<string> CallNames
+  IReadOnlyList<string> CallNames,
+  IReadOnlyList<string> Dependencies
+);
+
+public record DefinitionAnalysisInclude(
+  string SourcePath,
+  string TargetPath,
+  int Start,
+  int End
 );
 
 public static class DefinitionAnalysis {
@@ -59,6 +69,11 @@ public static class DefinitionAnalysis {
     var graph = callSequences.ToDictionary(
       item => item.Key,
       item => item.Value.ToHashSet());
+    var declarationNodes = allDeclarations
+      .GroupBy(declaration => declaration.Declaration)
+      .ToDictionary(
+        group => group.Key,
+        group => group.First(node => node.BodyKind != DefinitionBodyKind.FunctionByMethod));
     var recursiveDeclarations = RecursiveDefinitions(graph);
     var recursiveGroups = RecursiveGroups(graph);
 
@@ -70,7 +85,8 @@ public static class DefinitionAnalysis {
         recursiveDeclarations,
         recursiveGroups,
         graph,
-        callSequences))
+        callSequences,
+        declarationNodes))
       .ToList();
   }
 
@@ -84,7 +100,8 @@ public static class DefinitionAnalysis {
         new HashSet<DefinitionNode>(),
         new Dictionary<DefinitionNode, HashSet<DefinitionNode>>(),
         new Dictionary<DefinitionNode, HashSet<DefinitionNode>>(),
-        new Dictionary<DefinitionNode, List<DefinitionNode>>()))
+        new Dictionary<DefinitionNode, List<DefinitionNode>>(),
+        new Dictionary<INode, DefinitionNode>()))
       .ToList();
   }
 
@@ -94,7 +111,8 @@ public static class DefinitionAnalysis {
     IReadOnlySet<DefinitionNode> recursiveDeclarations,
     IReadOnlyDictionary<DefinitionNode, HashSet<DefinitionNode>> recursiveGroups,
     IReadOnlyDictionary<DefinitionNode, HashSet<DefinitionNode>> graph,
-    IReadOnlyDictionary<DefinitionNode, List<DefinitionNode>> callSequences) {
+    IReadOnlyDictionary<DefinitionNode, List<DefinitionNode>> callSequences,
+    IReadOnlyDictionary<INode, DefinitionNode> declarationNodes) {
     return new DefinitionAnalysisResult(
       declaration.Name,
       declaration.ReportFullName,
@@ -105,6 +123,7 @@ public static class DefinitionAnalysis {
       declaration.Start,
       declaration.BodyStart,
       declaration.End,
+      SourcePath(declaration.Declaration),
       declaration.Ghost,
       declaration.HasByMethod,
       declaration.HasLoop,
@@ -125,6 +144,7 @@ public static class DefinitionAnalysis {
       sourceFacts.IncludedFiles,
       sourceFacts.LocalIncludedModules,
       sourceFacts.ImportedModules,
+      sourceFacts.LocalIncludes,
       recursiveDeclarations.Contains(declaration),
       recursiveGroups.TryGetValue(declaration, out var group)
         ? group.Select(item => item.ReportFullName).OrderBy(name => name).ToList()
@@ -135,7 +155,44 @@ public static class DefinitionAnalysis {
       callSequences.TryGetValue(declaration, out var callSequence)
         ? callSequence.Select(item => item.ReportFullName).ToList()
         : new List<string>(),
-      declaration.CallNames);
+      declaration.CallNames,
+      DependenciesFor(declaration, graph, declarationNodes));
+  }
+
+  private static List<string> DependenciesFor(
+    DefinitionNode declaration,
+    IReadOnlyDictionary<DefinitionNode, HashSet<DefinitionNode>> graph,
+    IReadOnlyDictionary<INode, DefinitionNode> declarationNodes) {
+    var dependencies = graph.TryGetValue(declaration, out var callees)
+      ? callees.Where(node => node.BodyKind != DefinitionBodyKind.FunctionByMethod).ToHashSet()
+      : new HashSet<DefinitionNode>();
+    foreach (var type in declaration.Types) {
+      CollectTypeDependencies(type, declarationNodes, dependencies);
+    }
+    return dependencies
+      .Where(node => node != declaration)
+      .Select(node => node.ReportFullName)
+      .Distinct()
+      .OrderBy(name => name)
+      .ToList();
+  }
+
+  private static void CollectTypeDependencies(
+    Type type,
+    IReadOnlyDictionary<INode, DefinitionNode> declarationNodes,
+    ISet<DefinitionNode> dependencies) {
+    if (type is UserDefinedType { ResolvedClass: { } resolvedClass } &&
+        declarationNodes.TryGetValue(resolvedClass, out var dependency)) {
+      dependencies.Add(dependency);
+    }
+    foreach (var typeArgument in type.TypeArgs) {
+      CollectTypeDependencies(typeArgument, declarationNodes, dependencies);
+    }
+  }
+
+  private static string SourcePath(INode declaration) {
+    var filename = declaration.StartToken.ActualFilename;
+    return filename == null ? "" : Path.GetFullPath(filename);
   }
 
   private static List<DefinitionNode> RootSourceDefinitions(Program program, bool spansOnly) {
@@ -484,7 +541,8 @@ internal sealed record SourceFacts(
   IReadOnlyList<string> SourceModules,
   IReadOnlyList<string> IncludedFiles,
   IReadOnlyList<string> LocalIncludedModules,
-  IReadOnlyList<string> ImportedModules
+  IReadOnlyList<string> ImportedModules,
+  IReadOnlyList<DefinitionAnalysisInclude> LocalIncludes
 ) {
   public static SourceFacts For(Program program) {
     var rootUris = program.Compilation.RootSourceUris.ToHashSet();
@@ -512,6 +570,16 @@ internal sealed record SourceFacts(
         .SelectMany(module => ImportedModuleNames(program, module))
         .Distinct()
         .OrderBy(name => name)
+        .ToList(),
+      rootIncludes
+        .Where(include => Path.GetExtension(include.IncludedFilename.LocalPath) == ".dfy")
+        .Select(include => new DefinitionAnalysisInclude(
+          Path.GetFullPath(include.IncluderFilename.LocalPath),
+          Path.GetFullPath(include.IncludedFilename.LocalPath),
+          include.StartToken.pos,
+          include.EndToken.pos + include.EndToken.val.Length))
+        .OrderBy(include => include.SourcePath)
+        .ThenBy(include => include.Start)
         .ToList());
   }
 
@@ -599,7 +667,8 @@ internal sealed record DefinitionNode(
   IReadOnlyList<Expression> SpecificationExpressions,
   IReadOnlyList<string> CallNames,
   Expression? ExpressionBody,
-  Statement? StatementBody
+  Statement? StatementBody,
+  IReadOnlyList<Type> Types
 ) {
   public static DefinitionNode ForFunction(Function function, string enclosingName) {
     var specificationExpressions = SpecificationExpressionsFor(function);
@@ -634,7 +703,8 @@ internal sealed record DefinitionNode(
       specificationExpressions,
       CollectCallNameList(function.Body, null),
       function.Body,
-      null);
+      null,
+      [.. function.Ins.Select(formal => formal.Type), function.ResultType]);
   }
 
   public static DefinitionNode ForFunctionByMethod(Function function, string enclosingName) {
@@ -669,7 +739,8 @@ internal sealed record DefinitionNode(
       [],
       CollectCallNameList(null, function.ByMethodBody),
       null,
-      function.ByMethodBody);
+      function.ByMethodBody,
+      [.. function.Ins.Select(formal => formal.Type), function.ResultType]);
   }
 
   public static DefinitionNode ForMethod(MethodOrConstructor method, string enclosingName) {
@@ -705,7 +776,8 @@ internal sealed record DefinitionNode(
       specificationExpressions,
       CollectCallNameList(null, method.Body),
       null,
-      method.Body);
+      method.Body,
+      [.. method.Ins.Select(formal => formal.Type), .. method.Outs.Select(formal => formal.Type)]);
   }
 
   public static DefinitionNode ForDatatype(DatatypeDecl datatype, string enclosingName) {
@@ -740,7 +812,8 @@ internal sealed record DefinitionNode(
       [],
       [],
       null,
-      null);
+      null,
+      [.. datatype.Ctors.SelectMany(constructor => constructor.Formals).Select(formal => formal.Type)]);
   }
 
   private static List<Expression> SpecificationExpressionsFor(MethodOrFunction declaration) {
