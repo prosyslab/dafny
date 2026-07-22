@@ -356,7 +356,7 @@ public static class DefinitionAnalysis {
     if (statement == null) {
       return false;
     }
-    if (statement is AssumeStmt) {
+    if (statement is AssumeStmt or ExpectStmt) {
       return true;
     }
     return statement.SubStatements.Any(ContainsAssume);
