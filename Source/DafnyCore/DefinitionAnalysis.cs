@@ -49,7 +49,17 @@ public record DefinitionAnalysisResult(
   IReadOnlyList<string> CallSequence,
   IReadOnlyList<string> CallNames,
   IReadOnlyList<string> DirectPostconditionCallees,
+  IReadOnlyList<DefinitionReference> References,
   IReadOnlyList<string> Dependencies
+);
+
+public record DefinitionReference(
+  string TargetFullName,
+  string TargetModule,
+  string TargetKind,
+  bool IsPattern,
+  int Start,
+  int End
 );
 
 public record DefinitionAnalysisInclude(
@@ -67,7 +77,10 @@ public static class DefinitionAnalysis {
       .Where(declaration => !declaration.Declaration.Origin.FromIncludeDirective(program))
       .ToList();
     var callableDeclarations = allDeclarations
-      .Where(declaration => declaration.BodyKind != DefinitionBodyKind.Datatype)
+      .Where(declaration => declaration.BodyKind is
+        DefinitionBodyKind.Function or
+        DefinitionBodyKind.FunctionByMethod or
+        DefinitionBodyKind.Method)
       .ToList();
     var callSequences = callableDeclarations.ToDictionary(
       declaration => declaration,
@@ -171,7 +184,66 @@ public static class DefinitionAnalysis {
         : new List<string>(),
       declaration.CallNames,
       resolved ? DirectPostconditionCalleesFor(declaration, declarationNodes) : [],
+      resolved ? ReferencesFor(declaration, declarationNodes) : [],
       DependenciesFor(declaration, graph, declarationNodes));
+  }
+
+  private static List<DefinitionReference> ReferencesFor(
+    DefinitionNode declaration,
+    IReadOnlyDictionary<INode, DefinitionNode> declarationNodes) {
+    var references = new List<DefinitionReference>();
+    ((Node)declaration.Declaration).Visit(node => {
+      if (node is not IHasReferences hasReferences) {
+        return true;
+      }
+      foreach (var reference in hasReferences.GetReferences()) {
+        var result = ReferenceFor(
+          reference,
+          declarationNodes,
+          node is MatchCase or IdPattern);
+        if (result != null && result.Start >= declaration.Start && result.End <= declaration.End) {
+          references.Add(result);
+        }
+      }
+      return true;
+    });
+    return references
+      .Distinct()
+      .OrderBy(reference => reference.Start)
+      .ThenBy(reference => reference.End)
+      .ThenBy(reference => reference.TargetFullName)
+      .ToList();
+  }
+
+  private static DefinitionReference? ReferenceFor(
+    Reference reference,
+    IReadOnlyDictionary<INode, DefinitionNode> declarationNodes,
+    bool isPattern) {
+    var start = reference.Referer.StartToken.pos;
+    var end = reference.Referer.EndToken.pos + reference.Referer.EndToken.val.Length;
+    if (declarationNodes.TryGetValue(reference.Referred, out var target)) {
+      var suffix = $".{target.Name}";
+      var targetModule = target.ReportFullName.EndsWith(suffix)
+        ? target.ReportFullName[..^suffix.Length]
+        : target.EnclosingName;
+      return new DefinitionReference(
+        target.ReportFullName,
+        targetModule,
+        target.Kind,
+        isPattern,
+        start,
+        end);
+    }
+    if (reference.Referred is DatatypeCtor { EnclosingDatatype: { } datatype } constructor) {
+      return new DefinitionReference(
+        $"{datatype.FullDafnyName}.{constructor.Name}",
+        datatype.EnclosingModuleDefinition.FullDafnyName,
+        "constructor",
+        isPattern,
+        start,
+        end);
+    }
+    return null;
   }
 
   private static List<string> DirectPostconditionCalleesFor(
@@ -260,6 +332,8 @@ public static class DefinitionAnalysis {
             }
           } else if (member is MethodOrConstructor method && method is not Method { IsByMethod: true }) {
             declarations.Add(DefinitionNode.ForMethod(method, moduleDefinition.Name));
+          } else if (member is ConstantField constant && constant.EnclosingClass is DefaultClassDecl) {
+            declarations.Add(DefinitionNode.ForConstant(constant, moduleDefinition.Name));
           }
         }
       }
@@ -665,7 +739,8 @@ internal enum DefinitionBodyKind {
   Function,
   FunctionByMethod,
   Method,
-  Datatype
+  Datatype,
+  Constant
 }
 
 internal sealed record DefinitionNode(
@@ -873,6 +948,47 @@ internal sealed record DefinitionNode(
       [.. datatype.Ctors.SelectMany(constructor => constructor.Formals).Select(formal => formal.Type)]);
   }
 
+  public static DefinitionNode ForConstant(ConstantField constant, string enclosingName) {
+    return new DefinitionNode(
+      constant,
+      DefinitionBodyKind.Constant,
+      constant.Name,
+      FullName(constant, enclosingName),
+      "constant",
+      enclosingName,
+      constant.Origin.line,
+      constant.Origin.col,
+      constant.StartToken.pos,
+      null,
+      EndOffset(constant),
+      constant.IsGhost,
+      false,
+      false,
+      false,
+      constant.WhatKind,
+      constant.HasAxiomAttribute,
+      constant.HasExternAttribute,
+      constant.HasVerifyFalseAttribute,
+      false,
+      false,
+      DefinitionAnalysis.BodyShape(constant.Rhs),
+      ContainsBroadExitRangeDisjunct([], constant.Rhs, null),
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      [],
+      CollectCallNameList(constant.Rhs, null),
+      constant.Rhs,
+      null,
+      [constant.Type]);
+  }
+
   private static List<Expression> SpecificationExpressionsFor(MethodOrFunction declaration) {
     var expressions = new List<Expression>();
     expressions.AddRange(declaration.Req.Select(item => item.E));
@@ -984,4 +1100,5 @@ internal sealed record DefinitionNode(
   private static int EndOffset(INode node) {
     return node.EndToken.pos + node.EndToken.val.Length;
   }
+
 }
