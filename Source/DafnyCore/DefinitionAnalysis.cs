@@ -1,4 +1,5 @@
 #nullable enable
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -82,59 +83,93 @@ public static class DefinitionAnalysis {
         DefinitionBodyKind.FunctionByMethod or
         DefinitionBodyKind.Method)
       .ToList();
-    var callSequences = callableDeclarations.ToDictionary(
+    var callTargetIndex = CallTargetIndex.For(callableDeclarations);
+    var callFacts = callableDeclarations.ToDictionary(
       declaration => declaration,
-      declaration => CalledDefinitionSequence(declaration, callableDeclarations));
-    var graph = callSequences.ToDictionary(
+      declaration => CalledDefinitions(declaration, callTargetIndex));
+    var graph = callFacts.ToDictionary(
       item => item.Key,
-      item => item.Value.ToHashSet());
+      item => item.Value.UniqueCallees);
     var declarationNodes = allDeclarations
-      .GroupBy(declaration => declaration.Declaration)
-      .ToDictionary(
-        group => group.Key,
-        group => group.First(node => node.BodyKind != DefinitionBodyKind.FunctionByMethod));
-    var recursiveDeclarations = RecursiveDefinitions(graph);
-    var recursiveGroups = RecursiveGroups(graph);
+      .Where(declaration => declaration.BodyKind != DefinitionBodyKind.FunctionByMethod)
+      .ToDictionary(declaration => declaration.Declaration);
+    var resolvedDeclarationFacts = ResolvedDeclarationFacts.For(declarations, declarationNodes);
+    var recursionFacts = AnalyzeRecursion(graph);
 
-    return declarations
+    var results = declarations
       .OrderBy(declaration => declaration.Start)
       .Select(declaration => ResultFor(
         declaration,
         sourceFacts,
-        recursiveDeclarations,
-        recursiveGroups,
+        recursionFacts,
         graph,
-        callSequences,
+        callFacts,
         declarationNodes,
-        resolved: true))
+        resolvedDeclarationFacts))
       .ToList();
+    return results;
   }
 
   public static IReadOnlyList<DefinitionAnalysisResult> AnalyzeSpans(Program program) {
     var sourceFacts = SourceFacts.For(program);
-    return RootSourceDefinitions(program, spansOnly: true)
+    var results = RootSourceDefinitions(program, spansOnly: true)
       .OrderBy(declaration => declaration.Start)
-      .Select(declaration => ResultFor(
-        declaration,
-        sourceFacts,
-        new HashSet<DefinitionNode>(),
-        new Dictionary<DefinitionNode, HashSet<DefinitionNode>>(),
-        new Dictionary<DefinitionNode, HashSet<DefinitionNode>>(),
-        new Dictionary<DefinitionNode, List<DefinitionNode>>(),
-        new Dictionary<INode, DefinitionNode>(),
-        resolved: false))
+      .Select(declaration => ResultForSpans(declaration, sourceFacts))
       .ToList();
+    return results;
   }
 
   private static DefinitionAnalysisResult ResultFor(
     DefinitionNode declaration,
     SourceFacts sourceFacts,
-    IReadOnlySet<DefinitionNode> recursiveDeclarations,
-    IReadOnlyDictionary<DefinitionNode, HashSet<DefinitionNode>> recursiveGroups,
+    RecursionFacts recursionFacts,
     IReadOnlyDictionary<DefinitionNode, HashSet<DefinitionNode>> graph,
-    IReadOnlyDictionary<DefinitionNode, List<DefinitionNode>> callSequences,
+    IReadOnlyDictionary<DefinitionNode, CallFacts> callFacts,
     IReadOnlyDictionary<INode, DefinitionNode> declarationNodes,
-    bool resolved) {
+    ResolvedDeclarationFacts resolvedDeclarationFacts) {
+    return CreateResult(
+      declaration,
+      sourceFacts,
+      recursionFacts.RecursiveDeclarations.Contains(declaration),
+      recursionFacts.GroupNames.TryGetValue(declaration, out var groupNames)
+        ? groupNames
+        : Array.Empty<string>(),
+      graph.TryGetValue(declaration, out var callees)
+        ? callees.Select(item => item.ReportFullName).OrderBy(name => name, StringComparer.Ordinal).ToList()
+        : Array.Empty<string>(),
+      callFacts.TryGetValue(declaration, out var calls)
+        ? calls.Sequence.Select(item => item.ReportFullName).ToList()
+        : Array.Empty<string>(),
+      resolvedDeclarationFacts.DirectPostconditionCalleesFor(declaration.Declaration),
+      resolvedDeclarationFacts.ReferencesFor(declaration.Declaration),
+      DependenciesFor(declaration, graph, declarationNodes));
+  }
+
+  private static DefinitionAnalysisResult ResultForSpans(
+    DefinitionNode declaration,
+    SourceFacts sourceFacts) {
+    return CreateResult(
+      declaration,
+      sourceFacts,
+      false,
+      Array.Empty<string>(),
+      Array.Empty<string>(),
+      Array.Empty<string>(),
+      Array.Empty<string>(),
+      Array.Empty<DefinitionReference>(),
+      Array.Empty<string>());
+  }
+
+  private static DefinitionAnalysisResult CreateResult(
+    DefinitionNode declaration,
+    SourceFacts sourceFacts,
+    bool recursive,
+    IReadOnlyList<string> recursiveGroup,
+    IReadOnlyList<string> callees,
+    IReadOnlyList<string> callSequence,
+    IReadOnlyList<string> directPostconditionCallees,
+    IReadOnlyList<DefinitionReference> references,
+    IReadOnlyList<string> dependencies) {
     return new DefinitionAnalysisResult(
       declaration.Name,
       declaration.ReportFullName,
@@ -145,7 +180,7 @@ public static class DefinitionAnalysis {
       declaration.Start,
       declaration.BodyStart,
       declaration.End,
-      SourcePath(declaration.Declaration),
+      declaration.SourcePath,
       declaration.Ghost,
       declaration.HasByMethod,
       declaration.HasLoop,
@@ -172,20 +207,53 @@ public static class DefinitionAnalysis {
       sourceFacts.LocalIncludedModules,
       sourceFacts.ImportedModules,
       sourceFacts.LocalIncludes,
-      recursiveDeclarations.Contains(declaration),
-      recursiveGroups.TryGetValue(declaration, out var group)
-        ? group.Select(item => item.ReportFullName).OrderBy(name => name).ToList()
-        : new List<string>(),
-      graph.TryGetValue(declaration, out var callees)
-        ? callees.Select(item => item.ReportFullName).OrderBy(name => name).ToList()
-        : new List<string>(),
-      callSequences.TryGetValue(declaration, out var callSequence)
-        ? callSequence.Select(item => item.ReportFullName).ToList()
-        : new List<string>(),
+      recursive,
+      recursiveGroup,
+      callees,
+      callSequence,
       declaration.CallNames,
-      resolved ? DirectPostconditionCalleesFor(declaration, declarationNodes) : [],
-      resolved ? ReferencesFor(declaration, declarationNodes) : [],
-      DependenciesFor(declaration, graph, declarationNodes));
+      directPostconditionCallees,
+      references,
+      dependencies);
+  }
+
+  private sealed class ResolvedDeclarationFacts {
+    private readonly IReadOnlyDictionary<INode, IReadOnlyList<DefinitionReference>> references;
+    private readonly IReadOnlyDictionary<INode, IReadOnlyList<string>> directPostconditionCallees;
+
+    private ResolvedDeclarationFacts(
+      IReadOnlyDictionary<INode, IReadOnlyList<DefinitionReference>> references,
+      IReadOnlyDictionary<INode, IReadOnlyList<string>> directPostconditionCallees) {
+      this.references = references;
+      this.directPostconditionCallees = directPostconditionCallees;
+    }
+
+    public static ResolvedDeclarationFacts For(
+      IReadOnlyList<DefinitionNode> declarations,
+      IReadOnlyDictionary<INode, DefinitionNode> declarationNodes) {
+      var uniqueDeclarations = declarations
+        .Where(declaration => declaration.BodyKind != DefinitionBodyKind.FunctionByMethod)
+        .ToList();
+      return new ResolvedDeclarationFacts(
+        uniqueDeclarations.ToDictionary(
+          declaration => declaration.Declaration,
+          declaration => (IReadOnlyList<DefinitionReference>)DefinitionAnalysis.ReferencesFor(
+            declaration,
+            declarationNodes)),
+        uniqueDeclarations.ToDictionary(
+          declaration => declaration.Declaration,
+          declaration => (IReadOnlyList<string>)DefinitionAnalysis.DirectPostconditionCalleesFor(
+            declaration,
+            declarationNodes)));
+    }
+
+    public IReadOnlyList<DefinitionReference> ReferencesFor(INode declaration) {
+      return references[declaration];
+    }
+
+    public IReadOnlyList<string> DirectPostconditionCalleesFor(INode declaration) {
+      return directPostconditionCallees[declaration];
+    }
   }
 
   private static List<DefinitionReference> ReferencesFor(
@@ -211,7 +279,7 @@ public static class DefinitionAnalysis {
       .Distinct()
       .OrderBy(reference => reference.Start)
       .ThenBy(reference => reference.End)
-      .ThenBy(reference => reference.TargetFullName)
+      .ThenBy(reference => reference.TargetFullName, StringComparer.Ordinal)
       .ToList();
   }
 
@@ -223,7 +291,7 @@ public static class DefinitionAnalysis {
     var end = reference.Referer.EndToken.pos + reference.Referer.EndToken.val.Length;
     if (declarationNodes.TryGetValue(reference.Referred, out var target)) {
       var suffix = $".{target.Name}";
-      var targetModule = target.ReportFullName.EndsWith(suffix)
+      var targetModule = target.ReportFullName.EndsWith(suffix, StringComparison.Ordinal)
         ? target.ReportFullName[..^suffix.Length]
         : target.EnclosingName;
       return new DefinitionReference(
@@ -274,7 +342,7 @@ public static class DefinitionAnalysis {
       .Where(node => node != declaration)
       .Select(node => node.ReportFullName)
       .Distinct()
-      .OrderBy(name => name)
+      .OrderBy(name => name, StringComparer.Ordinal)
       .ToList();
   }
 
@@ -291,7 +359,7 @@ public static class DefinitionAnalysis {
     }
   }
 
-  private static string SourcePath(INode declaration) {
+  internal static string SourcePath(INode declaration) {
     var filename = declaration.StartToken.ActualFilename;
     return filename == null ? "" : Path.GetFullPath(filename);
   }
@@ -308,9 +376,10 @@ public static class DefinitionAnalysis {
     var modules = spansOnly ? ParsedModules(program) : program.Modules();
     foreach (var moduleDefinition in modules) {
       foreach (var topLevelDecl in moduleDefinition.TopLevelDecls) {
-        if (topLevelDecl is DatatypeDecl datatypeDecl &&
-            (includeIncludes || !topLevelDecl.Origin.FromIncludeDirective(program))) {
-          declarations.Add(DefinitionNode.ForDatatype(datatypeDecl, moduleDefinition.Name));
+        var topLevelFromInclude = topLevelDecl.Origin.FromIncludeDirective(program);
+        if (topLevelDecl is DatatypeDecl datatypeDecl && (includeIncludes || !topLevelFromInclude)) {
+          var purpose = NodePurpose(spansOnly, topLevelFromInclude);
+          declarations.Add(DefinitionNode.ForDatatype(datatypeDecl, moduleDefinition.Name, purpose));
         }
 
         if (topLevelDecl is not TopLevelDeclWithMembers topLevelDeclWithMembers) {
@@ -321,25 +390,34 @@ public static class DefinitionAnalysis {
           if (AutoGeneratedOrigin.Is(member.Origin)) {
             continue;
           }
-          if (!includeIncludes && member.Origin.FromIncludeDirective(program)) {
+          var memberFromInclude = member.Origin.FromIncludeDirective(program);
+          if (!includeIncludes && memberFromInclude) {
             continue;
           }
 
+          var purpose = NodePurpose(spansOnly, memberFromInclude);
           if (member is Function function) {
-            declarations.Add(DefinitionNode.ForFunction(function, moduleDefinition.Name));
+            declarations.Add(DefinitionNode.ForFunction(function, moduleDefinition.Name, purpose));
             if (!spansOnly && function.ByMethodBody != null) {
-              declarations.Add(DefinitionNode.ForFunctionByMethod(function, moduleDefinition.Name));
+              declarations.Add(DefinitionNode.ForFunctionByMethod(function, moduleDefinition.Name, purpose));
             }
           } else if (member is MethodOrConstructor method && method is not Method { IsByMethod: true }) {
-            declarations.Add(DefinitionNode.ForMethod(method, moduleDefinition.Name));
+            declarations.Add(DefinitionNode.ForMethod(method, moduleDefinition.Name, purpose));
           } else if (member is ConstantField constant && constant.EnclosingClass is DefaultClassDecl) {
-            declarations.Add(DefinitionNode.ForConstant(constant, moduleDefinition.Name));
+            declarations.Add(DefinitionNode.ForConstant(constant, moduleDefinition.Name, purpose));
           }
         }
       }
     }
 
     return declarations;
+
+    static DefinitionNodePurpose NodePurpose(bool spansOnly, bool fromInclude) {
+      if (spansOnly) {
+        return DefinitionNodePurpose.Spans;
+      }
+      return fromInclude ? DefinitionNodePurpose.ResolvedInclude : DefinitionNodePurpose.ResolvedRoot;
+    }
   }
 
   internal static IEnumerable<ModuleDefinition> ParsedModules(Program program) {
@@ -361,49 +439,92 @@ public static class DefinitionAnalysis {
     }
   }
 
-  private static List<DefinitionNode> CalledDefinitionSequence(
+  private sealed record CallTargetIndex(
+    IReadOnlyDictionary<Function, DefinitionNode> FunctionNodes,
+    IReadOnlyDictionary<Function, DefinitionNode> ByMethodNodes,
+    IReadOnlyDictionary<MethodOrConstructor, DefinitionNode> MethodNodes
+  ) {
+    public static CallTargetIndex For(IReadOnlyList<DefinitionNode> declarations) {
+      var functionNodes = new Dictionary<Function, DefinitionNode>();
+      var byMethodNodes = new Dictionary<Function, DefinitionNode>();
+      var methodNodes = new Dictionary<MethodOrConstructor, DefinitionNode>();
+      foreach (var declaration in declarations) {
+        switch (declaration.BodyKind) {
+          case DefinitionBodyKind.Function:
+            functionNodes.Add((Function)declaration.Declaration, declaration);
+            break;
+          case DefinitionBodyKind.FunctionByMethod:
+            byMethodNodes.Add((Function)declaration.Declaration, declaration);
+            break;
+          case DefinitionBodyKind.Method:
+            methodNodes.Add((MethodOrConstructor)declaration.Declaration, declaration);
+            break;
+          default:
+            throw new InvalidOperationException($"Unexpected callable body kind: {declaration.BodyKind}");
+        }
+      }
+      return new CallTargetIndex(functionNodes, byMethodNodes, methodNodes);
+    }
+  }
+
+  private sealed record CallFacts(
+    IReadOnlyList<DefinitionNode> Sequence,
+    HashSet<DefinitionNode> UniqueCallees
+  );
+
+  private static CallFacts CalledDefinitions(
     DefinitionNode declaration,
-    IReadOnlyList<DefinitionNode> rootDeclarations) {
-    var functionNodes = rootDeclarations
-      .Where(node => node.BodyKind == DefinitionBodyKind.Function)
-      .ToDictionary(node => (Function)node.Declaration);
-    var byMethodNodes = rootDeclarations
-      .Where(node => node.BodyKind == DefinitionBodyKind.FunctionByMethod)
-      .ToDictionary(node => (Function)node.Declaration);
-    var methodNodes = rootDeclarations
-      .Where(node => node.BodyKind == DefinitionBodyKind.Method)
-      .ToDictionary(node => (MethodOrConstructor)node.Declaration);
-    var called = new List<DefinitionNode>();
+    CallTargetIndex callTargetIndex) {
+    var sequence = new List<DefinitionNode>();
+    var uniqueCallees = new HashSet<DefinitionNode>();
 
     foreach (var expression in declaration.SpecificationExpressions) {
-      CollectExpressionCalls(expression, functionNodes, byMethodNodes, called);
+      CollectExpressionCalls(
+        expression,
+        callTargetIndex.FunctionNodes,
+        callTargetIndex.ByMethodNodes,
+        sequence,
+        uniqueCallees);
     }
 
     if (declaration.ExpressionBody != null) {
-      CollectExpressionCalls(declaration.ExpressionBody, functionNodes, byMethodNodes, called);
+      CollectExpressionCalls(
+        declaration.ExpressionBody,
+        callTargetIndex.FunctionNodes,
+        callTargetIndex.ByMethodNodes,
+        sequence,
+        uniqueCallees);
     }
 
     if (declaration.StatementBody != null) {
-      CollectStatementCalls(declaration.StatementBody, functionNodes, byMethodNodes, methodNodes, called);
+      CollectStatementCalls(
+        declaration.StatementBody,
+        callTargetIndex.FunctionNodes,
+        callTargetIndex.ByMethodNodes,
+        callTargetIndex.MethodNodes,
+        sequence,
+        uniqueCallees);
     }
 
-    return called;
+    return new CallFacts(sequence, uniqueCallees);
   }
 
   private static void CollectExpressionCalls(
     Expression expression,
     IReadOnlyDictionary<Function, DefinitionNode> functionNodes,
     IReadOnlyDictionary<Function, DefinitionNode> byMethodNodes,
-    List<DefinitionNode> called) {
+    List<DefinitionNode> sequence,
+    HashSet<DefinitionNode> uniqueCallees) {
     if (expression is FunctionCallExpr { Function: { } function } functionCall) {
       var nodes = functionCall.IsByMethodCall ? byMethodNodes : functionNodes;
       if (nodes.TryGetValue(function, out var target)) {
-        called.Add(target);
+        sequence.Add(target);
+        uniqueCallees.Add(target);
       }
     }
 
     foreach (var subExpression in expression.SubExpressions) {
-      CollectExpressionCalls(subExpression, functionNodes, byMethodNodes, called);
+      CollectExpressionCalls(subExpression, functionNodes, byMethodNodes, sequence, uniqueCallees);
     }
   }
 
@@ -412,17 +533,19 @@ public static class DefinitionAnalysis {
     IReadOnlyDictionary<Function, DefinitionNode> functionNodes,
     IReadOnlyDictionary<Function, DefinitionNode> byMethodNodes,
     IReadOnlyDictionary<MethodOrConstructor, DefinitionNode> methodNodes,
-    List<DefinitionNode> called) {
+    List<DefinitionNode> sequence,
+    HashSet<DefinitionNode> uniqueCallees) {
     if (statement is CallStmt callStmt && methodNodes.TryGetValue(callStmt.Method, out var methodTarget)) {
-      called.Add(methodTarget);
+      sequence.Add(methodTarget);
+      uniqueCallees.Add(methodTarget);
     }
 
     foreach (var expression in statement.SubExpressions) {
-      CollectExpressionCalls(expression, functionNodes, byMethodNodes, called);
+      CollectExpressionCalls(expression, functionNodes, byMethodNodes, sequence, uniqueCallees);
     }
 
     foreach (var subStatement in statement.SubStatements) {
-      CollectStatementCalls(subStatement, functionNodes, byMethodNodes, methodNodes, called);
+      CollectStatementCalls(subStatement, functionNodes, byMethodNodes, methodNodes, sequence, uniqueCallees);
     }
   }
 
@@ -476,15 +599,17 @@ public static class DefinitionAnalysis {
     if (expression == null) {
       return false;
     }
-    expression = UnwrapExpression(expression);
-    if (IsExitRange(expression)) {
-      return true;
-    }
-    if (expression is BinaryExpr { Op: BinaryExpr.Opcode.Or } binaryExpr &&
-        (IsExitRange(binaryExpr.E0) || IsExitRange(binaryExpr.E1))) {
+    if (IsBroadExitRangeDisjunct(expression)) {
       return true;
     }
     return expression.SubExpressions.Any(ContainsBroadExitRangeDisjunct);
+  }
+
+  internal static bool IsBroadExitRangeDisjunct(Expression expression) {
+    expression = UnwrapExpression(expression);
+    return IsExitRange(expression) ||
+           expression is BinaryExpr { Op: BinaryExpr.Opcode.Or } binaryExpr &&
+           (IsExitRange(binaryExpr.E0) || IsExitRange(binaryExpr.E1));
   }
 
   internal static bool StatementContainsBroadExitRangeDisjunct(Statement? statement) {
@@ -560,35 +685,32 @@ public static class DefinitionAnalysis {
            declaration.EntireRange.PrintOriginal().Contains("World");
   }
 
-  private static HashSet<DefinitionNode> RecursiveDefinitions(Dictionary<DefinitionNode, HashSet<DefinitionNode>> graph) {
-    var recursive = graph
-      .Where(item => item.Value.Contains(item.Key))
-      .Select(item => item.Key)
-      .ToHashSet();
+  private sealed record RecursionFacts(
+    IReadOnlySet<DefinitionNode> RecursiveDeclarations,
+    IReadOnlyDictionary<DefinitionNode, IReadOnlyList<string>> GroupNames
+  );
 
-    foreach (var component in StronglyConnectedComponents(graph)) {
-      if (component.Count > 1) {
-        recursive.UnionWith(component);
-      }
-    }
-
-    return recursive;
-  }
-
-  private static Dictionary<DefinitionNode, HashSet<DefinitionNode>> RecursiveGroups(
+  private static RecursionFacts AnalyzeRecursion(
     Dictionary<DefinitionNode, HashSet<DefinitionNode>> graph) {
-    var groups = new Dictionary<DefinitionNode, HashSet<DefinitionNode>>();
+    var recursiveDeclarations = new HashSet<DefinitionNode>();
+    var groupNames = new Dictionary<DefinitionNode, IReadOnlyList<string>>();
     foreach (var component in StronglyConnectedComponents(graph)) {
-      if (component.Count == 1 && !graph[component.Single()].Contains(component.Single())) {
+      var first = component.First();
+      if (component.Count == 1 && !graph[first].Contains(first)) {
         continue;
       }
 
+      var names = component
+        .Select(item => item.ReportFullName)
+        .OrderBy(name => name, StringComparer.Ordinal)
+        .ToArray();
       foreach (var item in component) {
-        groups[item] = component;
+        recursiveDeclarations.Add(item);
+        groupNames.Add(item, names);
       }
     }
 
-    return groups;
+    return new RecursionFacts(recursiveDeclarations, groupNames);
   }
 
   private static List<HashSet<DefinitionNode>> StronglyConnectedComponents(
@@ -633,7 +755,7 @@ public static class DefinitionAnalysis {
         var item = stack.Pop();
         onStack.Remove(item);
         component.Add(item);
-        if (item == node) {
+        if (ReferenceEquals(item, node)) {
           break;
         }
       }
@@ -652,7 +774,8 @@ internal sealed record SourceFacts(
 ) {
   public static SourceFacts For(Program program) {
     var rootUris = program.Compilation.RootSourceUris.ToHashSet();
-    var rootModules = DefinitionAnalysis.ParsedModules(program)
+    var parsedModules = DefinitionAnalysis.ParsedModules(program).ToList();
+    var rootModules = parsedModules
       .Where(module => !module.IsDefaultModule && !module.Origin.FromIncludeDirective(program))
       .ToList();
 
@@ -661,21 +784,21 @@ internal sealed record SourceFacts(
       .ToList();
 
     return new SourceFacts(
-      rootModules.Select(module => module.Name).Distinct().OrderBy(name => name).ToList(),
+      rootModules.Select(module => module.Name).Distinct().OrderBy(name => name, StringComparer.Ordinal).ToList(),
       rootIncludes.Select(include => Path.GetFileName(include.IncludedFilename.LocalPath))
         .Distinct()
-        .OrderBy(name => name)
+        .OrderBy(name => name, StringComparer.Ordinal)
         .ToList(),
       rootIncludes.Where(IsSameDirectoryDafnyInclude)
         .Select(include => Path.GetFileNameWithoutExtension(include.IncludedFilename.LocalPath))
         .Distinct()
-        .OrderBy(name => name)
+        .OrderBy(name => name, StringComparer.Ordinal)
         .ToList(),
-      DefinitionAnalysis.ParsedModules(program)
+      parsedModules
         .Where(module => !module.Origin.FromIncludeDirective(program))
         .SelectMany(module => ImportedModuleNames(program, module))
         .Distinct()
-        .OrderBy(name => name)
+        .OrderBy(name => name, StringComparer.Ordinal)
         .ToList(),
       rootIncludes
         .Where(include => Path.GetExtension(include.IncludedFilename.LocalPath) == ".dfy")
@@ -743,18 +866,19 @@ internal enum DefinitionBodyKind {
   Constant
 }
 
-internal sealed record DefinitionNode(
-  INode Declaration,
-  DefinitionBodyKind BodyKind,
-  string Name,
-  string ReportFullName,
-  string Kind,
-  string EnclosingName,
+internal enum DefinitionNodePurpose {
+  ResolvedRoot,
+  ResolvedInclude,
+  Spans
+}
+
+internal sealed record DefinitionReportFacts(
   int Line,
   int Column,
   int Start,
   int? BodyStart,
   int End,
+  string SourcePath,
   bool Ghost,
   bool HasByMethod,
   bool HasLoop,
@@ -776,14 +900,105 @@ internal sealed record DefinitionNode(
   IReadOnlyList<string> Requires,
   IReadOnlyList<string> Ensures,
   IReadOnlyList<string> Modifies,
-  IReadOnlyList<Expression> SpecificationExpressions,
   IReadOnlyList<string> CallNames,
-  Expression? ExpressionBody,
-  Statement? StatementBody,
   IReadOnlyList<Type> Types
+);
+
+internal sealed class DefinitionNode(
+  INode declaration,
+  DefinitionBodyKind bodyKind,
+  string name,
+  string reportFullName,
+  string kind,
+  string enclosingName,
+  IReadOnlyList<Expression> specificationExpressions,
+  Expression? expressionBody,
+  Statement? statementBody,
+  DefinitionReportFacts? reportFacts
 ) {
-  public static DefinitionNode ForFunction(Function function, string enclosingName) {
+  public INode Declaration { get; } = declaration;
+  public DefinitionBodyKind BodyKind { get; } = bodyKind;
+  public string Name { get; } = name;
+  public string ReportFullName { get; } = reportFullName;
+  public string Kind { get; } = kind;
+  public string EnclosingName { get; } = enclosingName;
+  public IReadOnlyList<Expression> SpecificationExpressions { get; } = specificationExpressions;
+  public Expression? ExpressionBody { get; } = expressionBody;
+  public Statement? StatementBody { get; } = statementBody;
+  public DefinitionReportFacts? ReportFacts { get; } = reportFacts;
+
+  public int Line => ReportFacts!.Line;
+  public int Column => ReportFacts!.Column;
+  public int Start => ReportFacts!.Start;
+  public int? BodyStart => ReportFacts!.BodyStart;
+  public int End => ReportFacts!.End;
+  public string SourcePath => ReportFacts!.SourcePath;
+  public bool Ghost => ReportFacts!.Ghost;
+  public bool HasByMethod => ReportFacts!.HasByMethod;
+  public bool HasLoop => ReportFacts!.HasLoop;
+  public bool WorldRelated => ReportFacts!.WorldRelated;
+  public string DeclarationKind => ReportFacts!.DeclarationKind;
+  public bool HasAxiomAttribute => ReportFacts!.HasAxiomAttribute;
+  public bool HasExternAttribute => ReportFacts!.HasExternAttribute;
+  public bool HasVerifyFalseAttribute => ReportFacts!.HasVerifyFalseAttribute;
+  public bool HasAssumeStatement => ReportFacts!.HasAssumeStatement;
+  public bool HasVarDeclaration => ReportFacts!.HasVarDeclaration;
+  public string BodyShape => ReportFacts!.BodyShape;
+  public bool HasBroadExitRangeDisjunct => ReportFacts!.HasBroadExitRangeDisjunct;
+  public IReadOnlyList<string> TypeParameters => ReportFacts!.TypeParameters;
+  public IReadOnlyList<string> TypeParameterNames => ReportFacts!.TypeParameterNames;
+  public IReadOnlyList<string> Parameters => ReportFacts!.Parameters;
+  public IReadOnlyList<string> ParameterNames => ReportFacts!.ParameterNames;
+  public IReadOnlyList<string> Returns => ReportFacts!.Returns;
+  public IReadOnlyList<string> ReturnNames => ReportFacts!.ReturnNames;
+  public IReadOnlyList<string> Requires => ReportFacts!.Requires;
+  public IReadOnlyList<string> Ensures => ReportFacts!.Ensures;
+  public IReadOnlyList<string> Modifies => ReportFacts!.Modifies;
+  public IReadOnlyList<string> CallNames => ReportFacts!.CallNames;
+  public IReadOnlyList<Type> Types => ReportFacts!.Types;
+
+  public static DefinitionNode ForFunction(
+    Function function,
+    string enclosingName,
+    DefinitionNodePurpose purpose) {
     var specificationExpressions = SpecificationExpressionsFor(function);
+    DefinitionReportFacts? reportFacts = null;
+    if (purpose != DefinitionNodePurpose.ResolvedInclude) {
+      var bodyAnalysis = AnalyzeExpressionBody(function.Body);
+      reportFacts = new DefinitionReportFacts(
+        function.Origin.line,
+        function.Origin.col,
+        function.StartToken.pos,
+        BodyStartOffset(function),
+        EndOffset(function),
+        DefinitionAnalysis.SourcePath(function),
+        function.IsGhost,
+        function.ByMethodBody != null,
+        false,
+        DefinitionAnalysis.WorldRelated(function),
+        function.WhatKind,
+        function.HasAxiomAttribute,
+        function.HasExternAttribute,
+        function.HasVerifyFalseAttribute,
+        false,
+        false,
+        DefinitionAnalysis.BodyShape(function.Body),
+        specificationExpressions.Any(DefinitionAnalysis.ContainsBroadExitRangeDisjunct) ||
+          bodyAnalysis.HasBroadExitRangeDisjunct,
+        TypeParameterTexts(function.TypeArgs),
+        TypeParameterNameTexts(function.TypeArgs),
+        ParameterTexts(function),
+        ParameterNameTexts(function),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        bodyAnalysis.CallNames,
+        purpose == DefinitionNodePurpose.ResolvedRoot
+          ? [.. function.Ins.Select(formal => formal.Type), function.ResultType]
+          : Array.Empty<Type>());
+    }
     return new DefinitionNode(
       function,
       DefinitionBodyKind.Function,
@@ -791,40 +1006,52 @@ internal sealed record DefinitionNode(
       FullName(function, enclosingName),
       function.WhatKind,
       enclosingName,
-      function.Origin.line,
-      function.Origin.col,
-      function.StartToken.pos,
-      BodyStartOffset(function),
-      EndOffset(function),
-      function.IsGhost,
-      function.ByMethodBody != null,
-      false,
-      DefinitionAnalysis.WorldRelated(function),
-      function.WhatKind,
-      function.HasAxiomAttribute,
-      function.HasExternAttribute,
-      function.HasVerifyFalseAttribute,
-      false,
-      false,
-      DefinitionAnalysis.BodyShape(function.Body),
-      ContainsBroadExitRangeDisjunct(specificationExpressions, function.Body, null),
-      TypeParameterTexts(function.TypeArgs),
-      TypeParameterNameTexts(function.TypeArgs),
-      ParameterTexts(function),
-      ParameterNameTexts(function),
-      [],
-      [],
-      [],
-      [],
-      [],
-      specificationExpressions,
-      CollectCallNameList(function.Body, null),
-      function.Body,
+      purpose == DefinitionNodePurpose.Spans ? Array.Empty<Expression>() : specificationExpressions,
+      purpose == DefinitionNodePurpose.Spans ? null : function.Body,
       null,
-      [.. function.Ins.Select(formal => formal.Type), function.ResultType]);
+      reportFacts);
   }
 
-  public static DefinitionNode ForFunctionByMethod(Function function, string enclosingName) {
+  public static DefinitionNode ForFunctionByMethod(
+    Function function,
+    string enclosingName,
+    DefinitionNodePurpose purpose) {
+    DefinitionReportFacts? reportFacts = null;
+    if (purpose != DefinitionNodePurpose.ResolvedInclude) {
+      var bodyAnalysis = AnalyzeStatementBody(function.ByMethodBody);
+      reportFacts = new DefinitionReportFacts(
+        function.Origin.line,
+        function.Origin.col,
+        function.StartToken.pos,
+        function.ByMethodBody?.StartToken.pos,
+        EndOffset(function),
+        DefinitionAnalysis.SourcePath(function),
+        function.IsGhost,
+        true,
+        bodyAnalysis.HasLoop,
+        false,
+        "by-method",
+        function.HasAxiomAttribute,
+        function.HasExternAttribute,
+        function.HasVerifyFalseAttribute,
+        bodyAnalysis.HasAssumeStatement,
+        bodyAnalysis.HasVarDeclaration,
+        "",
+        bodyAnalysis.HasBroadExitRangeDisjunct,
+        TypeParameterTexts(function.TypeArgs),
+        TypeParameterNameTexts(function.TypeArgs),
+        ParameterTexts(function),
+        ParameterNameTexts(function),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        bodyAnalysis.CallNames,
+        purpose == DefinitionNodePurpose.ResolvedRoot
+          ? [.. function.Ins.Select(formal => formal.Type), function.ResultType]
+          : Array.Empty<Type>());
+    }
     return new DefinitionNode(
       function,
       DefinitionBodyKind.FunctionByMethod,
@@ -832,41 +1059,54 @@ internal sealed record DefinitionNode(
       FullName(function, enclosingName) + "#by-method",
       "function-by-method",
       enclosingName,
-      function.Origin.line,
-      function.Origin.col,
-      function.StartToken.pos,
-      function.ByMethodBody?.StartToken.pos,
-      EndOffset(function),
-      function.IsGhost,
-      true,
-      DefinitionAnalysis.ContainsLoop(function.ByMethodBody),
-      false,
-      "by-method",
-      function.HasAxiomAttribute,
-      function.HasExternAttribute,
-      function.HasVerifyFalseAttribute,
-      DefinitionAnalysis.ContainsAssume(function.ByMethodBody),
-      DefinitionAnalysis.ContainsVarDeclaration(function.ByMethodBody),
-      "",
-      ContainsBroadExitRangeDisjunct([], null, function.ByMethodBody),
-      TypeParameterTexts(function.TypeArgs),
-      TypeParameterNameTexts(function.TypeArgs),
-      ParameterTexts(function),
-      ParameterNameTexts(function),
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      CollectCallNameList(null, function.ByMethodBody),
+      Array.Empty<Expression>(),
       null,
-      function.ByMethodBody,
-      [.. function.Ins.Select(formal => formal.Type), function.ResultType]);
+      purpose == DefinitionNodePurpose.Spans ? null : function.ByMethodBody,
+      reportFacts);
   }
 
-  public static DefinitionNode ForMethod(MethodOrConstructor method, string enclosingName) {
+  public static DefinitionNode ForMethod(
+    MethodOrConstructor method,
+    string enclosingName,
+    DefinitionNodePurpose purpose) {
     var specificationExpressions = SpecificationExpressionsFor(method);
+    DefinitionReportFacts? reportFacts = null;
+    if (purpose != DefinitionNodePurpose.ResolvedInclude) {
+      var bodyAnalysis = AnalyzeStatementBody(method.Body);
+      reportFacts = new DefinitionReportFacts(
+        method.Origin.line,
+        method.Origin.col,
+        method.StartToken.pos,
+        BodyStartOffset(method),
+        EndOffset(method),
+        DefinitionAnalysis.SourcePath(method),
+        method.IsGhost,
+        false,
+        bodyAnalysis.HasLoop,
+        false,
+        method.WhatKind,
+        method.HasAxiomAttribute,
+        method.HasExternAttribute,
+        method.HasVerifyFalseAttribute,
+        bodyAnalysis.HasAssumeStatement,
+        bodyAnalysis.HasVarDeclaration,
+        "",
+        specificationExpressions.Any(DefinitionAnalysis.ContainsBroadExitRangeDisjunct) ||
+          bodyAnalysis.HasBroadExitRangeDisjunct,
+        TypeParameterTexts(method.TypeArgs),
+        TypeParameterNameTexts(method.TypeArgs),
+        ParameterTexts(method),
+        ParameterNameTexts(method),
+        method.Outs.Select(formal => $"{formal.Name}: {formal.Type}").ToList(),
+        method.Outs.Select(formal => formal.Name).ToList(),
+        method.Req.Select(item => item.E.EntireRange.PrintOriginal()).ToList(),
+        method.Ens.Select(item => item.E.EntireRange.PrintOriginal()).ToList(),
+        method.Mod?.Expressions?.Select(item => item.EntireRange.PrintOriginal()).ToList() ?? [],
+        bodyAnalysis.CallNames,
+        purpose == DefinitionNodePurpose.ResolvedRoot
+          ? [.. method.Ins.Select(formal => formal.Type), .. method.Outs.Select(formal => formal.Type)]
+          : Array.Empty<Type>());
+    }
     return new DefinitionNode(
       method,
       DefinitionBodyKind.Method,
@@ -874,40 +1114,51 @@ internal sealed record DefinitionNode(
       FullName(method, enclosingName),
       method is Constructor ? "constructor" : "method",
       enclosingName,
-      method.Origin.line,
-      method.Origin.col,
-      method.StartToken.pos,
-      BodyStartOffset(method),
-      EndOffset(method),
-      method.IsGhost,
-      false,
-      DefinitionAnalysis.ContainsLoop(method.Body),
-      false,
-      method.WhatKind,
-      method.HasAxiomAttribute,
-      method.HasExternAttribute,
-      method.HasVerifyFalseAttribute,
-      DefinitionAnalysis.ContainsAssume(method.Body),
-      DefinitionAnalysis.ContainsVarDeclaration(method.Body),
-      "",
-      ContainsBroadExitRangeDisjunct(specificationExpressions, null, method.Body),
-      TypeParameterTexts(method.TypeArgs),
-      TypeParameterNameTexts(method.TypeArgs),
-      ParameterTexts(method),
-      ParameterNameTexts(method),
-      method.Outs.Select(formal => $"{formal.Name}: {formal.Type}").ToList(),
-      method.Outs.Select(formal => formal.Name).ToList(),
-      method.Req.Select(item => item.E.EntireRange.PrintOriginal()).ToList(),
-      method.Ens.Select(item => item.E.EntireRange.PrintOriginal()).ToList(),
-      method.Mod?.Expressions?.Select(item => item.EntireRange.PrintOriginal()).ToList() ?? [],
-      specificationExpressions,
-      CollectCallNameList(null, method.Body),
+      purpose == DefinitionNodePurpose.Spans ? Array.Empty<Expression>() : specificationExpressions,
       null,
-      method.Body,
-      [.. method.Ins.Select(formal => formal.Type), .. method.Outs.Select(formal => formal.Type)]);
+      purpose == DefinitionNodePurpose.Spans ? null : method.Body,
+      reportFacts);
   }
 
-  public static DefinitionNode ForDatatype(DatatypeDecl datatype, string enclosingName) {
+  public static DefinitionNode ForDatatype(
+    DatatypeDecl datatype,
+    string enclosingName,
+    DefinitionNodePurpose purpose) {
+    DefinitionReportFacts? reportFacts = null;
+    if (purpose != DefinitionNodePurpose.ResolvedInclude) {
+      reportFacts = new DefinitionReportFacts(
+        datatype.Origin.line,
+        datatype.Origin.col,
+        datatype.StartToken.pos,
+        null,
+        EndOffset(datatype),
+        DefinitionAnalysis.SourcePath(datatype),
+        false,
+        false,
+        false,
+        false,
+        "datatype",
+        datatype.HasAxiomAttribute,
+        datatype.HasExternAttribute,
+        datatype.HasVerifyFalseAttribute,
+        false,
+        false,
+        "",
+        false,
+        TypeParameterTexts(datatype.TypeArgs),
+        TypeParameterNameTexts(datatype.TypeArgs),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        purpose == DefinitionNodePurpose.ResolvedRoot
+          ? [.. datatype.Ctors.SelectMany(constructor => constructor.Formals).Select(formal => formal.Type)]
+          : Array.Empty<Type>());
+    }
     return new DefinitionNode(
       datatype,
       DefinitionBodyKind.Datatype,
@@ -915,40 +1166,50 @@ internal sealed record DefinitionNode(
       FullName(datatype, enclosingName),
       "datatype",
       enclosingName,
-      datatype.Origin.line,
-      datatype.Origin.col,
-      datatype.StartToken.pos,
-      null,
-      EndOffset(datatype),
-      false,
-      false,
-      false,
-      false,
-      "datatype",
-      datatype.HasAxiomAttribute,
-      datatype.HasExternAttribute,
-      datatype.HasVerifyFalseAttribute,
-      false,
-      false,
-      "",
-      false,
-      TypeParameterTexts(datatype.TypeArgs),
-      TypeParameterNameTexts(datatype.TypeArgs),
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
+      Array.Empty<Expression>(),
       null,
       null,
-      [.. datatype.Ctors.SelectMany(constructor => constructor.Formals).Select(formal => formal.Type)]);
+      reportFacts);
   }
 
-  public static DefinitionNode ForConstant(ConstantField constant, string enclosingName) {
+  public static DefinitionNode ForConstant(
+    ConstantField constant,
+    string enclosingName,
+    DefinitionNodePurpose purpose) {
+    DefinitionReportFacts? reportFacts = null;
+    if (purpose != DefinitionNodePurpose.ResolvedInclude) {
+      var bodyAnalysis = AnalyzeExpressionBody(constant.Rhs);
+      reportFacts = new DefinitionReportFacts(
+        constant.Origin.line,
+        constant.Origin.col,
+        constant.StartToken.pos,
+        null,
+        EndOffset(constant),
+        DefinitionAnalysis.SourcePath(constant),
+        constant.IsGhost,
+        false,
+        false,
+        false,
+        constant.WhatKind,
+        constant.HasAxiomAttribute,
+        constant.HasExternAttribute,
+        constant.HasVerifyFalseAttribute,
+        false,
+        false,
+        DefinitionAnalysis.BodyShape(constant.Rhs),
+        bodyAnalysis.HasBroadExitRangeDisjunct,
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        Array.Empty<string>(),
+        bodyAnalysis.CallNames,
+        purpose == DefinitionNodePurpose.ResolvedRoot ? [constant.Type] : Array.Empty<Type>());
+    }
     return new DefinitionNode(
       constant,
       DefinitionBodyKind.Constant,
@@ -956,37 +1217,10 @@ internal sealed record DefinitionNode(
       FullName(constant, enclosingName),
       "constant",
       enclosingName,
-      constant.Origin.line,
-      constant.Origin.col,
-      constant.StartToken.pos,
+      Array.Empty<Expression>(),
       null,
-      EndOffset(constant),
-      constant.IsGhost,
-      false,
-      false,
-      false,
-      constant.WhatKind,
-      constant.HasAxiomAttribute,
-      constant.HasExternAttribute,
-      constant.HasVerifyFalseAttribute,
-      false,
-      false,
-      DefinitionAnalysis.BodyShape(constant.Rhs),
-      ContainsBroadExitRangeDisjunct([], constant.Rhs, null),
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      [],
-      CollectCallNameList(constant.Rhs, null),
-      constant.Rhs,
       null,
-      [constant.Type]);
+      reportFacts);
   }
 
   private static List<Expression> SpecificationExpressionsFor(MethodOrFunction declaration) {
@@ -1023,24 +1257,82 @@ internal sealed record DefinitionNode(
       .ToList();
   }
 
-  private static bool ContainsBroadExitRangeDisjunct(
-    IReadOnlyList<Expression> specificationExpressions,
-    Expression? expressionBody,
-    Statement? statementBody) {
-    return specificationExpressions.Any(DefinitionAnalysis.ContainsBroadExitRangeDisjunct) ||
-           DefinitionAnalysis.ContainsBroadExitRangeDisjunct(expressionBody) ||
-           DefinitionAnalysis.StatementContainsBroadExitRangeDisjunct(statementBody);
+  private sealed record ExpressionBodyAnalysis(
+    bool HasBroadExitRangeDisjunct,
+    IReadOnlyList<string> CallNames
+  );
+
+  private sealed record StatementBodyAnalysis(
+    bool HasLoop,
+    bool HasAssumeStatement,
+    bool HasVarDeclaration,
+    bool HasBroadExitRangeDisjunct,
+    IReadOnlyList<string> CallNames
+  );
+
+  private static ExpressionBodyAnalysis AnalyzeExpressionBody(Expression? expression) {
+    var names = new List<string>();
+    var hasBroadExitRangeDisjunct = false;
+    if (expression != null) {
+      VisitExpression(expression);
+    }
+    return new ExpressionBodyAnalysis(hasBroadExitRangeDisjunct, names);
+
+    void VisitExpression(Expression current) {
+      if (DefinitionAnalysis.IsBroadExitRangeDisjunct(current)) {
+        hasBroadExitRangeDisjunct = true;
+      }
+      if (current is ApplySuffix applySuffix) {
+        var name = SyntacticExpressionName(applySuffix.Lhs);
+        if (name.Length > 0) {
+          names.Add(name);
+        }
+      }
+      foreach (var subExpression in current.SubExpressions) {
+        VisitExpression(subExpression);
+      }
+    }
   }
 
-  private static List<string> CollectCallNameList(Expression? expressionBody, Statement? statementBody) {
+  private static StatementBodyAnalysis AnalyzeStatementBody(Statement? statement) {
+    var hasLoop = false;
+    var hasAssumeStatement = false;
+    var hasVarDeclaration = false;
+    var hasBroadExitRangeDisjunct = false;
+    if (statement == null) {
+      return new StatementBodyAnalysis(false, false, false, false, []);
+    }
+
+    VisitStatement(statement);
     var names = new List<string>();
-    if (expressionBody != null) {
-      CollectExpressionCallNames(expressionBody, names);
+    CollectStatementCallNames(statement, names);
+    return new StatementBodyAnalysis(
+      hasLoop,
+      hasAssumeStatement,
+      hasVarDeclaration,
+      hasBroadExitRangeDisjunct,
+      names);
+
+    void VisitStatement(Statement current) {
+      hasLoop |= current is LoopStmt;
+      hasAssumeStatement |= current is AssumeStmt or ExpectStmt;
+      hasVarDeclaration |= current is VarDeclStmt;
+      foreach (var expression in current.SubExpressions) {
+        VisitExpression(expression);
+      }
+      foreach (var subStatement in current.SubStatements) {
+        VisitStatement(subStatement);
+      }
     }
-    if (statementBody != null) {
-      CollectStatementCallNames(statementBody, names);
+
+    void VisitExpression(Expression current) {
+      if (DefinitionAnalysis.IsBroadExitRangeDisjunct(current)) {
+        hasBroadExitRangeDisjunct = true;
+      }
+      foreach (var subExpression in current.SubExpressions) {
+        VisitExpression(subExpression);
+      }
     }
-    return names;
   }
 
   private static void CollectStatementCallNames(Statement statement, List<string> names) {
