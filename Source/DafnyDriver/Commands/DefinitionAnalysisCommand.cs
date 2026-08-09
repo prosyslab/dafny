@@ -11,7 +11,9 @@ namespace Microsoft.Dafny;
 static class DefinitionAnalysisCommand {
   public static IEnumerable<Option> Options => new Option[] {
     Format,
-    SpansOnly
+    SpansOnly,
+    IncludeSourceFacts,
+    IncludeStatements
   }.Concat(DafnyCommands.ConsoleOutputOptions)
     .Concat(DafnyCommands.ResolverOptions);
 
@@ -19,10 +21,16 @@ static class DefinitionAnalysisCommand {
     "Output format. Only 'json' is currently supported.");
   private static readonly Option<bool> SpansOnly = new("--spans-only",
     "Report parse-level source spans without requiring name or type resolution.");
+  private static readonly Option<bool> IncludeSourceFacts = new("--include-source-facts",
+    "Wrap definitions and resolved source structure in a JSON document.");
+  private static readonly Option<bool> IncludeStatements = new("--include-statements",
+    "Report resolved statement spans, kinds, and direct call targets.");
 
   static DefinitionAnalysisCommand() {
     OptionRegistry.RegisterOption(Format, OptionScope.Cli);
     OptionRegistry.RegisterOption(SpansOnly, OptionScope.Cli);
+    OptionRegistry.RegisterOption(IncludeSourceFacts, OptionScope.Cli);
+    OptionRegistry.RegisterOption(IncludeStatements, OptionScope.Cli);
   }
 
   public static Command Create() {
@@ -44,6 +52,16 @@ static class DefinitionAnalysisCommand {
     }
 
     if (options.Get(SpansOnly)) {
+      if (options.Get(IncludeSourceFacts)) {
+        await options.ErrorWriter.WriteLineAsync(
+          "definition-analysis does not support --include-source-facts with --spans-only.");
+        return (int)ExitValue.PREPROCESSING_ERROR;
+      }
+      if (options.Get(IncludeStatements)) {
+        await options.ErrorWriter.WriteLineAsync(
+          "definition-analysis does not support --include-statements with --spans-only.");
+        return (int)ExitValue.PREPROCESSING_ERROR;
+      }
       return await ExecuteSpansOnly(options);
     }
 
@@ -54,7 +72,11 @@ static class DefinitionAnalysisCommand {
       return await compilation.GetAndReportExitCode();
     }
 
-    var results = DefinitionAnalysis.Analyze(resolution.ResolvedProgram);
+    var results = options.Get(IncludeSourceFacts)
+      ? (object)DefinitionAnalysis.AnalyzeDocument(
+        resolution.ResolvedProgram,
+        options.Get(IncludeStatements))
+      : DefinitionAnalysis.Analyze(resolution.ResolvedProgram, options.Get(IncludeStatements));
     var json = JsonSerializer.Serialize(results, new JsonSerializerOptions {
       PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
       WriteIndented = true
