@@ -27,9 +27,11 @@ public record DefinitionAnalysisResult(
   bool HasAxiomAttribute,
   bool HasExternAttribute,
   bool HasVerifyFalseAttribute,
+  IReadOnlyList<DefinitionAttribute> Attributes,
   bool HasAssumeStatement,
   bool HasVarDeclaration,
   IReadOnlyList<DefinitionStatement> Statements,
+  IReadOnlyList<DefinitionMemberAssignment> MemberAssignments,
   string BodyShape,
   bool HasBroadExitRangeDisjunct,
   IReadOnlyList<string> TypeParameters,
@@ -99,11 +101,26 @@ public record DefinitionFormal(
   bool Ghost
 );
 
+public record DefinitionAttribute(
+  string Name,
+  IReadOnlyList<string> Arguments,
+  int Start,
+  int End
+);
+
 public record DefinitionStatement(
   string Kind,
   int Start,
   int End,
   IReadOnlyList<string> DirectCallTargets
+);
+
+public record DefinitionMemberAssignment(
+  int Start,
+  int End,
+  string TargetFullName,
+  string ReceiverType,
+  bool TargetIsGhost
 );
 
 public record DefinitionPostconditionCall(
@@ -139,6 +156,22 @@ public record DefinitionAnalysisInclude(
 );
 
 public static class DefinitionAnalysis {
+  internal static IReadOnlyList<DefinitionAttribute> AttributesFor(INode declaration) {
+    if (declaration is not IAttributeBearingDeclaration attributeBearing) {
+      return Array.Empty<DefinitionAttribute>();
+    }
+    return attributeBearing.Attributes.AsEnumerable()
+      .OfType<UserSuppliedAttributes>()
+      .Where(attribute => attribute.OpenBrace.IsValid && attribute.CloseBrace.IsValid)
+      .Select(attribute => new DefinitionAttribute(
+        attribute.Name,
+        attribute.Args.Select(argument => argument.EntireRange.PrintOriginal()).ToList(),
+        attribute.OpenBrace.pos,
+        attribute.CloseBrace.pos + attribute.CloseBrace.val.Length))
+      .OrderBy(attribute => attribute.Start)
+      .ToList();
+  }
+
   public static IReadOnlyList<DefinitionAnalysisResult> Analyze(Program program, bool includeStatements = false) {
     var sourceFacts = SourceFacts.For(program);
     return Analyze(program, sourceFacts, includeStatements: includeStatements);
@@ -240,6 +273,7 @@ public static class DefinitionAnalysis {
       resolvedDeclarationFacts.DirectPostconditionCalleesFor(declaration.Declaration),
       resolvedDeclarationFacts.DirectPostconditionCallsFor(declaration.Declaration),
       includeStatements ? declaration.Statements : Array.Empty<DefinitionStatement>(),
+      declaration.MemberAssignments,
       resolvedDeclarationFacts.ReferencesFor(declaration.Declaration),
       DependenciesFor(declaration, graph, declarationNodes));
   }
@@ -259,6 +293,7 @@ public static class DefinitionAnalysis {
       Array.Empty<string>(),
       Array.Empty<DefinitionPostconditionCall>(),
       Array.Empty<DefinitionStatement>(),
+      Array.Empty<DefinitionMemberAssignment>(),
       Array.Empty<DefinitionReference>(),
       Array.Empty<string>());
   }
@@ -275,6 +310,7 @@ public static class DefinitionAnalysis {
     IReadOnlyList<string> directPostconditionCallees,
     IReadOnlyList<DefinitionPostconditionCall> directPostconditionCalls,
     IReadOnlyList<DefinitionStatement> statements,
+    IReadOnlyList<DefinitionMemberAssignment> memberAssignments,
     IReadOnlyList<DefinitionReference> references,
     IReadOnlyList<string> dependencies) {
     return new DefinitionAnalysisResult(
@@ -296,9 +332,11 @@ public static class DefinitionAnalysis {
       declaration.HasAxiomAttribute,
       declaration.HasExternAttribute,
       declaration.HasVerifyFalseAttribute,
+      declaration.DeclarationAttributes,
       declaration.HasAssumeStatement,
       declaration.HasVarDeclaration,
       statements,
+      memberAssignments,
       declaration.BodyShape,
       declaration.HasBroadExitRangeDisjunct,
       declaration.TypeParameters,
@@ -316,9 +354,9 @@ public static class DefinitionAnalysis {
       declaration.Decreases,
       sourceFacts.SourceModules,
       sourceFacts.IncludedFiles,
-      sourceFacts.LocalIncludedModules,
-      sourceFacts.ImportedModules,
-      sourceFacts.LocalIncludes,
+      sourceFacts.LocalIncludedModulesFor(declaration.SourcePath),
+      sourceFacts.ImportedModulesFor(declaration.SourcePath),
+      sourceFacts.LocalIncludesFor(declaration.SourcePath),
       recursive,
       recursiveGroup,
       callees,
@@ -969,23 +1007,27 @@ internal sealed record SourceFacts(
   IReadOnlyList<string> IncludedFiles,
   IReadOnlyList<string> LocalIncludedModules,
   IReadOnlyList<string> ImportedModules,
-  IReadOnlyList<DefinitionAnalysisInclude> LocalIncludes
+  IReadOnlyList<DefinitionAnalysisInclude> LocalIncludes,
+  DefinitionSourceFacts Structured
 ) {
   public static SourceFacts For(Program program) {
     var parsedModules = DefinitionAnalysis.ParsedModules(program).ToList();
-    return LegacySourceFacts(program, parsedModules);
+    var structured = ProgramSourceFacts(program, parsedModules);
+    return LegacySourceFacts(program, parsedModules, structured);
   }
 
   public static (SourceFacts Legacy, DefinitionSourceFacts Program) ForDocument(Program program) {
     var parsedModules = DefinitionAnalysis.ParsedModules(program).ToList();
+    var structured = ProgramSourceFacts(program, parsedModules);
     return (
-      LegacySourceFacts(program, parsedModules),
-      ProgramSourceFacts(program, parsedModules));
+      LegacySourceFacts(program, parsedModules, structured),
+      structured);
   }
 
   private static SourceFacts LegacySourceFacts(
     Program program,
-    IReadOnlyList<ModuleDefinition> parsedModules) {
+    IReadOnlyList<ModuleDefinition> parsedModules,
+    DefinitionSourceFacts structured) {
     var rootUris = program.Compilation.RootSourceUris.ToHashSet();
     var rootModules = parsedModules
       .Where(module => !module.IsDefaultModule && !module.Origin.FromIncludeDirective(program))
@@ -1021,7 +1063,43 @@ internal sealed record SourceFacts(
           include.EndToken.pos + include.EndToken.val.Length))
         .OrderBy(include => include.SourcePath)
         .ThenBy(include => include.Start)
-        .ToList());
+        .ToList(),
+      structured);
+  }
+
+  public IReadOnlyList<string> LocalIncludedModulesFor(string sourcePath) {
+    var targetPaths = Structured.Includes
+      .Where(include => SamePath(include.SourcePath, sourcePath))
+      .Select(include => Path.GetFullPath(include.TargetPath))
+      .ToHashSet(StringComparer.Ordinal);
+    return Structured.Modules
+      .Where(module => targetPaths.Contains(Path.GetFullPath(module.SourcePath)))
+      .Select(module => module.Name)
+      .Distinct()
+      .OrderBy(name => name, StringComparer.Ordinal)
+      .ToList();
+  }
+
+  public IReadOnlyList<string> ImportedModulesFor(string sourcePath) {
+    return Structured.Imports
+      .Where(importItem => SamePath(importItem.SourcePath, sourcePath))
+      .Select(importItem => importItem.ResolvedTarget)
+      .Distinct()
+      .OrderBy(name => name, StringComparer.Ordinal)
+      .ToList();
+  }
+
+  public IReadOnlyList<DefinitionAnalysisInclude> LocalIncludesFor(string sourcePath) {
+    return Structured.Includes
+      .Where(include => SamePath(include.SourcePath, sourcePath))
+      .ToList();
+  }
+
+  private static bool SamePath(string left, string right) {
+    return string.Equals(
+      Path.GetFullPath(left),
+      Path.GetFullPath(right),
+      StringComparison.Ordinal);
   }
 
   private static DefinitionSourceFacts ProgramSourceFacts(
@@ -1166,6 +1244,7 @@ internal sealed record DefinitionReportFacts(
   bool HasAssumeStatement,
   bool HasVarDeclaration,
   IReadOnlyList<DefinitionStatement> Statements,
+  IReadOnlyList<DefinitionMemberAssignment> MemberAssignments,
   string BodyShape,
   bool HasBroadExitRangeDisjunct,
   IReadOnlyList<string> TypeParameters,
@@ -1236,9 +1315,12 @@ internal sealed class DefinitionNode(
   public bool HasAxiomAttribute => ReportFacts!.HasAxiomAttribute;
   public bool HasExternAttribute => ReportFacts!.HasExternAttribute;
   public bool HasVerifyFalseAttribute => ReportFacts!.HasVerifyFalseAttribute;
+  public IReadOnlyList<DefinitionAttribute> DeclarationAttributes =>
+    DefinitionAnalysis.AttributesFor(Declaration);
   public bool HasAssumeStatement => ReportFacts!.HasAssumeStatement;
   public bool HasVarDeclaration => ReportFacts!.HasVarDeclaration;
   public IReadOnlyList<DefinitionStatement> Statements => ReportFacts!.Statements;
+  public IReadOnlyList<DefinitionMemberAssignment> MemberAssignments => ReportFacts!.MemberAssignments;
   public string BodyShape => ReportFacts!.BodyShape;
   public bool HasBroadExitRangeDisjunct => ReportFacts!.HasBroadExitRangeDisjunct;
   public IReadOnlyList<string> TypeParameters => ReportFacts!.TypeParameters;
@@ -1285,6 +1367,7 @@ internal sealed class DefinitionNode(
         false,
         false,
         Array.Empty<DefinitionStatement>(),
+        Array.Empty<DefinitionMemberAssignment>(),
         DefinitionAnalysis.BodyShape(function.Body),
         specificationExpressions.Any(DefinitionAnalysis.ContainsBroadExitRangeDisjunct) ||
           bodyAnalysis.HasBroadExitRangeDisjunct,
@@ -1345,6 +1428,9 @@ internal sealed class DefinitionNode(
         purpose == DefinitionNodePurpose.Spans
           ? Array.Empty<DefinitionStatement>()
           : bodyAnalysis.Statements,
+        purpose == DefinitionNodePurpose.Spans
+          ? Array.Empty<DefinitionMemberAssignment>()
+          : bodyAnalysis.MemberAssignments,
         "",
         bodyAnalysis.HasBroadExitRangeDisjunct,
         TypeParameterTexts(function.TypeArgs),
@@ -1405,6 +1491,9 @@ internal sealed class DefinitionNode(
         purpose == DefinitionNodePurpose.Spans
           ? Array.Empty<DefinitionStatement>()
           : bodyAnalysis.Statements,
+        purpose == DefinitionNodePurpose.Spans
+          ? Array.Empty<DefinitionMemberAssignment>()
+          : bodyAnalysis.MemberAssignments,
         "",
         specificationExpressions.Any(DefinitionAnalysis.ContainsBroadExitRangeDisjunct) ||
           bodyAnalysis.HasBroadExitRangeDisjunct,
@@ -1462,6 +1551,7 @@ internal sealed class DefinitionNode(
         false,
         false,
         Array.Empty<DefinitionStatement>(),
+        Array.Empty<DefinitionMemberAssignment>(),
         "",
         false,
         TypeParameterTexts(datatype.TypeArgs),
@@ -1517,6 +1607,7 @@ internal sealed class DefinitionNode(
         false,
         false,
         Array.Empty<DefinitionStatement>(),
+        Array.Empty<DefinitionMemberAssignment>(),
         DefinitionAnalysis.BodyShape(constant.Rhs),
         bodyAnalysis.HasBroadExitRangeDisjunct,
         Array.Empty<string>(),
@@ -1680,7 +1771,8 @@ internal sealed class DefinitionNode(
     bool HasVarDeclaration,
     bool HasBroadExitRangeDisjunct,
     IReadOnlyList<string> CallNames,
-    IReadOnlyList<DefinitionStatement> Statements
+    IReadOnlyList<DefinitionStatement> Statements,
+    IReadOnlyList<DefinitionMemberAssignment> MemberAssignments
   );
 
   private static ExpressionBodyAnalysis AnalyzeExpressionBody(Expression? expression) {
@@ -1713,10 +1805,11 @@ internal sealed class DefinitionNode(
     var hasVarDeclaration = false;
     var hasBroadExitRangeDisjunct = false;
     if (statement == null) {
-      return new StatementBodyAnalysis(false, false, false, false, [], []);
+      return new StatementBodyAnalysis(false, false, false, false, [], [], []);
     }
 
     var statements = new List<DefinitionStatement>();
+    var memberAssignments = new List<DefinitionMemberAssignment>();
     VisitStatement(statement);
     var names = new List<string>();
     CollectStatementCallNames(statement, names);
@@ -1726,12 +1819,22 @@ internal sealed class DefinitionNode(
       hasVarDeclaration,
       hasBroadExitRangeDisjunct,
       names,
-      statements);
+      statements,
+      memberAssignments);
 
     void VisitStatement(Statement current) {
       hasLoop |= current is LoopStmt;
       hasAssumeStatement |= current is AssumeStmt or ExpectStmt;
       hasVarDeclaration |= current is VarDeclStmt;
+      if (current is SingleAssignStmt { Lhs.Resolved: MemberSelectExpr memberSelect } assignment &&
+          !AutoGeneratedOrigin.Is(assignment.Origin)) {
+        memberAssignments.Add(new DefinitionMemberAssignment(
+          assignment.StartToken.pos,
+          EndOffset(assignment),
+          memberSelect.Member.FullDafnyName,
+          memberSelect.Obj.Type.NormalizeExpandKeepConstraints().ToString(),
+          memberSelect.Member.IsGhost));
+      }
       statements.Add(new DefinitionStatement(
         StatementKind(current),
         current.StartToken.pos,
