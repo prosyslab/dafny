@@ -1377,8 +1377,8 @@ internal sealed class DefinitionNode(
         ParameterNameTexts(function),
         Array.Empty<string>(),
         Array.Empty<string>(),
-        Array.Empty<string>(),
-        Array.Empty<string>(),
+        function.Req.Select(item => item.E.EntireRange.PrintOriginal()).ToList(),
+        function.Ens.Select(item => item.E.EntireRange.PrintOriginal()).ToList(),
         Array.Empty<string>(),
         purpose == DefinitionNodePurpose.ResolvedRoot
           ? StructuredFacts(function, function.Result == null ? [] : [function.Result])
@@ -1439,8 +1439,8 @@ internal sealed class DefinitionNode(
         ParameterNameTexts(function),
         Array.Empty<string>(),
         Array.Empty<string>(),
-        Array.Empty<string>(),
-        Array.Empty<string>(),
+        function.Req.Select(item => item.E.EntireRange.PrintOriginal()).ToList(),
+        function.Ens.Select(item => item.E.EntireRange.PrintOriginal()).ToList(),
         Array.Empty<string>(),
         purpose == DefinitionNodePurpose.ResolvedRoot
           ? StructuredFacts(function, function.Result == null ? [] : [function.Result])
