@@ -32,6 +32,8 @@ public record DefinitionAnalysisResult(
   bool HasVarDeclaration,
   IReadOnlyList<DefinitionStatement> Statements,
   IReadOnlyList<DefinitionMemberAssignment> MemberAssignments,
+  IReadOnlyList<DefinitionCallSite> CallSites,
+  IReadOnlyList<DefinitionContractClause> ContractClauses,
   string BodyShape,
   bool HasBroadExitRangeDisjunct,
   IReadOnlyList<string> TypeParameters,
@@ -113,6 +115,39 @@ public record DefinitionStatement(
   int Start,
   int End,
   IReadOnlyList<string> DirectCallTargets
+);
+
+public record DefinitionControlContext(
+  string Kind,
+  int Start,
+  int End,
+  int BranchIndex,
+  int BranchCount,
+  int OtherBranchStatementCount,
+  string Guard,
+  IReadOnlyList<string> Invariants,
+  IReadOnlyList<string> Decreases
+);
+
+public record DefinitionCallSite(
+  string TargetFullName,
+  int Start,
+  int End,
+  IReadOnlyList<string> Arguments,
+  IReadOnlyList<string> AssignedNames,
+  IReadOnlyList<DefinitionControlContext> ControlPath
+);
+
+public record DefinitionContractClause(
+  string Kind,
+  int Index,
+  string Text,
+  bool HasExistential,
+  bool HasOld,
+  IReadOnlyList<string> ReferencedVariables,
+  IReadOnlyList<string> ReferencedMembers,
+  IReadOnlyList<string> IndexSelections,
+  int IndexSelectionCount
 );
 
 public record DefinitionMemberAssignment(
@@ -274,6 +309,8 @@ public static class DefinitionAnalysis {
       resolvedDeclarationFacts.DirectPostconditionCallsFor(declaration.Declaration),
       includeStatements ? declaration.Statements : Array.Empty<DefinitionStatement>(),
       declaration.MemberAssignments,
+      declaration.CallSites,
+      ContractClausesFor(declaration.Declaration),
       resolvedDeclarationFacts.ReferencesFor(declaration.Declaration),
       DependenciesFor(declaration, graph, declarationNodes));
   }
@@ -294,6 +331,8 @@ public static class DefinitionAnalysis {
       Array.Empty<DefinitionPostconditionCall>(),
       Array.Empty<DefinitionStatement>(),
       Array.Empty<DefinitionMemberAssignment>(),
+      Array.Empty<DefinitionCallSite>(),
+      Array.Empty<DefinitionContractClause>(),
       Array.Empty<DefinitionReference>(),
       Array.Empty<string>());
   }
@@ -311,6 +350,8 @@ public static class DefinitionAnalysis {
     IReadOnlyList<DefinitionPostconditionCall> directPostconditionCalls,
     IReadOnlyList<DefinitionStatement> statements,
     IReadOnlyList<DefinitionMemberAssignment> memberAssignments,
+    IReadOnlyList<DefinitionCallSite> callSites,
+    IReadOnlyList<DefinitionContractClause> contractClauses,
     IReadOnlyList<DefinitionReference> references,
     IReadOnlyList<string> dependencies) {
     return new DefinitionAnalysisResult(
@@ -337,6 +378,8 @@ public static class DefinitionAnalysis {
       declaration.HasVarDeclaration,
       statements,
       memberAssignments,
+      callSites,
+      contractClauses,
       declaration.BodyShape,
       declaration.HasBroadExitRangeDisjunct,
       declaration.TypeParameters,
@@ -370,6 +413,61 @@ public static class DefinitionAnalysis {
       declaration.ContractHeaderWithAxiom,
       references,
       dependencies);
+  }
+
+  private static IReadOnlyList<DefinitionContractClause> ContractClausesFor(INode declaration) {
+    var clauses = new List<DefinitionContractClause>();
+    switch (declaration) {
+      case Function function:
+        AddClauses("requires", function.Req.Select(item => item.E));
+        AddClauses("ensures", function.Ens.Select(item => item.E));
+        break;
+      case MethodOrConstructor method:
+        AddClauses("requires", method.Req.Select(item => item.E));
+        AddClauses("ensures", method.Ens.Select(item => item.E));
+        break;
+    }
+    return clauses;
+
+    void AddClauses(string kind, IEnumerable<Expression> expressions) {
+      foreach (var expression in expressions) {
+        var referencedVariables = new HashSet<string>(StringComparer.Ordinal);
+        var referencedMembers = new HashSet<string>(StringComparer.Ordinal);
+        var indexSelections = new HashSet<string>(StringComparer.Ordinal);
+        var hasExistential = false;
+        var hasOld = false;
+        var indexSelectionCount = 0;
+        Visit(expression);
+        clauses.Add(new DefinitionContractClause(
+          kind,
+          clauses.Count(item => item.Kind == kind),
+          expression.EntireRange.PrintOriginal(),
+          hasExistential,
+          hasOld,
+          referencedVariables.OrderBy(item => item, StringComparer.Ordinal).ToList(),
+          referencedMembers.OrderBy(item => item, StringComparer.Ordinal).ToList(),
+          indexSelections.OrderBy(item => item, StringComparer.Ordinal).ToList(),
+          indexSelectionCount));
+
+        void Visit(Expression current) {
+          hasExistential |= current is ExistsExpr;
+          hasOld |= current is OldExpr;
+          if (current is SeqSelectExpr or MultiSelectExpr) {
+            indexSelectionCount++;
+            indexSelections.Add(current.EntireRange.PrintOriginal());
+          }
+          if (current is IdentifierExpr identifier) {
+            referencedVariables.Add(identifier.Name);
+          }
+          if (current is MemberSelectExpr { Member: { } member }) {
+            referencedMembers.Add(member.FullDafnyName);
+          }
+          foreach (var child in current.SubExpressions) {
+            Visit(child);
+          }
+        }
+      }
+    }
   }
 
   private sealed class ResolvedDeclarationFacts {
@@ -1245,6 +1343,7 @@ internal sealed record DefinitionReportFacts(
   bool HasVarDeclaration,
   IReadOnlyList<DefinitionStatement> Statements,
   IReadOnlyList<DefinitionMemberAssignment> MemberAssignments,
+  IReadOnlyList<DefinitionCallSite> CallSites,
   string BodyShape,
   bool HasBroadExitRangeDisjunct,
   IReadOnlyList<string> TypeParameters,
@@ -1321,6 +1420,7 @@ internal sealed class DefinitionNode(
   public bool HasVarDeclaration => ReportFacts!.HasVarDeclaration;
   public IReadOnlyList<DefinitionStatement> Statements => ReportFacts!.Statements;
   public IReadOnlyList<DefinitionMemberAssignment> MemberAssignments => ReportFacts!.MemberAssignments;
+  public IReadOnlyList<DefinitionCallSite> CallSites => ReportFacts!.CallSites;
   public string BodyShape => ReportFacts!.BodyShape;
   public bool HasBroadExitRangeDisjunct => ReportFacts!.HasBroadExitRangeDisjunct;
   public IReadOnlyList<string> TypeParameters => ReportFacts!.TypeParameters;
@@ -1368,6 +1468,7 @@ internal sealed class DefinitionNode(
         false,
         Array.Empty<DefinitionStatement>(),
         Array.Empty<DefinitionMemberAssignment>(),
+        bodyAnalysis.CallSites,
         DefinitionAnalysis.BodyShape(function.Body),
         specificationExpressions.Any(DefinitionAnalysis.ContainsBroadExitRangeDisjunct) ||
           bodyAnalysis.HasBroadExitRangeDisjunct,
@@ -1431,6 +1532,9 @@ internal sealed class DefinitionNode(
         purpose == DefinitionNodePurpose.Spans
           ? Array.Empty<DefinitionMemberAssignment>()
           : bodyAnalysis.MemberAssignments,
+        purpose == DefinitionNodePurpose.Spans
+          ? Array.Empty<DefinitionCallSite>()
+          : bodyAnalysis.CallSites,
         "",
         bodyAnalysis.HasBroadExitRangeDisjunct,
         TypeParameterTexts(function.TypeArgs),
@@ -1494,6 +1598,9 @@ internal sealed class DefinitionNode(
         purpose == DefinitionNodePurpose.Spans
           ? Array.Empty<DefinitionMemberAssignment>()
           : bodyAnalysis.MemberAssignments,
+        purpose == DefinitionNodePurpose.Spans
+          ? Array.Empty<DefinitionCallSite>()
+          : bodyAnalysis.CallSites,
         "",
         specificationExpressions.Any(DefinitionAnalysis.ContainsBroadExitRangeDisjunct) ||
           bodyAnalysis.HasBroadExitRangeDisjunct,
@@ -1552,6 +1659,7 @@ internal sealed class DefinitionNode(
         false,
         Array.Empty<DefinitionStatement>(),
         Array.Empty<DefinitionMemberAssignment>(),
+        Array.Empty<DefinitionCallSite>(),
         "",
         false,
         TypeParameterTexts(datatype.TypeArgs),
@@ -1608,6 +1716,7 @@ internal sealed class DefinitionNode(
         false,
         Array.Empty<DefinitionStatement>(),
         Array.Empty<DefinitionMemberAssignment>(),
+        bodyAnalysis.CallSites,
         DefinitionAnalysis.BodyShape(constant.Rhs),
         bodyAnalysis.HasBroadExitRangeDisjunct,
         Array.Empty<string>(),
@@ -1762,7 +1871,8 @@ internal sealed class DefinitionNode(
 
   private sealed record ExpressionBodyAnalysis(
     bool HasBroadExitRangeDisjunct,
-    IReadOnlyList<string> CallNames
+    IReadOnlyList<string> CallNames,
+    IReadOnlyList<DefinitionCallSite> CallSites
   );
 
   private sealed record StatementBodyAnalysis(
@@ -1772,16 +1882,18 @@ internal sealed class DefinitionNode(
     bool HasBroadExitRangeDisjunct,
     IReadOnlyList<string> CallNames,
     IReadOnlyList<DefinitionStatement> Statements,
-    IReadOnlyList<DefinitionMemberAssignment> MemberAssignments
+    IReadOnlyList<DefinitionMemberAssignment> MemberAssignments,
+    IReadOnlyList<DefinitionCallSite> CallSites
   );
 
   private static ExpressionBodyAnalysis AnalyzeExpressionBody(Expression? expression) {
     var names = new List<string>();
+    var callSites = new List<DefinitionCallSite>();
     var hasBroadExitRangeDisjunct = false;
     if (expression != null) {
       VisitExpression(expression);
     }
-    return new ExpressionBodyAnalysis(hasBroadExitRangeDisjunct, names);
+    return new ExpressionBodyAnalysis(hasBroadExitRangeDisjunct, names, callSites);
 
     void VisitExpression(Expression current) {
       if (DefinitionAnalysis.IsBroadExitRangeDisjunct(current)) {
@@ -1792,6 +1904,15 @@ internal sealed class DefinitionNode(
         if (name.Length > 0) {
           names.Add(name);
         }
+      }
+      if (current is FunctionCallExpr { Function: { } function } call) {
+        callSites.Add(new DefinitionCallSite(
+          function.FullDafnyName,
+          current.Origin.pos,
+          EndOffset(current),
+          call.Args.Select(argument => argument.EntireRange.PrintOriginal()).ToList(),
+          Array.Empty<string>(),
+          Array.Empty<DefinitionControlContext>()));
       }
       foreach (var subExpression in current.SubExpressions) {
         VisitExpression(subExpression);
@@ -1805,12 +1926,13 @@ internal sealed class DefinitionNode(
     var hasVarDeclaration = false;
     var hasBroadExitRangeDisjunct = false;
     if (statement == null) {
-      return new StatementBodyAnalysis(false, false, false, false, [], [], []);
+      return new StatementBodyAnalysis(false, false, false, false, [], [], [], []);
     }
 
     var statements = new List<DefinitionStatement>();
     var memberAssignments = new List<DefinitionMemberAssignment>();
-    VisitStatement(statement);
+    var callSites = new List<DefinitionCallSite>();
+    VisitStatement(statement, Array.Empty<DefinitionControlContext>());
     var names = new List<string>();
     CollectStatementCallNames(statement, names);
     return new StatementBodyAnalysis(
@@ -1820,9 +1942,12 @@ internal sealed class DefinitionNode(
       hasBroadExitRangeDisjunct,
       names,
       statements,
-      memberAssignments);
+      memberAssignments,
+      callSites);
 
-    void VisitStatement(Statement current) {
+    void VisitStatement(
+      Statement current,
+      IReadOnlyList<DefinitionControlContext> controlPath) {
       hasLoop |= current is LoopStmt;
       hasAssumeStatement |= current is AssumeStmt or ExpectStmt;
       hasVarDeclaration |= current is VarDeclStmt;
@@ -1840,21 +1965,140 @@ internal sealed class DefinitionNode(
         current.StartToken.pos,
         EndOffset(current),
         DirectCallTargets(current)));
-      foreach (var expression in current.SubExpressions) {
-        VisitExpression(expression);
+      if (current is CallStmt { Method: { } method } call) {
+        callSites.Add(new DefinitionCallSite(
+          method.FullDafnyName,
+          current.StartToken.pos,
+          EndOffset(current),
+          call.Args.Select(argument => argument.EntireRange.PrintOriginal()).ToList(),
+          call.Lhs.Select(lhs => lhs.EntireRange.PrintOriginal()).ToList(),
+          controlPath));
       }
-      foreach (var subStatement in current.SubStatements) {
-        VisitStatement(subStatement);
+      foreach (var expression in current.SubExpressions) {
+        VisitExpression(expression, controlPath);
+      }
+
+      switch (current) {
+        case IfStmt ifStatement:
+          var ifGuard = ifStatement.Guard?.EntireRange.PrintOriginal() ?? "";
+          VisitStatement(ifStatement.Thn, AppendContext(controlPath, new DefinitionControlContext(
+            "if",
+            current.StartToken.pos,
+            EndOffset(current),
+            0,
+            ifStatement.Els == null ? 1 : 2,
+            ifStatement.Els == null ? 0 : SubstantiveStatementCount(ifStatement.Els),
+            ifGuard,
+            Array.Empty<string>(),
+            Array.Empty<string>())));
+          if (ifStatement.Els != null) {
+            VisitStatement(ifStatement.Els, AppendContext(controlPath, new DefinitionControlContext(
+              "if",
+              current.StartToken.pos,
+              EndOffset(current),
+              1,
+              2,
+              SubstantiveStatementCount(ifStatement.Thn),
+              ifGuard,
+              Array.Empty<string>(),
+              Array.Empty<string>())));
+          }
+          return;
+        case AlternativeStmt alternatives:
+          for (var index = 0; index < alternatives.Alternatives.Count; index++) {
+            var alternative = alternatives.Alternatives[index];
+            var branchPath = AppendContext(controlPath, new DefinitionControlContext(
+              "alternative",
+              current.StartToken.pos,
+              EndOffset(current),
+              index,
+              alternatives.Alternatives.Count,
+              alternatives.Alternatives
+                .Where((_, otherIndex) => otherIndex != index)
+                .Sum(other => other.Body.Sum(SubstantiveStatementCount)),
+              alternative.Guard.EntireRange.PrintOriginal(),
+              Array.Empty<string>(),
+              Array.Empty<string>()));
+            foreach (var child in alternative.Body) {
+              VisitStatement(child, branchPath);
+            }
+          }
+          return;
+        case MatchStmt match:
+          for (var index = 0; index < match.Cases.Count; index++) {
+            var matchCase = match.Cases[index];
+            var branchPath = AppendContext(controlPath, new DefinitionControlContext(
+              "match",
+              current.StartToken.pos,
+              EndOffset(current),
+              index,
+              match.Cases.Count,
+              match.Cases
+                .Where((_, otherIndex) => otherIndex != index)
+                .Sum(other => other.Body.Sum(SubstantiveStatementCount)),
+              matchCase.Ctor.FullName,
+              Array.Empty<string>(),
+              Array.Empty<string>()));
+            foreach (var child in matchCase.Body) {
+              VisitStatement(child, branchPath);
+            }
+          }
+          return;
+        case LoopStmt loop:
+          var guard = loop is WhileStmt whileStatement
+            ? whileStatement.Guard?.EntireRange.PrintOriginal() ?? ""
+            : "";
+          var loopPath = AppendContext(controlPath, new DefinitionControlContext(
+            "loop",
+            current.StartToken.pos,
+            EndOffset(current),
+            0,
+            1,
+            0,
+            guard,
+            loop.Invariants.Select(invariant => invariant.E.EntireRange.PrintOriginal()).ToList(),
+            loop.Decreases.Expressions?.Select(item => item.EntireRange.PrintOriginal()).ToList() ?? []));
+          foreach (var child in current.SubStatements) {
+            VisitStatement(child, loopPath);
+          }
+          return;
+        default:
+          foreach (var child in current.SubStatements) {
+            VisitStatement(child, controlPath);
+          }
+          return;
       }
     }
 
-    void VisitExpression(Expression current) {
+    void VisitExpression(
+      Expression current,
+      IReadOnlyList<DefinitionControlContext> controlPath) {
       if (DefinitionAnalysis.IsBroadExitRangeDisjunct(current)) {
         hasBroadExitRangeDisjunct = true;
       }
-      foreach (var subExpression in current.SubExpressions) {
-        VisitExpression(subExpression);
+      if (current is FunctionCallExpr { Function: { } function } call) {
+        callSites.Add(new DefinitionCallSite(
+          function.FullDafnyName,
+          current.Origin.pos,
+          EndOffset(current),
+          call.Args.Select(argument => argument.EntireRange.PrintOriginal()).ToList(),
+          Array.Empty<string>(),
+          controlPath));
       }
+      foreach (var subExpression in current.SubExpressions) {
+        VisitExpression(subExpression, controlPath);
+      }
+    }
+
+    static IReadOnlyList<DefinitionControlContext> AppendContext(
+      IReadOnlyList<DefinitionControlContext> path,
+      DefinitionControlContext context) {
+      return [.. path, context];
+    }
+
+    static int SubstantiveStatementCount(Statement item) {
+      var own = item is BlockStmt ? 0 : 1;
+      return own + item.SubStatements.Sum(SubstantiveStatementCount);
     }
   }
 
