@@ -29,6 +29,7 @@ internal sealed record SourceFingerprintDocument(IReadOnlyList<SourceFingerprint
 
 static class SourceFingerprintCommand {
   private sealed record SemanticToken(int Kind, string Value, int Start, int End);
+  private sealed record TokenRange(int Start, int End);
 
   private static readonly Argument<FileInfo> RequestArgument = new("request") {
     Description = "A JSON file describing source regions to fingerprint."
@@ -113,21 +114,39 @@ static class SourceFingerprintCommand {
         return (int)ExitValue.PREPROCESSING_ERROR;
       }
 
-      var selected = new List<SemanticToken>();
-      foreach (var token in tokensBySource[sourcePath]) {
-        if (region.IncludedSpan != null && Overlaps(token, region.IncludedSpan) &&
-            !Contains(region.IncludedSpan, token)) {
-          await options.ErrorWriter.WriteLineAsync($"source-fingerprint span splits a token: {region.Id}");
-          return (int)ExitValue.PREPROCESSING_ERROR;
-        }
-        if (excludedSpans.Any(span => Overlaps(token, span) && !Contains(span, token))) {
+      var tokens = tokensBySource[sourcePath];
+      var includedRange = region.IncludedSpan == null
+        ? new TokenRange(0, tokens.Count)
+        : OverlappingTokenRange(tokens, region.IncludedSpan);
+      if (region.IncludedSpan != null &&
+          FirstSplitTokenIndex(tokens, includedRange, region.IncludedSpan) != null) {
+        await options.ErrorWriter.WriteLineAsync($"source-fingerprint span splits a token: {region.Id}");
+        return (int)ExitValue.PREPROCESSING_ERROR;
+      }
+
+      var excludedRanges = new List<TokenRange>(excludedSpans.Count);
+      foreach (var excludedSpan in excludedSpans) {
+        var excludedRange = OverlappingTokenRange(tokens, excludedSpan);
+        if (FirstSplitTokenIndex(tokens, excludedRange, excludedSpan) != null) {
           await options.ErrorWriter.WriteLineAsync($"source-fingerprint exclusion splits a token: {region.Id}");
           return (int)ExitValue.PREPROCESSING_ERROR;
         }
-        if ((region.IncludedSpan == null || Contains(region.IncludedSpan, token)) &&
-            !excludedSpans.Any(span => Contains(span, token))) {
-          selected.Add(token);
+        excludedRanges.Add(excludedRange);
+      }
+
+      var mergedExcludedRanges = MergeRanges(excludedRanges);
+      var selected = new List<SemanticToken>(includedRange.End - includedRange.Start);
+      var excludedRangeIndex = 0;
+      for (var tokenIndex = includedRange.Start; tokenIndex < includedRange.End; tokenIndex++) {
+        while (excludedRangeIndex < mergedExcludedRanges.Count &&
+               mergedExcludedRanges[excludedRangeIndex].End <= tokenIndex) {
+          excludedRangeIndex++;
         }
+        if (excludedRangeIndex < mergedExcludedRanges.Count &&
+            mergedExcludedRanges[excludedRangeIndex].Start <= tokenIndex) {
+          continue;
+        }
+        selected.Add(tokens[tokenIndex]);
       }
       fingerprints.Add(new SourceFingerprintResult(region.Id, Fingerprint(selected)));
     }
@@ -166,8 +185,60 @@ static class SourceFingerprintCommand {
     return span.Start <= token.Start && token.End <= span.End;
   }
 
-  private static bool Overlaps(SemanticToken token, SourceFingerprintSpan span) {
-    return token.Start < span.End && span.Start < token.End;
+  private static TokenRange OverlappingTokenRange(
+    IReadOnlyList<SemanticToken> tokens,
+    SourceFingerprintSpan span) {
+    var lower = 0;
+    var upper = tokens.Count;
+    while (lower < upper) {
+      var middle = lower + (upper - lower) / 2;
+      if (tokens[middle].End <= span.Start) {
+        lower = middle + 1;
+      } else {
+        upper = middle;
+      }
+    }
+    var start = lower;
+
+    lower = start;
+    upper = tokens.Count;
+    while (lower < upper) {
+      var middle = lower + (upper - lower) / 2;
+      if (tokens[middle].Start < span.End) {
+        lower = middle + 1;
+      } else {
+        upper = middle;
+      }
+    }
+    return new TokenRange(start, lower);
+  }
+
+  private static int? FirstSplitTokenIndex(
+    IReadOnlyList<SemanticToken> tokens,
+    TokenRange range,
+    SourceFingerprintSpan span) {
+    for (var index = range.Start; index < range.End; index++) {
+      if (!Contains(span, tokens[index])) {
+        return index;
+      }
+    }
+    return null;
+  }
+
+  private static IReadOnlyList<TokenRange> MergeRanges(IEnumerable<TokenRange> ranges) {
+    var ordered = ranges
+      .Where(range => range.Start < range.End)
+      .OrderBy(range => range.Start)
+      .ThenBy(range => range.End);
+    var merged = new List<TokenRange>();
+    foreach (var range in ordered) {
+      if (merged.Count == 0 || merged[^1].End < range.Start) {
+        merged.Add(range);
+        continue;
+      }
+      merged[^1] = new TokenRange(merged[^1].Start, Math.Max(merged[^1].End, range.End));
+    }
+    return merged;
   }
 
   private static string Fingerprint(IReadOnlyList<SemanticToken> tokens) {
