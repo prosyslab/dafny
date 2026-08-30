@@ -1701,7 +1701,7 @@ internal sealed class DefinitionNode(
         constant.Origin.line,
         constant.Origin.col,
         constant.StartToken.pos,
-        null,
+        constant.Rhs?.StartToken.pos,
         EndOffset(constant),
         DefinitionAnalysis.SourcePath(constant),
         constant.IsGhost,
