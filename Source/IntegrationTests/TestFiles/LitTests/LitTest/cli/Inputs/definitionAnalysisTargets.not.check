@@ -1,0 +1,3 @@
+CHECK-NOT: "sourcePath": ".*DafnyStandardLibraries|"fullName": "DefinitionAnalysisIncluded.External"|"name": "DefinitionAnalysisIncluded"
+CHECK: "sourcePath": ".*definitionAnalysisTargets.dfy"
+CHECK-NOT: "sourcePath": ".*DafnyStandardLibraries|"fullName": "DefinitionAnalysisIncluded.External"|"name": "DefinitionAnalysisIncluded"
