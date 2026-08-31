@@ -1,4 +1,5 @@
 #nullable enable
+using System;
 using System.Collections.Generic;
 using System.CommandLine;
 using System.Linq;
@@ -67,6 +68,7 @@ static class DefinitionAnalysisCommand {
 
     var compilation = CliCompilation.Create(options);
     compilation.Start();
+    var analysisSourceUris = AnalysisSourceUris(await compilation.Compilation.RootFiles);
     var resolution = await compilation.Resolution;
     if (resolution == null || resolution.HasErrors) {
       return await compilation.GetAndReportExitCode();
@@ -75,8 +77,12 @@ static class DefinitionAnalysisCommand {
     var results = options.Get(IncludeSourceFacts)
       ? (object)DefinitionAnalysis.AnalyzeDocument(
         resolution.ResolvedProgram,
+        analysisSourceUris,
         options.Get(IncludeStatements))
-      : DefinitionAnalysis.Analyze(resolution.ResolvedProgram, options.Get(IncludeStatements));
+      : DefinitionAnalysis.Analyze(
+        resolution.ResolvedProgram,
+        analysisSourceUris,
+        options.Get(IncludeStatements));
     var json = JsonSerializer.Serialize(results, new JsonSerializerOptions {
       PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
       WriteIndented = true
@@ -100,11 +106,22 @@ static class DefinitionAnalysisCommand {
       return (int)ExitValue.DAFNY_ERROR;
     }
 
-    var json = JsonSerializer.Serialize(DefinitionAnalysis.AnalyzeSpans(program), new JsonSerializerOptions {
+    var analysisSourceUris = AnalysisSourceUris(dafnyFiles);
+    var json = JsonSerializer.Serialize(DefinitionAnalysis.AnalyzeSpans(program, analysisSourceUris), new JsonSerializerOptions {
       PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
       WriteIndented = true
     });
     await options.OutputWriter.Code(json + "\n");
     return (int)ExitValue.SUCCESS;
+  }
+
+  private static IReadOnlySet<Uri> AnalysisSourceUris(IEnumerable<DafnyFile> rootFiles) {
+    return rootFiles
+      .Where(file =>
+        !file.ShouldNotVerify &&
+        (file.Uri == DafnyFile.StdInUri ||
+         file.Uri.IsFile && file.Extension == DafnyFile.DafnyFileExtension))
+      .Select(file => file.Uri)
+      .ToHashSet();
   }
 }
