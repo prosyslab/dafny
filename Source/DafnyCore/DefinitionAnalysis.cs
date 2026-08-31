@@ -91,6 +91,8 @@ public record DefinitionAnalysisImport(
   string ModuleName,
   string Alias,
   string ResolvedTarget,
+  bool HasAlias,
+  string ResolvedTargetSourcePath,
   bool Opened,
   string SourcePath,
   int Start,
@@ -207,37 +209,36 @@ public static class DefinitionAnalysis {
       .ToList();
   }
 
-  public static IReadOnlyList<DefinitionAnalysisResult> Analyze(Program program, bool includeStatements = false) {
-    var sourceFacts = SourceFacts.For(program);
-    return Analyze(program, sourceFacts, includeStatements: includeStatements);
+  public static IReadOnlyList<DefinitionAnalysisResult> Analyze(
+    Program program,
+    IReadOnlySet<Uri> analysisSourceUris,
+    bool includeStatements = false) {
+    var sourceFacts = SourceFacts.For(program, analysisSourceUris);
+    return Analyze(program, sourceFacts, analysisSourceUris, includeStatements);
   }
 
-  public static DefinitionAnalysisDocument AnalyzeDocument(Program program, bool includeStatements = false) {
-    var (sourceFacts, programFacts) = SourceFacts.ForDocument(program);
+  public static DefinitionAnalysisDocument AnalyzeDocument(
+    Program program,
+    IReadOnlySet<Uri> analysisSourceUris,
+    bool includeStatements = false) {
+    var (sourceFacts, programFacts) = SourceFacts.ForDocument(program, analysisSourceUris);
     return new DefinitionAnalysisDocument(
-      Analyze(
-        program,
-        sourceFacts,
-        includeIncludedDeclarations: true,
-        includeStatements: includeStatements),
+      Analyze(program, sourceFacts, analysisSourceUris, includeStatements),
       programFacts);
   }
 
   private static IReadOnlyList<DefinitionAnalysisResult> Analyze(
     Program program,
     SourceFacts sourceFacts,
-    bool includeIncludedDeclarations = false,
+    IReadOnlySet<Uri> analysisSourceUris,
     bool includeStatements = false) {
     var allDeclarations = SourceDefinitions(
       program,
       spansOnly: false,
-      includeIncludes: true,
-      includeIncludedReportFacts: includeIncludedDeclarations);
-    var declarations = includeIncludedDeclarations
-      ? allDeclarations
-      : allDeclarations
-        .Where(declaration => !declaration.Declaration.Origin.FromIncludeDirective(program))
-        .ToList();
+      analysisSourceUris: analysisSourceUris);
+    var declarations = allDeclarations
+      .Where(declaration => analysisSourceUris.Contains(declaration.Declaration.StartToken.Uri))
+      .ToList();
     var callableDeclarations = allDeclarations
       .Where(declaration => declaration.BodyKind is
         DefinitionBodyKind.Function or
@@ -245,17 +246,26 @@ public static class DefinitionAnalysis {
         DefinitionBodyKind.Method)
       .ToList();
     var callTargetIndex = CallTargetIndex.For(callableDeclarations);
-    var callFacts = callableDeclarations.ToDictionary(
+    var callableAnalysisDeclarations = declarations
+      .Where(declaration => declaration.BodyKind is
+        DefinitionBodyKind.Function or
+        DefinitionBodyKind.FunctionByMethod or
+        DefinitionBodyKind.Method)
+      .ToList();
+    var callFacts = callableAnalysisDeclarations.ToDictionary(
       declaration => declaration,
       declaration => CalledDefinitions(declaration, callTargetIndex));
     var graph = callFacts.ToDictionary(
       item => item.Key,
       item => item.Value.UniqueCallees);
+    var recursionGraph = graph.ToDictionary(
+      item => item.Key,
+      item => item.Value.Where(callFacts.ContainsKey).ToHashSet());
     var declarationNodes = allDeclarations
       .Where(declaration => declaration.BodyKind != DefinitionBodyKind.FunctionByMethod)
       .ToDictionary(declaration => declaration.Declaration);
     var resolvedDeclarationFacts = ResolvedDeclarationFacts.For(declarations, declarationNodes);
-    var recursionFacts = AnalyzeRecursion(graph);
+    var recursionFacts = AnalyzeRecursion(recursionGraph);
 
     var results = declarations
       .OrderBy(declaration => declaration.Start)
@@ -272,9 +282,12 @@ public static class DefinitionAnalysis {
     return results;
   }
 
-  public static IReadOnlyList<DefinitionAnalysisResult> AnalyzeSpans(Program program) {
-    var sourceFacts = SourceFacts.For(program);
-    var results = RootSourceDefinitions(program, spansOnly: true)
+  public static IReadOnlyList<DefinitionAnalysisResult> AnalyzeSpans(
+    Program program,
+    IReadOnlySet<Uri> analysisSourceUris) {
+    var sourceFacts = SourceFacts.For(program, analysisSourceUris);
+    var results = SourceDefinitions(program, spansOnly: true, analysisSourceUris: analysisSourceUris)
+      .Where(declaration => analysisSourceUris.Contains(declaration.Declaration.StartToken.Uri))
       .OrderBy(declaration => declaration.Start)
       .Select(declaration => ResultForSpans(declaration, sourceFacts))
       .ToList();
@@ -693,22 +706,17 @@ public static class DefinitionAnalysis {
     return filename == null ? "" : Path.GetFullPath(filename);
   }
 
-  private static List<DefinitionNode> RootSourceDefinitions(Program program, bool spansOnly) {
-    return SourceDefinitions(program, spansOnly, includeIncludes: false);
-  }
-
   private static List<DefinitionNode> SourceDefinitions(
     Program program,
     bool spansOnly,
-    bool includeIncludes,
-    bool includeIncludedReportFacts = false) {
+    IReadOnlySet<Uri> analysisSourceUris) {
     var declarations = new List<DefinitionNode>();
     var modules = spansOnly ? ParsedModules(program) : program.Modules();
     foreach (var moduleDefinition in modules) {
       foreach (var topLevelDecl in moduleDefinition.TopLevelDecls) {
-        var topLevelFromInclude = topLevelDecl.Origin.FromIncludeDirective(program);
-        if (topLevelDecl is DatatypeDecl datatypeDecl && (includeIncludes || !topLevelFromInclude)) {
-          var purpose = NodePurpose(spansOnly, topLevelFromInclude, includeIncludedReportFacts);
+        var topLevelIsTarget = analysisSourceUris.Contains(topLevelDecl.StartToken.Uri);
+        if (topLevelDecl is DatatypeDecl datatypeDecl && (!spansOnly || topLevelIsTarget)) {
+          var purpose = NodePurpose(spansOnly, topLevelIsTarget);
           declarations.Add(DefinitionNode.ForDatatype(datatypeDecl, moduleDefinition.Name, purpose));
         }
 
@@ -720,12 +728,12 @@ public static class DefinitionAnalysis {
           if (AutoGeneratedOrigin.Is(member.Origin)) {
             continue;
           }
-          var memberFromInclude = member.Origin.FromIncludeDirective(program);
-          if (!includeIncludes && memberFromInclude) {
+          var memberIsTarget = analysisSourceUris.Contains(member.StartToken.Uri);
+          if (spansOnly && !memberIsTarget) {
             continue;
           }
 
-          var purpose = NodePurpose(spansOnly, memberFromInclude, includeIncludedReportFacts);
+          var purpose = NodePurpose(spansOnly, memberIsTarget);
           if (member is Function function) {
             declarations.Add(DefinitionNode.ForFunction(function, moduleDefinition.Name, purpose));
             if (!spansOnly && function.ByMethodBody != null) {
@@ -744,14 +752,11 @@ public static class DefinitionAnalysis {
 
     static DefinitionNodePurpose NodePurpose(
       bool spansOnly,
-      bool fromInclude,
-      bool includeIncludedReportFacts) {
+      bool isTarget) {
       if (spansOnly) {
         return DefinitionNodePurpose.Spans;
       }
-      return fromInclude && !includeIncludedReportFacts
-        ? DefinitionNodePurpose.ResolvedInclude
-        : DefinitionNodePurpose.ResolvedRoot;
+      return isTarget ? DefinitionNodePurpose.ResolvedRoot : DefinitionNodePurpose.ResolvedInclude;
     }
   }
 
@@ -1108,31 +1113,34 @@ internal sealed record SourceFacts(
   IReadOnlyList<DefinitionAnalysisInclude> LocalIncludes,
   DefinitionSourceFacts Structured
 ) {
-  public static SourceFacts For(Program program) {
+  public static SourceFacts For(Program program, IReadOnlySet<Uri> analysisSourceUris) {
     var parsedModules = DefinitionAnalysis.ParsedModules(program).ToList();
-    var structured = ProgramSourceFacts(program, parsedModules);
-    return LegacySourceFacts(program, parsedModules, structured);
+    var wiring = ProgramSourceFacts(program, parsedModules);
+    return LegacySourceFacts(program, parsedModules, analysisSourceUris, wiring);
   }
 
-  public static (SourceFacts Legacy, DefinitionSourceFacts Program) ForDocument(Program program) {
+  public static (SourceFacts Legacy, DefinitionSourceFacts Program) ForDocument(
+    Program program,
+    IReadOnlySet<Uri> analysisSourceUris) {
     var parsedModules = DefinitionAnalysis.ParsedModules(program).ToList();
-    var structured = ProgramSourceFacts(program, parsedModules);
+    var wiring = ProgramSourceFacts(program, parsedModules);
+    var output = ProgramSourceFacts(program, parsedModules, analysisSourceUris);
     return (
-      LegacySourceFacts(program, parsedModules, structured),
-      structured);
+      LegacySourceFacts(program, parsedModules, analysisSourceUris, wiring),
+      output);
   }
 
   private static SourceFacts LegacySourceFacts(
     Program program,
     IReadOnlyList<ModuleDefinition> parsedModules,
-    DefinitionSourceFacts structured) {
-    var rootUris = program.Compilation.RootSourceUris.ToHashSet();
+    IReadOnlySet<Uri> analysisSourceUris,
+    DefinitionSourceFacts wiring) {
     var rootModules = parsedModules
-      .Where(module => !module.IsDefaultModule && !module.Origin.FromIncludeDirective(program))
+      .Where(module => !module.IsDefaultModule && analysisSourceUris.Contains(module.StartToken.Uri))
       .ToList();
 
     var rootIncludes = program.Compilation.Includes
-      .Where(include => rootUris.Contains(include.IncluderFilename))
+      .Where(include => analysisSourceUris.Contains(include.IncluderFilename))
       .ToList();
 
     return new SourceFacts(
@@ -1147,7 +1155,7 @@ internal sealed record SourceFacts(
         .OrderBy(name => name, StringComparer.Ordinal)
         .ToList(),
       parsedModules
-        .Where(module => !module.Origin.FromIncludeDirective(program))
+        .Where(module => analysisSourceUris.Contains(module.StartToken.Uri))
         .SelectMany(module => ImportedModuleNames(program, module))
         .Distinct()
         .OrderBy(name => name, StringComparer.Ordinal)
@@ -1162,7 +1170,7 @@ internal sealed record SourceFacts(
         .OrderBy(include => include.SourcePath)
         .ThenBy(include => include.Start)
         .ToList(),
-      structured);
+      wiring);
   }
 
   public IReadOnlyList<string> LocalIncludedModulesFor(string sourcePath) {
@@ -1202,9 +1210,13 @@ internal sealed record SourceFacts(
 
   private static DefinitionSourceFacts ProgramSourceFacts(
     Program program,
-    IReadOnlyList<ModuleDefinition> parsedModules) {
+    IReadOnlyList<ModuleDefinition> parsedModules,
+    IReadOnlySet<Uri>? analysisSourceUris = null) {
     var modules = parsedModules
-      .Where(module => !module.IsDefaultModule && module.BodyStartTok != Token.NoToken)
+      .Where(module =>
+        !module.IsDefaultModule &&
+        module.BodyStartTok != Token.NoToken &&
+        (analysisSourceUris == null || analysisSourceUris.Contains(module.StartToken.Uri)))
       .Select(module => new DefinitionAnalysisModule(
         module.FullDafnyName,
         DefinitionAnalysis.SourcePath(module),
@@ -1219,6 +1231,8 @@ internal sealed record SourceFacts(
       .Where(module => !module.IsDefaultModule)
       .SelectMany(module => module.TopLevelDecls
         .OfType<ModuleDecl>()
+        .Where(moduleDecl =>
+          analysisSourceUris == null || analysisSourceUris.Contains(moduleDecl.StartToken.Uri))
         .Select(moduleDecl => StructuredImport(module, moduleDecl)))
       .Where(importItem => importItem != null)
       .Cast<DefinitionAnalysisImport>()
@@ -1227,7 +1241,9 @@ internal sealed record SourceFacts(
       .ThenBy(importItem => importItem.Alias, StringComparer.Ordinal)
       .ToList();
     var includes = program.Compilation.Includes
-      .Where(include => Path.GetExtension(include.IncludedFilename.LocalPath) == ".dfy")
+      .Where(include =>
+        Path.GetExtension(include.IncludedFilename.LocalPath) == ".dfy" &&
+        (analysisSourceUris == null || analysisSourceUris.Contains(include.IncluderFilename)))
       .Select(include => new DefinitionAnalysisInclude(
         Path.GetFullPath(include.IncluderFilename.LocalPath),
         Path.GetFullPath(include.IncludedFilename.LocalPath),
@@ -1244,11 +1260,15 @@ internal sealed record SourceFacts(
   private static DefinitionAnalysisImport? StructuredImport(
     ModuleDefinition module,
     ModuleDecl moduleDecl) {
+    var targetModule = moduleDecl switch {
+      AliasModuleDecl alias => alias.Signature?.ModuleDef,
+      AbstractModuleDecl abstractModule => abstractModule.OriginalSignature?.ModuleDef,
+      _ => null,
+    };
     var target = moduleDecl switch {
-      AliasModuleDecl alias => alias.Signature?.ModuleDef?.FullDafnyName ?? alias.TargetQId.ToString(),
-      AbstractModuleDecl abstractModule =>
-        abstractModule.OriginalSignature?.ModuleDef?.FullDafnyName ?? abstractModule.QId.ToString(),
-      _ => null
+      AliasModuleDecl alias => targetModule?.FullDafnyName ?? alias.TargetQId.ToString(),
+      AbstractModuleDecl abstractModule => targetModule?.FullDafnyName ?? abstractModule.QId.ToString(),
+      _ => null,
     };
     var sourcePath = DefinitionAnalysis.SourcePath(moduleDecl);
     if (target == null || sourcePath.Length == 0) {
@@ -1258,6 +1278,8 @@ internal sealed record SourceFacts(
       module.FullDafnyName,
       moduleDecl.Name,
       target,
+      moduleDecl is not AliasModuleDecl aliasModule || aliasModule.HasAlias,
+      targetModule == null ? "" : DefinitionAnalysis.SourcePath(targetModule),
       moduleDecl.Opened,
       sourcePath,
       moduleDecl.StartToken.pos,
