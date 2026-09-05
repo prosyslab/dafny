@@ -14,6 +14,7 @@ static class DefinitionAnalysisCommand {
     Format,
     SpansOnly,
     IncludeSourceFacts,
+    IncludeSemanticFacts,
     IncludeStatements
   }.Concat(DafnyCommands.ConsoleOutputOptions)
     .Concat(DafnyCommands.ResolverOptions);
@@ -24,6 +25,8 @@ static class DefinitionAnalysisCommand {
     "Report parse-level source spans without requiring name or type resolution.");
   private static readonly Option<bool> IncludeSourceFacts = new("--include-source-facts",
     "Wrap definitions and resolved source structure in a JSON document.");
+  private static readonly Option<bool> IncludeSemanticFacts = new("--include-semantic-facts",
+    "Include deterministic source and definition semantic fingerprints.");
   private static readonly Option<bool> IncludeStatements = new("--include-statements",
     "Report resolved statement spans, kinds, and direct call targets.");
 
@@ -31,6 +34,7 @@ static class DefinitionAnalysisCommand {
     OptionRegistry.RegisterOption(Format, OptionScope.Cli);
     OptionRegistry.RegisterOption(SpansOnly, OptionScope.Cli);
     OptionRegistry.RegisterOption(IncludeSourceFacts, OptionScope.Cli);
+    OptionRegistry.RegisterOption(IncludeSemanticFacts, OptionScope.Cli);
     OptionRegistry.RegisterOption(IncludeStatements, OptionScope.Cli);
   }
 
@@ -63,6 +67,11 @@ static class DefinitionAnalysisCommand {
           "definition-analysis does not support --include-statements with --spans-only.");
         return (int)ExitValue.PREPROCESSING_ERROR;
       }
+      if (options.Get(IncludeSemanticFacts)) {
+        await options.ErrorWriter.WriteLineAsync(
+          "definition-analysis does not support --include-semantic-facts with --spans-only.");
+        return (int)ExitValue.PREPROCESSING_ERROR;
+      }
       return await ExecuteSpansOnly(options);
     }
 
@@ -74,11 +83,13 @@ static class DefinitionAnalysisCommand {
       return await compilation.GetAndReportExitCode();
     }
 
-    var results = options.Get(IncludeSourceFacts)
+    var includeSourceFacts = options.Get(IncludeSourceFacts) || options.Get(IncludeSemanticFacts);
+    var results = includeSourceFacts
       ? (object)DefinitionAnalysis.AnalyzeDocument(
         resolution.ResolvedProgram,
         analysisSourceUris,
-        options.Get(IncludeStatements))
+        options.Get(IncludeStatements),
+        options.Get(IncludeSemanticFacts))
       : DefinitionAnalysis.Analyze(
         resolution.ResolvedProgram,
         analysisSourceUris,
