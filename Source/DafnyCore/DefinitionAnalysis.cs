@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text;
+using System.Text.Json.Serialization;
 
 namespace Microsoft.Dafny;
 
@@ -74,11 +75,35 @@ public record DefinitionAnalysisDocument(
   DefinitionSourceFacts SourceFacts
 );
 
+public record DafnySourceSemanticFingerprint(
+  string SourcePath,
+  string FullSha256,
+  string DeclarationScaffoldSha256,
+  string ScaffoldSha256
+);
+
+public record DafnyDefinitionSemanticFingerprint(
+  string SourcePath,
+  string FullName,
+  string Kind,
+  string DeclarationSha256,
+  string ContractSha256,
+  string BodySha256
+);
+
+public record DafnySemanticFacts(
+  IReadOnlyList<DafnySourceSemanticFingerprint> Sources,
+  IReadOnlyList<DafnyDefinitionSemanticFingerprint> Definitions
+);
+
 public record DefinitionSourceFacts(
   IReadOnlyList<DefinitionAnalysisModule> Modules,
   IReadOnlyList<DefinitionAnalysisImport> Imports,
   IReadOnlyList<DefinitionAnalysisInclude> Includes
-);
+) {
+  [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  public DafnySemanticFacts? SemanticFacts { get; init; }
+}
 
 public record DefinitionAnalysisModule(
   string Name,
@@ -192,7 +217,7 @@ public record DefinitionAnalysisInclude(
   int End
 );
 
-public static class DefinitionAnalysis {
+public static partial class DefinitionAnalysis {
   internal static IReadOnlyList<DefinitionAttribute> AttributesFor(INode declaration) {
     if (declaration is not IAttributeBearingDeclaration attributeBearing) {
       return Array.Empty<DefinitionAttribute>();
@@ -220,10 +245,17 @@ public static class DefinitionAnalysis {
   public static DefinitionAnalysisDocument AnalyzeDocument(
     Program program,
     IReadOnlySet<Uri> analysisSourceUris,
-    bool includeStatements = false) {
+    bool includeStatements = false,
+    bool includeSemanticFacts = false) {
     var (sourceFacts, programFacts) = SourceFacts.ForDocument(program, analysisSourceUris);
+    var definitions = Analyze(program, sourceFacts, analysisSourceUris, includeStatements);
+    if (includeSemanticFacts) {
+      programFacts = programFacts with {
+        SemanticFacts = SemanticFactsFor(program.Options, analysisSourceUris, definitions, programFacts)
+      };
+    }
     return new DefinitionAnalysisDocument(
-      Analyze(program, sourceFacts, analysisSourceUris, includeStatements),
+      definitions,
       programFacts);
   }
 
