@@ -31,7 +31,8 @@ namespace Microsoft.Dafny {
       fNull, fSetUnion, fSetIntersection, fSetDifference, fSetUnionOne,
       fSetEmpty, fSeqEmpty, fSeqBuild, fSeqAppend, fSeqDrop, fSeqTake,
       fSeqUpdate, fSeqCreate, fU2Real, fU2Bool, fU2Int,
-      fMapDomain, fMapElements, fMapValues, fMapBuild, fMapEmpty, fIs, fIsBox, fUnbox, fLs, fLz;
+      fMapDomain, fMapElements, fMapValues, fMapBuild, fMapEmpty,
+      fMultiSetCard, fMultiSetEmpty, fMultiSetUnionOne, fIs, fIsBox, fUnbox, fLs, fLz;
     private readonly Dictionary<Model.Element, Model.FuncTuple> datatypeValues = new();
     private readonly List<Model.Func> bitvectorFunctions = [];
 
@@ -71,6 +72,9 @@ namespace Microsoft.Dafny {
       fMapValues = new ModelFuncWrapper(this, "Map#Values", 1, 0);
       fMapBuild = new ModelFuncWrapper(this, "Map#Build", 3, 0);
       fMapEmpty = new ModelFuncWrapper(this, "Map#Empty", 0, 0);
+      fMultiSetCard = new ModelFuncWrapper(this, "MultiSet#Card", 1, 0);
+      fMultiSetEmpty = new ModelFuncWrapper(this, "MultiSet#Empty", 0, 0);
+      fMultiSetUnionOne = new ModelFuncWrapper(this, "MultiSet#UnionOne", 2, 0);
       fIs = new ModelFuncWrapper(this, "$Is", 2, tyArgMultiplier);
       fIsBox = new ModelFuncWrapper(this, "$IsBox", 2, 0);
       fBox = new ModelFuncWrapper(this, BoogieGenerator.BoxFunctionName, 1, tyArgMultiplier);
@@ -169,6 +173,29 @@ namespace Microsoft.Dafny {
         }
         concretizedValues[element] = literal!;
       }
+    }
+
+    public IReadOnlyList<PartialValue> GetMultiSetElements(PartialState state, PartialValue multiset) {
+      var existing = multiset.Constraints.OfType<MultiSetDisplayConstraint>().FirstOrDefault();
+      if (existing != null) {
+        return existing.Elements;
+      }
+      var cardinalityTuple = fMultiSetCard.AppWithArg(0, multiset.Element);
+      if (cardinalityTuple != null && !multiset.Constraints.OfType<CardinalityConstraint>().Any()) {
+        var cardinality = PartialValue.Get(cardinalityTuple.Result, state);
+        var _ = new CardinalityConstraint(cardinality, multiset);
+      }
+      var elements = new List<PartialValue>();
+      var current = multiset.Element;
+      var visited = new HashSet<Model.Element>();
+      while (visited.Add(current) && fMultiSetUnionOne.AppWithResult(current) is { } union) {
+        elements.Insert(0, PartialValue.Get(UnboxNotNull(union.Args[1]), state));
+        current = union.Args[0];
+      }
+      if (elements.Count > 0) {
+        var _ = new MultiSetDisplayConstraint(multiset, elements);
+      }
+      return elements;
     }
 
     /// <summary>
@@ -547,6 +574,28 @@ namespace Microsoft.Dafny {
               }
             }
 
+            return;
+          }
+        case MultiSetType: {
+            if (fMultiSetEmpty.AppWithResult(value.Element) != null) {
+              var _ = new LiteralExprConstraint(value, new MultiSetDisplayExpr(Token.NoToken, []));
+              return;
+            }
+            var cardinalityTuple = fMultiSetCard.AppWithArg(0, value.Element);
+            if (cardinalityTuple != null) {
+              var cardinality = PartialValue.Get(cardinalityTuple.Result, state);
+              var _ = new CardinalityConstraint(cardinality, value);
+            }
+            var elements = new List<PartialValue>();
+            var current = value.Element;
+            var visited = new HashSet<Model.Element>();
+            while (visited.Add(current) && fMultiSetUnionOne.AppWithResult(current) is { } union) {
+              elements.Insert(0, PartialValue.Get(UnboxNotNull(union.Args[1]), state));
+              current = union.Args[0];
+            }
+            if (elements.Count > 0) {
+              var _ = new MultiSetDisplayConstraint(value, elements);
+            }
             return;
           }
         case MapType: {

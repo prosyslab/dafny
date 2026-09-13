@@ -7,6 +7,30 @@ using System.Numerics;
 
 namespace Microsoft.Dafny;
 
+internal sealed class QuantifierExpansionBudget {
+  internal uint Limit { get; }
+  internal uint Used { get; private set; }
+  internal uint Remaining => Used >= Limit ? 0 : Limit - Used;
+  internal bool IsExhausted { get; private set; }
+
+  internal QuantifierExpansionBudget(uint limit) {
+    if (limit == 0) {
+      throw new ArgumentOutOfRangeException(nameof(limit), "The quantifier instance limit must be positive.");
+    }
+    Limit = limit;
+  }
+
+  internal void ConsumeInstance() {
+    if (Used < Limit) {
+      Used++;
+    }
+  }
+
+  internal void MarkExhausted() {
+    IsExhausted = true;
+  }
+}
+
 /// <summary>
 /// Shared helpers for discovering bounds, inferring concrete domains, and materializing
 /// set/map comprehensions for bounded quantifier unrolling and partial evaluation.
@@ -16,12 +40,15 @@ internal sealed class QuantifierBounds {
   private const int CharDomainCardinality = 0x10000;
   private readonly SystemModuleManager systemModuleManager;
   private readonly uint maxInstances;
+  private readonly QuantifierExpansionBudget? expansionBudget;
 
   internal uint MaxInstances => maxInstances;
 
-  internal QuantifierBounds(SystemModuleManager systemModuleManager, uint maxInstances) {
+  internal QuantifierBounds(SystemModuleManager systemModuleManager, uint maxInstances,
+    QuantifierExpansionBudget? expansionBudget = null) {
     this.systemModuleManager = systemModuleManager ?? throw new ArgumentNullException(nameof(systemModuleManager));
     this.maxInstances = maxInstances;
+    this.expansionBudget = expansionBudget;
   }
 
   internal sealed class ConcreteDomain {
@@ -380,6 +407,10 @@ internal sealed class QuantifierBounds {
     }
 
     // Domain product within cap means full unroll; otherwise we partially unroll up to the cap.
+    // Contract reduction supplies a shared budget so nested and sibling quantifiers consume one
+    // cumulative allowance. Rewriter callers keep the historical per-quantifier cap.
+    var effectiveMaxInstances = expansionBudget?.Remaining ?? maxInstances;
+    var hasInstanceLimit = expansionBudget != null || maxInstances > 0;
     var exceedsMaxInstances = false;
     var size = BigInteger.One;
     for (var i = 0; i < domains.Length; i++) {
@@ -392,7 +423,7 @@ internal sealed class QuantifierBounds {
 
       if (!exceedsMaxInstances) {
         size *= domainSize;
-        if (maxInstances > 0 && size > maxInstances) {
+        if (hasInstanceLimit && size > effectiveMaxInstances) {
           exceedsMaxInstances = true;
         }
       }
@@ -407,6 +438,16 @@ internal sealed class QuantifierBounds {
 
     Expression accumulator = Expression.CreateBoolLiteral(quantifierExpr.Origin, isForall);
     accumulator.Type = Type.Bool;
+
+    if (exceedsMaxInstances && effectiveMaxInstances == 0) {
+      if (!emitOverflowResidual) {
+        return false;
+      }
+      expansionBudget?.MarkExhausted();
+      MarkQuantifierAsPartiallyUnrolled(quantifierExpr);
+      rewritten = quantifierExpr;
+      return true;
+    }
 
     void AddInstance(Expression instance) {
       if (Expression.IsBoolLiteral(instance, out var b)) {
@@ -435,10 +476,13 @@ internal sealed class QuantifierBounds {
     bool reachedInstanceCap = false;
 
     bool HandleInstance(Substituter substituter) {
+      expansionBudget?.ConsumeInstance();
       var inst = substituter.Substitute(logicalBody);
       inst = simplifyAfterSubst(inst);
       AddInstance(inst);
-      if (maxInstances > 0 && ++instanceCount >= maxInstances) {
+      instanceCount++;
+      if (expansionBudget != null ? expansionBudget.Remaining == 0 :
+          hasInstanceLimit && instanceCount >= effectiveMaxInstances) {
         reachedInstanceCap = true;
       }
       return true;
@@ -453,10 +497,14 @@ internal sealed class QuantifierBounds {
           () => IsShortCircuited() || reachedInstanceCap)) {
       return false;
     }
+    if (expansionBudget != null && reachedInstanceCap && new BigInteger(instanceCount) < size) {
+      exceedsMaxInstances = true;
+    }
     if (exceedsMaxInstances && !IsShortCircuited()) {
       if (!emitOverflowResidual) {
         return false;
       }
+      expansionBudget?.MarkExhausted();
       MarkQuantifierAsPartiallyUnrolled(quantifierExpr);
       rewritten = isForall
         ? Expression.CreateAnd(accumulator, quantifierExpr)

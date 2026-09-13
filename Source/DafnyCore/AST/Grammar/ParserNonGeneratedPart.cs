@@ -10,6 +10,15 @@ namespace Microsoft.Dafny;
 
 public partial class Parser {
 
+  /// <summary>Parse one complete type using the same grammar as source declarations.</summary>
+  public Type ParseType() {
+    la = scanner.FirstToken;
+    Get();
+    Type(out var result);
+    Expect(0);
+    return result;
+  }
+
   public Parser(DafnyOptions options, Scanner/*!*/ scanner, Errors/*!*/ errors, CancellationToken cancellationToken)
     : this(scanner, errors, cancellationToken)  // the real work
   {

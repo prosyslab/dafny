@@ -829,7 +829,7 @@ internal sealed partial class PartialEvaluatorEngine {
         SetReplacement(callExpr, interpreted);
         return false;
       }
-      if (state.Depth > 0 && engine.TryInlineCall(callExpr, state, this, out var inlined)) {
+      if (engine.TryInlineCall(callExpr, state, this, out var inlined)) {
         SetReplacement(callExpr, inlined);
         return false;
       }
@@ -882,6 +882,15 @@ internal sealed partial class PartialEvaluatorEngine {
     // ------------------- Expression rewriting: quantifiers -------------------
 
     private bool SimplifyQuantifierExpr(QuantifierExpr quantifierExpr, PartialEvalState state) {
+      // The finite-sequence recognizer needs the original resolved domain constraint. Simplifying
+      // a nested forall first can turn that constraint into individual index checks and erase the
+      // finite element-domain shape used by the bounded enumerator.
+      if (quantifierExpr is ExistsExpr sequenceExistsExpr &&
+          TrySimplifyExistsSequence(sequenceExistsExpr, state, out var sequenceReplacement)) {
+        SetReplacement(quantifierExpr, sequenceReplacement);
+        return false;
+      }
+
       quantifierExpr.Range = quantifierExpr.Range == null ? null : SimplifyExpression(quantifierExpr.Range, state);
       quantifierExpr.Term = SimplifyExpression(quantifierExpr.Term, state);
       quantifierExpr.Bounds = SimplifyBounds(quantifierExpr.Bounds, state);
@@ -932,10 +941,6 @@ internal sealed partial class PartialEvaluatorEngine {
           SetReplacement(quantifierExpr, arithmeticReplacement);
           return false;
         }
-        if (TrySimplifyExistsSequence(existsExpr, state, out var sequenceReplacement)) {
-          SetReplacement(quantifierExpr, sequenceReplacement);
-          return false;
-        }
       }
 
       var inlineDepthForUnrolledInstances = Math.Max(0, state.Depth - 1);
@@ -944,7 +949,7 @@ internal sealed partial class PartialEvaluatorEngine {
             quantifierExpr,
             expr => SimplifyExpression(expr, state.WithDepth(inlineDepthForUnrolledInstances)),
             out var unrolled,
-            emitOverflowResidual: false)) {
+            emitOverflowResidual: engine.emitQuantifierOverflowResidual)) {
         SetReplacement(quantifierExpr, unrolled);
       }
       return false;
@@ -1827,12 +1832,13 @@ internal sealed partial class PartialEvaluatorEngine {
 
       var residual = CombineConjuncts(conjuncts, existsExpr.Origin);
 
-      var cap = engine.GetPartialEvalUnrollCap();
+      var cap = engine.GetRemainingQuantifierExpansionLimit();
       var domainSize = new BigInteger(elementDomain.Count);
       var product = BigInteger.One;
       for (var index = 0; index < length.Value; index++) {
         product *= domainSize;
-        if (cap > 0 && product > cap) {
+        if (engine.HasQuantifierExpansionLimit() && product > cap) {
+          engine.RecordQuantifierExpansionExhaustion();
           return false;
         }
       }
@@ -1859,6 +1865,7 @@ internal sealed partial class PartialEvaluatorEngine {
       var foundUnknown = false;
 
       bool EvaluateCandidate() {
+        engine.RecordQuantifierExpansion();
         Expression literalExpr;
         if (isString) {
           var chars = new char[length];
