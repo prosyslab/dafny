@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "path": "contractTesting.functionPrecondition.dfy",
+      "content": "module Probe {\n function Positive(x: int): int requires x > 0 { x }\n method Entry(x: int) returns (r: int) ensures r == x { r := Positive(x); }\n}",
+      "sha256": "c384bb27271b0c9fab369e2a17fe06ac68a79548aef21a42af488961b78f5470"
+    }
+  ],
+  "entry": {
+    "symbol": "Probe.Entry"
+  },
+  "inputs": {
+    "x": {
+      "kind": "integer",
+      "value": "0"
+    }
+  },
+  "timeoutMilliseconds": 60000
+}
