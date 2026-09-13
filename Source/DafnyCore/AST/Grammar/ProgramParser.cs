@@ -315,6 +315,11 @@ public class ProgramParser {
     return new DfyParseFileResult(version, uri, [], batchErrorReporter, parser.theModule, parser.SystemModuleModifiers);
   }
 
+  public static Type ParseType(string source, Uri uri, ErrorReporter reporter,
+    CancellationToken cancellationToken = default) {
+    return SetupParser(source, uri, reporter, cancellationToken).ParseType();
+  }
+
   private static Parser SetupParser(string s /*!*/, Uri uri /*!*/,
     ErrorReporter errorReporter /*!*/, CancellationToken cancellationToken) {
     Contract.Requires(s != null);

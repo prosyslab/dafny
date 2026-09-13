@@ -14,6 +14,12 @@ using JetBrains.Annotations;
 namespace Microsoft.Dafny {
   public class TypeCharacteristicChecker {
 
+    /// <summary>Check a resolved explicit instantiation without rewriting its original declaration.</summary>
+    public static void CheckInstantiation(MethodOrFunction callable, List<Type> arguments, ErrorReporter reporter) {
+      new CheckTypeCharacteristicsVisitor(reporter).CheckTypeInstantiation(callable.Origin, callable.WhatKind,
+        callable.Name, callable.TypeArgs, arguments, callable.IsGhost);
+    }
+
     /// <summary>
     /// Infer required equality support from looking at signatures of declarations.
     /// Then, check that all type characteristics are used and passed in properly.

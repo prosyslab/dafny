@@ -324,7 +324,7 @@ class CheckTypeCharacteristicsVisitor : ResolverTopDownVisitor<bool> {
     }
   }
 
-  void CheckTypeInstantiation(IOrigin tok, string what, string className, List<TypeParameter> formalTypeArgs, List<Type> actualTypeArgs, bool inGhostContext) {
+  public void CheckTypeInstantiation(IOrigin tok, string what, string className, List<TypeParameter> formalTypeArgs, List<Type> actualTypeArgs, bool inGhostContext) {
     Contract.Requires(tok != null);
     Contract.Requires(what != null);
     Contract.Requires(className != null);

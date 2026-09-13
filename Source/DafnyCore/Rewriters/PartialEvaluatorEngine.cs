@@ -15,24 +15,38 @@ internal sealed partial class PartialEvaluatorEngine {
   private readonly SystemModuleManager systemModuleManager;
   private readonly uint inlineDepth;
   private readonly VisibilityScope effectiveScope;
+  private readonly uint? quantifierUnrollCapOverride;
+  private readonly QuantifierExpansionBudget quantifierExpansionBudget;
+  private readonly bool emitQuantifierOverflowResidual;
   private readonly HelperFunctionInterpreter helperInterpreter;
   private readonly Dictionary<string, CachedLiteral> inlineCallCache = new(StringComparer.Ordinal);
   private QuantifierBounds quantifierBounds;
 
   internal HelperFunctionInterpreter HelperInterpreter => helperInterpreter;
+  internal bool InlineDepthExhausted { get; private set; }
 
   // ------------------- Construction and entry points -------------------
 
   public PartialEvaluatorEngine(DafnyOptions options, ModuleDefinition module, SystemModuleManager systemModuleManager, uint inlineDepth)
-    : this(options, module, systemModuleManager, inlineDepth, null) {
+    : this(options, module, systemModuleManager, inlineDepth, null, null, null, false) {
   }
 
-  public PartialEvaluatorEngine(DafnyOptions options, ModuleDefinition module, SystemModuleManager systemModuleManager, uint inlineDepth, VisibilityScope effectiveScope = null) {
+  public PartialEvaluatorEngine(DafnyOptions options, ModuleDefinition module, SystemModuleManager systemModuleManager, uint inlineDepth, VisibilityScope effectiveScope = null)
+    : this(options, module, systemModuleManager, inlineDepth, effectiveScope, null, null, false) {
+  }
+
+  internal PartialEvaluatorEngine(DafnyOptions options, ModuleDefinition module,
+    SystemModuleManager systemModuleManager, uint inlineDepth, VisibilityScope effectiveScope,
+    uint? quantifierUnrollCap, QuantifierExpansionBudget quantifierExpansionBudget,
+    bool emitQuantifierOverflowResidual) {
     this.options = options;
     this.module = module;
     this.systemModuleManager = systemModuleManager;
     this.inlineDepth = inlineDepth;
     this.effectiveScope = effectiveScope ?? module.VisibilityScope;
+    quantifierUnrollCapOverride = quantifierUnrollCap;
+    this.quantifierExpansionBudget = quantifierExpansionBudget;
+    this.emitQuantifierOverflowResidual = emitQuantifierOverflowResidual;
     helperInterpreter = new HelperFunctionInterpreter(this, systemModuleManager);
   }
 
@@ -71,15 +85,34 @@ internal sealed partial class PartialEvaluatorEngine {
   // ------------------- Quantifier bounds / finite materialization -------------------
 
   private uint GetPartialEvalUnrollCap() {
+    if (quantifierUnrollCapOverride.HasValue) {
+      return quantifierUnrollCapOverride.Value;
+    }
     var unrollBoundedQuantifiers = options.Get(CommonOptionBag.UnrollBoundedQuantifiers);
     return unrollBoundedQuantifiers ?? DefaultPartialEvalUnrollCap;
+  }
+
+  private uint GetRemainingQuantifierExpansionLimit() {
+    return quantifierExpansionBudget?.Remaining ?? GetPartialEvalUnrollCap();
+  }
+
+  private bool HasQuantifierExpansionLimit() {
+    return quantifierExpansionBudget != null || GetPartialEvalUnrollCap() > 0;
+  }
+
+  private void RecordQuantifierExpansion() {
+    quantifierExpansionBudget?.ConsumeInstance();
+  }
+
+  private void RecordQuantifierExpansionExhaustion() {
+    quantifierExpansionBudget?.MarkExhausted();
   }
 
   private QuantifierBounds GetQuantifierBounds() {
     if (quantifierBounds != null) {
       return quantifierBounds;
     }
-    quantifierBounds = new QuantifierBounds(systemModuleManager, GetPartialEvalUnrollCap());
+    quantifierBounds = new QuantifierBounds(systemModuleManager, GetPartialEvalUnrollCap(), quantifierExpansionBudget);
     return quantifierBounds;
   }
 
@@ -969,7 +1002,7 @@ internal sealed partial class PartialEvaluatorEngine {
   private bool TryInlineCall(FunctionCallExpr callExpr, PartialEvalState state, PartialEvaluatorVisitor visitor, out Expression inlined) {
     inlined = null;
     var function = callExpr.Function;
-    if (function == null || function.Body == null || state.Depth <= 0) {
+    if (function == null || function.Body == null) {
       return false;
     }
 
@@ -990,6 +1023,11 @@ internal sealed partial class PartialEvaluatorEngine {
       }
     }
     if (!hasInlineableArgument) {
+      return false;
+    }
+
+    if (state.Depth <= 0) {
+      InlineDepthExhausted = true;
       return false;
     }
 

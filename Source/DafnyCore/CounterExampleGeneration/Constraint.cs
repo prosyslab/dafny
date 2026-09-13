@@ -372,6 +372,24 @@ public class SetDisplayConstraint : Constraint {
   }
 }
 
+public class MultiSetDisplayConstraint : Constraint {
+  public readonly List<PartialValue> Elements;
+  private readonly PartialValue multiset;
+
+  public MultiSetDisplayConstraint(PartialValue multiset, List<PartialValue> elements) :
+    base(elements.Append(multiset)) {
+    this.multiset = multiset;
+    Elements = elements;
+  }
+
+  protected override Expression AsExpressionHelper(Dictionary<PartialValue, Expression> definitions) {
+    var display = new MultiSetDisplayExpr(Token.NoToken, Elements.ConvertAll(element => definitions[element])) {
+      Type = multiset.Type
+    };
+    return new BinaryExpr(Token.NoToken, BinaryExpr.Opcode.Eq, definitions[multiset], display);
+  }
+}
+
 public class MapKeysDisplayConstraint : Constraint {
   private readonly List<PartialValue> elements;
   private readonly PartialValue map;

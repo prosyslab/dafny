@@ -108,6 +108,10 @@ public class PartialValue {
       .Select(containment => containment.Element);
   }
 
+  public IEnumerable<PartialValue> MultiSetElements() {
+    return state.Model.GetMultiSetElements(state, this);
+  }
+
   public string DatatypeConstructorName() {
     return Constraints.OfType<DatatypeConstructorCheckConstraint>()
       .Select(constructorCheck => constructorCheck.ConstructorName).FirstOrDefault() ?? "";
