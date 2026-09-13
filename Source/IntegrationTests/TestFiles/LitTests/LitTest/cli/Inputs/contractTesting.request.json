@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "path": "contractTesting.dfy",
+      "content": "// The diagnostic executes an unverified body and returns a structured counterexample.\n// RUN: %baredafny test-contracts \"%S/Inputs/contractTesting.request.json\" > \"%t\"\n// RUN: %baredafny test-contracts \"%S/Inputs/contractTesting.frameRestore.request.json\" >> \"%t\"\n// RUN: %baredafny test-contracts \"%S/Inputs/contractTesting.classAssertion.request.json\" >> \"%t\"\n// RUN: %baredafny test-contracts \"%S/Inputs/contractTesting.functionPrecondition.request.json\" >> \"%t\"\n// RUN: %OutputCheck --file-to-check \"%t\" \"%s\"\n// CHECK: \"status\":\"counterexample\".*\"violation\":\"postcondition\"\n// CHECK: \"status\":\"counterexample\".*\"violation\":\"frame\"\n// CHECK: \"status\":\"counterexample\".*\"violation\":\"body_assertion\"\n// CHECK: \"status\":\"counterexample\".*\"violation\":\"call_precondition\"\n\nmethod Selected(x: int) returns (r: int)\n  ensures r == x\n{\n  r := x + 1;\n}\n",
+      "sha256": "b0c5b0122facf19f23a2268ca3c9f4848b4683d8e78820bea6d1370ce2d3c6f1"
+    }
+  ],
+  "entry": {
+    "symbol": "Selected"
+  },
+  "inputs": {
+    "x": {
+      "kind": "integer",
+      "value": "2"
+    }
+  },
+  "timeoutMilliseconds": 60000
+}

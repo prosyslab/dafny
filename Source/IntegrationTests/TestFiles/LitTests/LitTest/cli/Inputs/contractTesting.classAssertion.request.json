@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "path": "contractTesting.classAssertion.dfy",
+      "content": "module Probe {\n class Helper { static method Check() { assert false; } }\n method Entry(x: int) returns (r: int) ensures r == x { Helper.Check(); r := x; }\n}",
+      "sha256": "f03585cfaec2dc22739d63796befa11beda2b70681d364e37c2e7cd73a3abfa6"
+    }
+  ],
+  "entry": {
+    "symbol": "Probe.Entry"
+  },
+  "inputs": {
+    "x": {
+      "kind": "integer",
+      "value": "0"
+    }
+  },
+  "timeoutMilliseconds": 60000
+}

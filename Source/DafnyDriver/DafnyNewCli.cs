@@ -51,6 +51,7 @@ public static class DafnyNewCli {
     AddCommand(SimplifyCommand.Create());
     AddCommand(DefinitionAnalysisCommand.Create());
     AddCommand(SourceFingerprintCommand.Create());
+    AddCommand(TestContractsCommand.Create());
     AddCommand(ProofRemoverCommand.Create());
 
     OptionRegistry.CheckOptionsAreKnown(AllOptions);

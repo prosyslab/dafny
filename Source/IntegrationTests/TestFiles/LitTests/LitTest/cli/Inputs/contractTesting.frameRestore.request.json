@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "path": "contractTesting.frameRestore.dfy",
+      "content": "module Probe {\n class Cell { var value: int }\n method Entry(c: Cell) ensures c.value == old(c.value) {\n  var before := c.value; c.value := before + 1; c.value := before;\n }\n}",
+      "sha256": "c4a47342459ab193d3eb2fdeb95eb23b2b4b0609c7bd3ef4adf176a111a14b4f"
+    }
+  ],
+  "entry": {
+    "symbol": "Probe.Entry"
+  },
+  "inputs": {
+    "c": {
+      "kind": "reference",
+      "value": "cell"
+    }
+  },
+  "timeoutMilliseconds": 60000,
+  "heap": [
+    {
+      "id": "cell",
+      "type": "Probe.Cell",
+      "fields": {
+        "value": {
+          "kind": "integer",
+          "value": "0"
+        }
+      }
+    }
+  ]
+}
