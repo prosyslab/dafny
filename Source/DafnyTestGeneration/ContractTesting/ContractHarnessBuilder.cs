@@ -11,6 +11,8 @@ public sealed record ContractPreparedProgram(Program Program, Method Method, Con
   ContractSourceLocation Location, ContractHeapPlan? Heap = null, MethodOrFunction? OriginalCallable = null,
   Method? ReachableTarget = null, IReadOnlyList<ContractSource>? Sources = null) {
   public IReadOnlyList<ContractSource> SourceSnapshots => Sources ?? [Source];
+  public IReadOnlyList<ContractSource> DiagnosticSourceSnapshots =>
+    ContractSourceSnapshot.ApplyEdits(SourceSnapshots, Heap?.SourceEdits ?? []);
   public MethodOrFunction Callable => OriginalCallable ?? Method;
   public IReadOnlyList<Microsoft.Dafny.Type> ConcreteTypeArguments =>
     Method is ContractConcreteMethod concrete ? concrete.ConcreteTypeArguments : [];
@@ -227,7 +229,7 @@ public static class ContractHarnessBuilder {
     var functionWrappers = new List<(int Position, int Length, string Prefix, string Suffix)>();
     var instrumentedWrites = new HashSet<(int Start, int End)>();
     var tracedGuards = new HashSet<(string Symbol, int Start, int End)>();
-    var reachable = ReachableCallables(prepared);
+    var reachable = ReachableCallables(prepared.Program, prepared.Callable);
     // The runtime bridge can observe compiled fields only.  Audit reachable
     // implementation bodies before applying instrumentation so a ghost heap
     // write cannot disappear and leave Q checked against a fabricated state.
@@ -510,8 +512,12 @@ public static class ContractHarnessBuilder {
     }
   }
 
-  public static string Insert(ContractPreparedProgram prepared, string declaration) =>
-    prepared.Source.Content.Insert(InsertionPosition(prepared), declaration);
+  public static string Insert(ContractPreparedProgram prepared, string declaration) {
+    var edits = (prepared.Heap?.SourceEdits ?? []).Append(new ContractSourceEdit(
+      ContractSourceSnapshot.UriFor(prepared.Source.Path), InsertionPosition(prepared), declaration)).ToList();
+    return ContractSourceSnapshot.Find(ContractSourceSnapshot.ApplyEdits(prepared.SourceSnapshots, edits),
+      ContractSourceSnapshot.UriFor(prepared.Source.Path)).Content;
+  }
 
   private static int InsertionPosition(ContractPreparedProgram prepared) => prepared.Method.EnclosingClass is DefaultClassDecl
     ? prepared.Method.StartToken.pos : prepared.Method.EnclosingClass.StartToken.pos;
@@ -544,12 +550,12 @@ public static class ContractHarnessBuilder {
   private static string TypeShapeLiteral(Microsoft.Dafny.Type type) =>
     "\"" + ContractStubRuntime.TypeShapeToken(type) + "\"";
 
-  private static HashSet<ICallable> ReachableCallables(ContractPreparedProgram prepared) {
-    var edges = prepared.Program.RawModules().SelectMany(module => module.CallGraph.GetVertices().Concat(module.InterModuleCallGraph.GetVertices()))
+  internal static HashSet<ICallable> ReachableCallables(Program program, MethodOrFunction entry) {
+    var edges = program.RawModules().SelectMany(module => module.CallGraph.GetVertices().Concat(module.InterModuleCallGraph.GetVertices()))
       .GroupBy(vertex => vertex.N).ToDictionary(group => group.Key, group => group.SelectMany(vertex => vertex.Successors).Select(vertex => vertex.N).Distinct().ToList());
     var reachable = new HashSet<ICallable>();
     var pending = new Stack<ICallable>();
-    pending.Push((ICallable)prepared.Callable);
+    pending.Push((ICallable)entry);
     while (pending.TryPop(out var callable)) {
       if (!reachable.Add(callable)) {
         continue;

@@ -48,16 +48,21 @@ public sealed class ContractExpressionReducer {
     var substitutedNodeCount = CountExpressionNodes(preservedSubstitutedExpression);
 
     if (substitutedNodeCount > budget.ExpressionNodeLimit) {
-      return CreateResult(originalExpression, preservedSubstitutedExpression, budget,
+      var reducedResidual = CloneResolvedExpression(preservedSubstitutedExpression);
+      return CreateResult(originalExpression, preservedSubstitutedExpression,
+        reducedResidual, budget,
         [ContractReductionExhaustionReason.ExpressionNodeLimit], 0, originalNodeCount,
-        substitutedNodeCount, substitutedNodeCount);
+        substitutedNodeCount, substitutedNodeCount, 0);
     }
 
     var workingExpression = CloneResolvedExpression(preservedSubstitutedExpression);
     var quantifierBudget = new QuantifierExpansionBudget(budget.QuantifierInstanceLimit);
+    var expressionExpansionBudget = new ExpressionExpansionBudget(
+      budget.ExpressionNodeLimit - substitutedNodeCount);
     var evaluator = new PartialEvaluatorEngine(options, module, systemModuleManager,
       budget.InlineDepthLimit, effectiveScope, budget.QuantifierInstanceLimit,
-      quantifierBudget, emitQuantifierOverflowResidual: true);
+      quantifierBudget, emitQuantifierOverflowResidual: true,
+      PartialEvaluationProfile.ContractConcrete, expressionExpansionBudget);
     var reducedExpression = evaluator.SimplifyExpression(workingExpression);
     var reducedNodeCount = CountExpressionNodes(reducedExpression);
     var exhaustionReasons = new List<ContractReductionExhaustionReason>();
@@ -68,25 +73,29 @@ public sealed class ContractExpressionReducer {
     if (evaluator.InlineDepthExhausted) {
       exhaustionReasons.Add(ContractReductionExhaustionReason.InlineDepthLimit);
     }
-    if (reducedNodeCount > budget.ExpressionNodeLimit) {
+    if (evaluator.ExpressionNodeLimitExhausted || reducedNodeCount > budget.ExpressionNodeLimit) {
       exhaustionReasons.Add(ContractReductionExhaustionReason.ExpressionNodeLimit);
-      reducedExpression = preservedSubstitutedExpression;
+      reducedExpression = CloneResolvedExpression(preservedSubstitutedExpression);
       reducedNodeCount = substitutedNodeCount;
     }
 
-    return CreateResult(originalExpression, reducedExpression, budget, exhaustionReasons,
-      quantifierBudget.Used, originalNodeCount, substitutedNodeCount, reducedNodeCount);
+    return CreateResult(originalExpression, preservedSubstitutedExpression, reducedExpression,
+      budget, exhaustionReasons,
+      quantifierBudget.Used, originalNodeCount, substitutedNodeCount, reducedNodeCount,
+      evaluator.ExpressionExpansionNodesReserved);
   }
 
   private static ContractReductionResult CreateResult(
     Expression originalExpression,
+    Expression substitutedExpression,
     Expression reducedExpression,
     ContractReductionBudget budget,
     IReadOnlyList<ContractReductionExhaustionReason> exhaustionReasons,
     uint quantifierInstancesUsed,
     uint originalNodeCount,
     uint substitutedNodeCount,
-    uint reducedNodeCount) {
+    uint reducedNodeCount,
+    uint expressionExpansionNodeCount) {
     ContractReductionDecision decision;
     if (Expression.IsBoolLiteral(reducedExpression, out var value)) {
       decision = value ? ContractReductionDecision.True : ContractReductionDecision.False;
@@ -94,9 +103,9 @@ public sealed class ContractExpressionReducer {
       decision = ContractReductionDecision.Residual;
     }
 
-    return new ContractReductionResult(originalExpression, reducedExpression, decision,
+    return new ContractReductionResult(originalExpression, substitutedExpression, reducedExpression, decision,
       exhaustionReasons, quantifierInstancesUsed, budget, originalNodeCount,
-      substitutedNodeCount, reducedNodeCount);
+      substitutedNodeCount, reducedNodeCount, expressionExpansionNodeCount);
   }
 
   private static Dictionary<IVariable, Expression> CopyAndValidateSubstitutions(

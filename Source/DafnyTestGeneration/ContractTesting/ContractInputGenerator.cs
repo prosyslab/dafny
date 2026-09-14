@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,6 +17,7 @@ public static class ContractInputGenerator {
     public bool IsValid => Premise.Outcome == ContractQueryOutcome.Sat &&
                            Property.Outcome == ContractQueryOutcome.Unsat;
   }
+  private sealed record RefinementQuerySource(string Content, string Path);
 
   public static void ValidateRequest(ContractGenerationRequest request) {
     if (request.SchemaVersion != ContractJson.SchemaVersion || request.Sources == null || request.Sources.Count == 0 ||
@@ -483,18 +485,32 @@ public static class ContractInputGenerator {
           }
           continue;
         }
-        var refinementObligations = method.Req.Count == 0
-          ? await shape.RefinementObligationsAsync(sample.Inputs, sample.Heap, prepared,
+        var refinementResult = method.Req.Count == 0
+          ? await shape.RefinementObligationsAsync(sample.Inputs, sample.Heap, samplePrepared,
             verifiedRefinements, refinementReductions, token)
           : null;
-        if (refinementObligations != null) {
+        if (refinementResult is { Kind: ContractRefinementResultKind.Failure, Diagnostic: { } refinementFailure }) {
+          rejected++;
+          unknown++;
+          preconditionUnknown++;
+          outcomes.Add(new(goalId, ContractInputGoalKind.Pattern, ContractQueryOutcome.Error,
+            refinementFailure.ToString(), location));
+          continue;
+        }
+        if (refinementResult is { Kind: ContractRefinementResultKind.Complete }) {
+          var refinementObligations = refinementResult.Obligations;
           var refinementQueries = new List<ContractQueryResult>();
+          var reductionDiagnostics = new List<string>();
           var cacheHits = 0;
           ContractQueryResult? failedRefinement = null;
           foreach (var obligation in refinementObligations) {
             if (verifiedRefinements.TryGetValue(obligation.Sha256, out var cached)) {
               if (cached == obligation.Canonical) {
                 cacheHits++;
+                reductionDiagnostics.Add(obligation.TypeName + ": cached decision=" +
+                  (obligation.Reduction?.Decision.ToString() ?? "previously verified") +
+                  ", residual=" + (obligation.Reduction?.ResidualKind.ToString() ?? "none") +
+                  ", exhaustion=" + string.Join(",", obligation.Reduction?.ExhaustionReasons ?? []));
                 continue;
               }
               failedRefinement = new(ContractQueryKind.ContractRealization, ContractQueryOutcome.Error,
@@ -506,18 +522,27 @@ public static class ContractInputGenerator {
                 "A refinement obligation was neither cached nor reduced.");
               break;
             }
+            reductionDiagnostics.Add(obligation.TypeName + ": decision=" + obligation.Reduction.Decision +
+              ", residual=" + obligation.Reduction.ResidualKind + ", exhaustion=" +
+              string.Join(",", obligation.Reduction.ExhaustionReasons));
             if (obligation.Reduction.Decision == ContractReductionDecision.False) {
               failedRefinement = new(ContractQueryKind.ContractRealization, ContractQueryOutcome.Sat,
                 "Concrete refinement membership reduced to false without an SMT query.");
               break;
             }
             if (obligation.Reduction.Decision == ContractReductionDecision.Residual) {
-              var membership = ContractQueryBuilder.RenderExpression(prepared,
-                obligation.Reduction.ReducedExpression);
+              var membership = ContractQueryBuilder.RenderExpression(samplePrepared,
+                obligation.Reduction.SubstitutedExpression);
+              if (!TryRefinementQuerySource(samplePrepared.SourceSnapshots, obligation.QuerySite,
+                    queryName, membership, out var querySource)) {
+                failedRefinement = new(ContractQueryKind.ContractRealization, ContractQueryOutcome.Error,
+                  "The refinement declaration query site does not identify exactly one original supplied source snapshot.");
+                break;
+              }
               var query = await ContractSolver.CheckAsync(
-                RefinementQuerySource(source, method, queryName, membership),
+                querySource.Content,
                 ContractQueryKind.ContractRealization, options, token, queryName: queryName,
-                sourceSnapshots: request.Sources, sourcePath: source.Path);
+                sourceSnapshots: samplePrepared.SourceSnapshots, sourcePath: querySource.Path);
               refinementQueries.Add(query);
               if (query.Outcome != ContractQueryOutcome.Unsat) {
                 failedRefinement = query;
@@ -532,7 +557,8 @@ public static class ContractInputGenerator {
             outcomes.Add(new(goalId, ContractInputGoalKind.Pattern, ContractQueryOutcome.Sat,
               "Complete pattern sample's direct refinement memberships were verified by resolved reduction" +
               " with residual SMT fallback; ran " + refinementQueries.Count + " SMT queries and reused " +
-              cacheHits + " cached SHA-256 obligations.", location));
+              cacheHits + " cached SHA-256 obligations." +
+              (reductionDiagnostics.Count == 0 ? "" : " " + string.Join("; ", reductionDiagnostics)), location));
             if (onProgress != null) {
               await onProgress(Snapshot());
             }
@@ -548,17 +574,19 @@ public static class ContractInputGenerator {
           outcomes.Add(new(goalId, ContractInputGoalKind.Pattern, failedRefinement.Outcome,
             "A direct refinement membership was false or not verified and the sample was filtered; ran " +
             refinementQueries.Count + " SMT queries and reused " + cacheHits +
-            " cached SHA-256 obligations. " + failedRefinement.Diagnostics, location));
+            " cached SHA-256 obligations. " + failedRefinement.Diagnostics +
+            (reductionDiagnostics.Count == 0 ? "" : " " + string.Join("; ", reductionDiagnostics)), location));
           continue;
         }
+        var fallbackDiagnostic = refinementResult?.Diagnostic == null ? "" : " " + refinementResult.Diagnostic;
         var accepted = await RecheckCandidateAsync(program, options, source, method, shape, fixedBindings,
-          precondition, queryName, request.Sources, token);
+          precondition, queryName, samplePrepared.DiagnosticSourceSnapshots, token);
 
         if (accepted.IsValid) {
           inputs.Add(new(test, goalId, ContractInputGoalKind.Pattern,
             [accepted.Premise, accepted.Property], PatternProvenance: sample.Provenance));
           outcomes.Add(new(goalId, ContractInputGoalKind.Pattern, ContractQueryOutcome.Sat,
-            "Complete pattern sample passed the original entry precondition recheck.", location));
+            "Complete pattern sample passed the original entry precondition recheck." + fallbackDiagnostic, location));
           if (onProgress != null) {
             await onProgress(Snapshot());
           }
@@ -568,17 +596,20 @@ public static class ContractInputGenerator {
             accepted.Property.Outcome == ContractQueryOutcome.Sat) {
           preconditionFalse++;
           outcomes.Add(new(goalId, ContractInputGoalKind.Pattern, ContractQueryOutcome.Sat,
-            "Complete pattern sample falsifies the original entry precondition and was filtered.", location));
+            "Complete pattern sample falsifies the original entry precondition and was filtered." +
+            fallbackDiagnostic, location));
         } else if (accepted.Premise.Outcome is ContractQueryOutcome.Unknown or ContractQueryOutcome.Timeout or ContractQueryOutcome.Error ||
                    accepted.Property.Outcome is ContractQueryOutcome.Unknown or ContractQueryOutcome.Timeout or ContractQueryOutcome.Error) {
           unknown++;
           preconditionUnknown++;
           outcomes.Add(new(goalId, ContractInputGoalKind.Pattern, ContractQueryOutcome.Unknown,
-            "Original entry precondition recheck was unknown, timed out or failed; the sample was filtered.", location));
+            "Original entry precondition recheck was unknown, timed out or failed; the sample was filtered." +
+            fallbackDiagnostic, location));
         } else {
           rejected++;
           outcomes.Add(new(goalId, ContractInputGoalKind.Pattern, ContractQueryOutcome.Unknown,
-            "Concrete pattern sample was inconsistent with its exact resolved structural shape.", location));
+            "Concrete pattern sample was inconsistent with its exact resolved structural shape." +
+            fallbackDiagnostic, location));
         }
       }
     } catch (OperationCanceledException) when (token.IsCancellationRequested) {
@@ -602,11 +633,68 @@ public static class ContractInputGenerator {
     return new(premise, check);
   }
 
-  private static string RefinementQuerySource(ContractSource source, Method method, string queryName,
-    string membership) {
+  private static bool TryRefinementQuerySource(IReadOnlyList<ContractSource> sources,
+    ContractRefinementQuerySite? querySite, string queryName, string membership,
+    out RefinementQuerySource querySource) {
+    querySource = null!;
+    if (querySite == null) {
+      return false;
+    }
+    var matchingSources = sources.Where(source => source.Sha256 == querySite.SourceSha256 &&
+      ContractSourceSnapshot.UriFor(source.Path) == ContractSourceSnapshot.UriFor(querySite.SourcePath)).ToList();
+    if (matchingSources.Count != 1) {
+      return false;
+    }
+    if (!TryCharacterIndexForUtf8ByteOffset(matchingSources[0].Content, querySite.BytePosition,
+          out var characterIndex)) {
+      return false;
+    }
     var declaration = "\nmethod " + queryName + "()\n{\n" +
                       Target(membership) + "\n}\n";
-    return source.Content.Insert(method.StartToken.pos, declaration);
+    var source = matchingSources[0];
+    querySource = new RefinementQuerySource(source.Content.Insert(characterIndex, declaration), source.Path);
+    return true;
+  }
+
+  // Dafny Token.pos is a UTF-8 byte offset, while string.Insert indexes UTF-16 code units.
+  private static bool TryCharacterIndexForUtf8ByteOffset(string content, int bytePosition,
+    out int characterIndex) {
+    characterIndex = 0;
+    if (bytePosition < 0) {
+      return false;
+    }
+    if (bytePosition == 0) {
+      return true;
+    }
+    var utf8 = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false, throwOnInvalidBytes: true);
+    long bytes = 0;
+    for (var index = 0; index < content.Length;) {
+      var width = 1;
+      if (char.IsHighSurrogate(content[index])) {
+        if (index + 1 >= content.Length || !char.IsLowSurrogate(content[index + 1])) {
+          return false;
+        }
+        width = 2;
+      } else if (char.IsLowSurrogate(content[index])) {
+        return false;
+      }
+      int scalarBytes;
+      try {
+        scalarBytes = utf8.GetByteCount(content.AsSpan(index, width));
+      } catch (EncoderFallbackException) {
+        return false;
+      }
+      bytes += scalarBytes;
+      index += width;
+      if (bytes == bytePosition) {
+        characterIndex = index;
+        return true;
+      }
+      if (bytes > bytePosition) {
+        return false;
+      }
+    }
+    return false;
   }
 
   private static List<Goal> FairGoalOrder(IReadOnlyList<Goal> goals) {

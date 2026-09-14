@@ -18,6 +18,26 @@ public static class ContractSourceSnapshot {
   public static ContractSource Find(IReadOnlyList<ContractSource> sources, Uri uri) =>
     sources.Single(source => UriFor(source.Path) == uri);
 
+  public static IReadOnlyList<ContractSource> ApplyEdits(IReadOnlyList<ContractSource> sources,
+    IReadOnlyList<ContractSourceEdit> edits) {
+    Validate(sources);
+    var uris = sources.Select(source => UriFor(source.Path)).ToHashSet();
+    if (edits.Any(edit => !uris.Contains(edit.SourceUri))) {
+      throw new NotSupportedException("A diagnostic heap edit is outside the immutable source snapshots.");
+    }
+    return sources.Select(source => {
+      var content = source.Content;
+      foreach (var edit in edits.Where(edit => edit.SourceUri == UriFor(source.Path))
+                 .OrderByDescending(edit => edit.Position)) {
+        if (edit.Position < 0 || edit.Position > source.Content.Length) {
+          throw new ArgumentException("A diagnostic heap edit is outside its source snapshot.");
+        }
+        content = content.Insert(edit.Position, edit.Text);
+      }
+      return source with { Content = content, Sha256 = ContractHarnessBuilder.Hash(content) };
+    }).ToList();
+  }
+
   public static IReadOnlyList<ContractSource> Replace(IReadOnlyList<ContractSource> sources, string path, string content) {
     Validate(sources);
     var uri = UriFor(path);
