@@ -76,7 +76,68 @@ trait ContractOnly {
     Assert.NotSame(original, result.ReducedExpression);
     Assert.Same(originalResolved, original.Resolved);
     Assert.True(ContainsVariable(original, method.Ins[0]));
+    Assert.False(ContainsVariable(result.SubstitutedExpression, method.Ins[0]));
     Assert.False(result.BudgetExhausted);
+  }
+
+  // Reduces concrete recursive datatype predicates over finite map keys and values within the explicit budget.
+  [Theory]
+  [InlineData("Leaf(7)", ContractReductionDecision.True)]
+  [InlineData("Leaf(12)", ContractReductionDecision.False)]
+  [InlineData("Branch([Leaf(7)])", ContractReductionDecision.True)]
+  public async Task Reduce_EvaluatesRecursiveDatatypeAndFiniteMapMembership(
+    string tree, ContractReductionDecision expected) {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+datatype Tree = Leaf(value: int) | Branch(children: seq<Tree>)
+
+predicate ValidTree(tree: Tree)
+  decreases tree
+{
+  (tree.Leaf? && 0 <= tree.value < 10) ||
+  (tree.Branch? && forall i | 0 <= i < |tree.children| :: ValidTree(tree.children[i]))
+}
+
+predicate ValidForest(forest: map<int, Tree>) {
+  forall key <- forest.Keys :: ValidTree(forest[key])
+}
+
+method M()
+  ensures ValidForest(map[1 := TREE_VALUE])
+{}
+""".Replace("TREE_VALUE", tree), options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+    var original = Assert.Single(method.Ens).E;
+    var validForest = FindCallable<Function>(program, "ValidForest");
+    Assert.False(validForest.IsRecursive,
+      $"recursive={validForest.IsRecursive}, reads={validForest.Reads.Expressions?.Count}");
+
+    var result = CreateReducer(program, options).Reduce(original,
+      budget: new ContractReductionBudget(inlineDepthLimit: 8));
+
+    Assert.True(expected == result.Decision,
+      Printer.ExprToString(options, result.ReducedExpression));
+    Assert.False(result.BudgetExhausted);
+  }
+
+  // A destructor that does not belong to the concrete constructor remains residual.
+  [Fact]
+  public async Task Reduce_PreservesWrongConstructorDestructor() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+datatype Choice = A(value: int) | B(other: int)
+
+method M()
+  ensures B(1).value == 1
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+
+    var result = CreateReducer(program, options).Reduce(Assert.Single(method.Ens).E);
+
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Contains(result.ReducedExpression.DescendantsAndSelf,
+      expression => expression is MemberSelectExpr { Member: DatatypeDestructor });
   }
 
   // Preserves the original quantifier as a residual when the cumulative instance budget runs out.
@@ -215,5 +276,405 @@ method M()
     Assert.Equal(ContractReductionDecision.Residual, result.Decision);
     Assert.Contains(ContractReductionExhaustionReason.QuantifierInstanceLimit, result.ExhaustionReasons);
     Assert.Equal(2u, result.QuantifierInstancesUsed);
+  }
+
+  // Uses resolved constructor and destructor identities when reducing concrete datatype operations.
+  [Fact]
+  public async Task Reduce_EvaluatesConcreteDatatypeIdentityAndSharedDestructor() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+datatype Choice = A(value: int) | B(value: int, extra: int)
+
+method M()
+  ensures A(1) != B(1, 0) && B(2, 3).value == 2
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+
+    var result = CreateReducer(program, options).Reduce(Assert.Single(method.Ens).E);
+
+    Assert.Equal(ContractReductionDecision.True, result.Decision);
+  }
+
+  // Reduces range-valid bitvector conversions nested in datatype values used for equality and map lookup.
+  [Fact]
+  public async Task Reduce_EvaluatesConcreteBitvectorConversionInNestedDatatype() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+datatype Block = Block(index: bv32)
+
+predicate Accept(block: Block, known: map<Block, bool>) {
+  block == Block(493 as bv32) && known[block]
+}
+
+method M()
+  ensures Accept(Block(493 as bv32), map[Block(493 as bv32) := true])
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+
+    var result = CreateReducer(program, options).Reduce(Assert.Single(method.Ens).E);
+
+    Assert.Equal(ContractReductionDecision.True, result.Decision);
+    Assert.DoesNotContain(result.ReducedExpression.DescendantsAndSelf,
+      expression => expression is ConversionExpr);
+  }
+
+  // Preserves an out-of-range bitvector conversion as a solver residual.
+  [Fact]
+  public async Task Reduce_PreservesOutOfRangeConcreteBitvectorConversion() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+datatype Tiny = Tiny(value: bv8)
+
+predicate Accept(value: Tiny) {
+  true
+}
+
+method M()
+  ensures Accept(Tiny(256 as bv8))
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+
+    var result = CreateReducer(program, options).Reduce(Assert.Single(method.Ens).E);
+
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Contains(result.ReducedExpression.DescendantsAndSelf,
+      expression => expression is ConversionExpr);
+  }
+
+  // Preserves an exact real-to-integer conversion outside the contract concrete value domain.
+  [Fact]
+  public async Task Reduce_PreservesExactRealToIntegerConversion() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+datatype Index = Index(value: int)
+
+predicate Accept(value: Index) {
+  true
+}
+
+method M()
+  ensures Accept(Index(1.0 as int))
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+
+    var result = CreateReducer(program, options).Reduce(Assert.Single(method.Ens).E);
+
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Contains(result.ReducedExpression.DescendantsAndSelf,
+      expression => expression is ConversionExpr);
+  }
+
+  // Preserves an invalid conversion to nat instead of treating the constrained target as a plain integer.
+  [Fact]
+  public async Task Reduce_PreservesInvalidNaturalNumberConversion() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+datatype Count = Count(value: nat)
+
+predicate Accept(value: Count) {
+  true
+}
+
+method M()
+  ensures Accept(Count((-1) as nat))
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+
+    var result = CreateReducer(program, options).Reduce(Assert.Single(method.Ens).E);
+
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Contains(result.ReducedExpression.DescendantsAndSelf,
+      expression => expression is ConversionExpr);
+  }
+
+  // Preserves an invalid conversion to a user-defined subset type as a solver residual.
+  [Fact]
+  public async Task Reduce_PreservesInvalidSubsetTypeConversion() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+type Positive = value: int | 0 < value
+
+datatype Index = Index(value: Positive)
+
+predicate Accept(value: Index) {
+  true
+}
+
+method M()
+  ensures Accept(Index(0 as Positive))
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+
+    var result = CreateReducer(program, options).Reduce(Assert.Single(method.Ens).E);
+
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Contains(result.ReducedExpression.DescendantsAndSelf,
+      expression => expression is ConversionExpr);
+  }
+
+  // Applies Dafny's last-write-wins map semantics with concrete datatype keys.
+  [Fact]
+  public async Task Reduce_EvaluatesDuplicateConcreteDatatypeMapKey() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+datatype Key = K(value: int)
+
+method M()
+  ensures map[K(1) := 0, K(1) := 7][K(1)] == 7
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+
+    var result = CreateReducer(program, options).Reduce(Assert.Single(method.Ens).E);
+
+    Assert.Equal(ContractReductionDecision.True, result.Decision);
+  }
+
+  // Leaves a missing key lookup residual because Dafny maps do not provide a value for absent keys.
+  [Fact]
+  public async Task Reduce_PreservesMissingConcreteMapKeyLookup() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+method M()
+  ensures map[1 := 7][2] == 7
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+
+    var result = CreateReducer(program, options).Reduce(Assert.Single(method.Ens).E);
+
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Contains(result.ReducedExpression.DescendantsAndSelf,
+      expression => expression is SeqSelectExpr { Seq: MapDisplayExpr });
+  }
+
+  // Unrolls a recursive quantified predicate when its sequence argument remains closed and concrete.
+  [Fact]
+  public async Task Reduce_EvaluatesQuantifiedRecursionOverConcreteSequence() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+predicate AllSmall(values: seq<int>)
+  decreases |values|
+{
+  |values| == 0 ||
+    ((forall i | 0 <= i < 1 :: values[i] < 10) && AllSmall(values[1..]))
+}
+
+method M()
+  ensures AllSmall([1, 2])
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+
+    var result = CreateReducer(program, options).Reduce(Assert.Single(method.Ens).E,
+      budget: new ContractReductionBudget(inlineDepthLimit: 8));
+
+    Assert.Equal(ContractReductionDecision.True, result.Decision);
+    Assert.False(result.BudgetExhausted);
+  }
+
+  // Stops a recursive call with the same concrete argument at the call-cycle boundary.
+  [Fact]
+  public async Task Reduce_PreservesDirectRecursiveCallCycle() {
+    var options = CreateOptions();
+    options.Set(CommonOptionBag.AllowDecreasesStarOnFunctionsAndLemmas, true);
+    var program = await ParseAndResolve("""
+ghost predicate Loop(value: int)
+  decreases *
+{
+  Loop(value)
+}
+
+ghost function Entry(): bool
+  decreases *
+{
+  Loop(0)
+}
+""", options);
+    var entry = FindCallable<Function>(program, "Entry");
+
+    var result = CreateReducer(program, options).Reduce(entry.Body!,
+      budget: new ContractReductionBudget(inlineDepthLimit: 8));
+
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.False(result.BudgetExhausted);
+    Assert.Contains(result.ReducedExpression.DescendantsAndSelf,
+      expression => expression is FunctionCallExpr { Function.Name: "Loop" });
+  }
+
+  // Leaves a bodyless function visible as a solver residual.
+  [Fact]
+  public async Task Reduce_PreservesBodylessFunctionCall() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+trait ContractOnly {
+  ghost function Missing(value: int): bool
+
+  method M()
+    requires Missing(0)
+}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+
+    var result = CreateReducer(program, options).Reduce(Assert.Single(method.Req).E);
+
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Contains(result.ReducedExpression.DescendantsAndSelf,
+      expression => expression is FunctionCallExpr { Function.Name: "Missing" });
+  }
+
+  // Keeps quantified recursive concrete evaluation disabled in the default partial-evaluation profile.
+  [Fact]
+  public async Task DefaultPartialEvaluation_PreservesQuantifiedRecursiveConcreteCall() {
+    var options = CreateOptions();
+    options.Set(CommonOptionBag.PartialEvalEntry, "Entry");
+    options.Set(CommonOptionBag.PartialEvalInlineDepth, 8U);
+    var program = await ParseAndResolve("""
+predicate AllSmall(values: seq<int>)
+  decreases |values|
+{
+  |values| == 0 ||
+    ((forall i | 0 <= i < 1 :: values[i] < 10) && AllSmall(values[1..]))
+}
+
+function Entry(): bool {
+  AllSmall([1, 2])
+}
+""", options);
+    var entry = FindCallable<Function>(program, "Entry");
+    Assert.NotNull(entry.Body);
+    var reduced = entry.Body!;
+
+    Assert.False(Expression.IsBoolLiteral(reduced, out _));
+    Assert.Contains(reduced.DescendantsAndSelf,
+      candidate => candidate is FunctionCallExpr { Function.Name: "AllSmall" });
+  }
+
+  // Slices a closed sequence of datatype values while recursively consuming the sequence.
+  [Fact]
+  public async Task Reduce_EvaluatesRecursiveDatatypeSequenceSlice() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+datatype Tree = Leaf(value: int) | Branch(children: seq<Tree>)
+
+predicate AllLeaves(values: seq<Tree>)
+  decreases |values|
+{
+  |values| == 0 ||
+    (values[0].Leaf? && values[0].value < 10 && AllLeaves(values[1..]))
+}
+
+method M()
+  ensures AllLeaves([Leaf(1), Leaf(2)])
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+
+    var result = CreateReducer(program, options).Reduce(Assert.Single(method.Ens).E,
+      budget: new ContractReductionBudget(inlineDepthLimit: 8));
+
+    Assert.Equal(ContractReductionDecision.True, result.Decision);
+  }
+
+  // Compares closed sequences and maps containing nested datatypes by resolved constructor identity.
+  [Fact]
+  public async Task Reduce_EvaluatesNestedDatatypeCollectionEquality() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+datatype Tree = Leaf(value: int) | Branch(children: seq<Tree>)
+
+method M()
+  ensures [Branch([Leaf(1)])] == [Branch([Leaf(1)])] &&
+          map[0 := Branch([Leaf(1)])] == map[0 := Branch([Leaf(1)])] &&
+          map[0 := Leaf(1)] != map[0 := Branch([])]
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+
+    var result = CreateReducer(program, options).Reduce(Assert.Single(method.Ens).E);
+
+    Assert.Equal(ContractReductionDecision.True, result.Decision);
+  }
+
+  // Returns distinct detached residuals when the substituted expression already exceeds the node limit.
+  [Fact]
+  public async Task Reduce_DetachesInitialExpressionNodeLimitResidual() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+method M()
+  ensures (1 + 2 == 3) && (4 + 5 == 9)
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+    var original = Assert.Single(method.Ens).E;
+    var originalText = Printer.ExprToString(options, original);
+
+    var result = CreateReducer(program, options).Reduce(original,
+      budget: new ContractReductionBudget(expressionNodeLimit: 1));
+
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Contains(ContractReductionExhaustionReason.ExpressionNodeLimit, result.ExhaustionReasons);
+    Assert.NotSame(result.SubstitutedExpression, result.ReducedExpression);
+    Assert.Equal(originalText, Printer.ExprToString(options, original));
+    Assert.Equal(0U, result.ExpressionExpansionNodeCount);
+  }
+
+  // Stops finite quantifier instantiation before constructing an instance that exceeds the node limit.
+  [Fact]
+  public async Task Reduce_StopsQuantifierExpansionAtExpressionNodeLimit() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+method M()
+  ensures forall i | 0 <= i < 20 :: i < 10
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+    var original = Assert.Single(method.Ens).E;
+    var baseline = CreateReducer(program, options).Reduce(original);
+
+    var result = CreateReducer(program, options).Reduce(original,
+      budget: new ContractReductionBudget(expressionNodeLimit: baseline.SubstitutedExpressionNodeCount));
+
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Contains(ContractReductionExhaustionReason.ExpressionNodeLimit, result.ExhaustionReasons);
+    Assert.Equal(0U, result.ExpressionExpansionNodeCount);
+    Assert.Equal(0U, result.QuantifierInstancesUsed);
+    Assert.NotSame(result.SubstitutedExpression, result.ReducedExpression);
+    Assert.Contains(result.ReducedExpression.DescendantsAndSelf,
+      expression => expression is QuantifierExpr);
+  }
+
+  // Stops function-body substitution before constructing an inline body that exceeds the node limit.
+  [Fact]
+  public async Task Reduce_StopsInliningAtExpressionNodeLimit() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+function Wide(value: int): bool {
+  value == 1 && value + 1 == 2 && value + 2 == 3
+}
+
+method M()
+  ensures Wide(1)
+{}
+""", options);
+    var method = FindCallable<MethodOrConstructor>(program, "M");
+    var original = Assert.Single(method.Ens).E;
+    var baseline = CreateReducer(program, options).Reduce(original);
+
+    var result = CreateReducer(program, options).Reduce(original,
+      budget: new ContractReductionBudget(expressionNodeLimit: baseline.SubstitutedExpressionNodeCount));
+
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Contains(ContractReductionExhaustionReason.ExpressionNodeLimit, result.ExhaustionReasons);
+    Assert.Equal(0U, result.ExpressionExpansionNodeCount);
+    Assert.NotSame(result.SubstitutedExpression, result.ReducedExpression);
+    Assert.Contains(result.ReducedExpression.DescendantsAndSelf,
+      expression => expression is FunctionCallExpr { Function.Name: "Wide" });
   }
 }

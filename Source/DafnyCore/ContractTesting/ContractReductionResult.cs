@@ -60,6 +60,7 @@ public sealed class ContractReductionBudget {
 /// </summary>
 public sealed class ContractReductionResult {
   public Expression OriginalExpression { get; }
+  public Expression SubstitutedExpression { get; }
   public Expression ReducedExpression { get; }
   public Expression? ResidualExpression => Decision == ContractReductionDecision.Residual
     ? ReducedExpression
@@ -75,9 +76,11 @@ public sealed class ContractReductionResult {
   public uint OriginalExpressionNodeCount { get; }
   public uint SubstitutedExpressionNodeCount { get; }
   public uint ReducedExpressionNodeCount { get; }
+  public uint ExpressionExpansionNodeCount { get; }
 
   internal ContractReductionResult(
     Expression originalExpression,
+    Expression substitutedExpression,
     Expression reducedExpression,
     ContractReductionDecision decision,
     IReadOnlyList<ContractReductionExhaustionReason> exhaustionReasons,
@@ -85,8 +88,10 @@ public sealed class ContractReductionResult {
     ContractReductionBudget budget,
     uint originalExpressionNodeCount,
     uint substitutedExpressionNodeCount,
-    uint reducedExpressionNodeCount) {
+    uint reducedExpressionNodeCount,
+    uint expressionExpansionNodeCount) {
     OriginalExpression = originalExpression;
+    SubstitutedExpression = substitutedExpression;
     ReducedExpression = reducedExpression;
     Decision = decision;
     ExhaustionReasons = new List<ContractReductionExhaustionReason>(exhaustionReasons).AsReadOnly();
@@ -96,6 +101,7 @@ public sealed class ContractReductionResult {
     OriginalExpressionNodeCount = originalExpressionNodeCount;
     SubstitutedExpressionNodeCount = substitutedExpressionNodeCount;
     ReducedExpressionNodeCount = reducedExpressionNodeCount;
+    ExpressionExpansionNodeCount = expressionExpansionNodeCount;
     ResidualKind = decision != ContractReductionDecision.Residual
       ? ContractReductionResidualKind.None
       : exhaustionReasons.Count > 0

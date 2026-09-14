@@ -8,15 +8,25 @@ using DafnyType = Microsoft.Dafny.Type;
 
 namespace DafnyTestGeneration.ContractTesting;
 
+// Token.pos is a UTF-8 byte offset; ContractInputGenerator maps it to a UTF-16 index before insertion.
+internal sealed record ContractRefinementQuerySite(string SourcePath, string SourceSha256, int BytePosition);
 internal sealed record ContractRefinementObligation(string Value, string TypeName, string ConstraintSha256,
-  ContractReductionResult? Reduction) {
+  ContractRefinementQuerySite? QuerySite, ContractReductionResult? Reduction) {
   public string Canonical => TypeName + "\n" + Value + "\n" + ConstraintSha256;
   public string Sha256 => ContractHarnessBuilder.Hash(Canonical);
 }
 internal sealed record ContractRefinementCandidate(string Value, string TypeName, string BaseTypeName,
-  string DeclarationName, IReadOnlyList<string> TypeArgumentNames, string ConstraintSha256) {
+  string DeclarationName, IReadOnlyList<string> TypeArgumentNames, string ConstraintSha256,
+  ContractRefinementQuerySite? QuerySite, string Path) {
   public string Canonical => TypeName + "\n" + Value + "\n" + ConstraintSha256;
 }
+internal enum ContractRefinementStage { CandidateCollection, ReductionCache, CarrierResolve, CarrierExtraction, ConstraintExtraction, Reduction }
+internal enum ContractRefinementResultKind { Complete, Unavailable, Failure }
+internal sealed record ContractRefinementDiagnostic(ContractRefinementStage Stage, string Diagnostic) {
+  public override string ToString() => "Refinement " + Stage + ": " + Diagnostic;
+}
+internal sealed record ContractRefinementResult(ContractRefinementResultKind Kind,
+  IReadOnlyList<ContractRefinementObligation> Obligations, ContractRefinementDiagnostic? Diagnostic = null);
 internal sealed record ContractRefinementReductionCacheEntry(string Canonical, ContractReductionResult Reduction);
 
 internal sealed record ContractShapeValue(DafnyType Type, string? Leaf = null,
@@ -24,7 +34,8 @@ internal sealed record ContractShapeValue(DafnyType Type, string? Leaf = null,
   IReadOnlyDictionary<string, ContractShapeValue>? Fields = null,
   IReadOnlyList<(ContractShapeValue Key, ContractShapeValue Value)>? MapEntries = null,
   ContractValueKind? CollectionKind = null,
-  string? ReferenceId = null, bool IsNull = false, string? ReferenceExpression = null) {
+  string? ReferenceId = null, bool IsNull = false, string? ReferenceExpression = null,
+  DatatypeCtor? ResolvedConstructor = null) {
   public string Expression => IsNull ? "null" : ReferenceId != null ? ReferenceExpression! : Leaf ??
     (Items != null ? CollectionKind switch {
       ContractValueKind.Set => "{" + string.Join(", ", Items.Select(item => item.Expression)) + "}",
@@ -85,8 +96,49 @@ internal sealed record ContractShapeValue(DafnyType Type, string? Leaf = null,
     }
   }
 
-  internal static bool IsRefined(DafnyType type) => type.AsSubsetType != null ||
-    type.NormalizeExpandKeepConstraints() is UserDefinedType { ResolvedClass: SubsetTypeDecl or NewtypeDecl };
+  public ContractValue QualifyConstructors(ContractValue value) {
+    if (Items != null) {
+      return value with {
+        Items = Items.Zip(value.Items!,
+        (shape, item) => shape.QualifyConstructors(item)).ToList()
+      };
+    }
+    if (MapEntries != null) {
+      return value with {
+        Entries = MapEntries.Zip(value.Entries!, (shape, entry) =>
+        new ContractMapEntry(shape.Key.QualifyConstructors(entry.Key),
+          shape.Value.QualifyConstructors(entry.Value))).ToList()
+      };
+    }
+    if (Fields != null) {
+      var constructor = ResolvedConstructor ??
+        throw new ArgumentException("A datatype carrier requires a resolved constructor identity.");
+      return value with {
+        Constructor = constructor.EnclosingDatatype!.FullDafnyName + "." + constructor.Name,
+        Fields = Fields.ToDictionary(field => field.Key,
+          field => field.Value.QualifyConstructors(value.Fields![field.Key]))
+      };
+    }
+    return value;
+  }
+
+  internal static bool IsRefined(DafnyType type) =>
+    TryRefinementApplication(type, out _, out _);
+
+  internal static bool TryRefinementApplication(DafnyType type, out UserDefinedType applied,
+    out RedirectingTypeDecl declaration) {
+    var candidate = type.NormalizeExpandKeepConstraints() as UserDefinedType ??
+                    type.NormalizeExpand(true) as UserDefinedType;
+    if (candidate?.ResolvedClass is RedirectingTypeDecl redirecting &&
+        redirecting is (SubsetTypeDecl or NewtypeDecl) and not NonNullTypeDecl) {
+      applied = candidate;
+      declaration = redirecting;
+      return true;
+    }
+    applied = null!;
+    declaration = null!;
+    return false;
+  }
 }
 internal sealed record ContractReferenceShape(ClassDecl Class, DafnyType? ElementType = null) {
   public string Name => ElementType == null ? Class.FullDafnyName : "array<" + ElementType + ">";
@@ -98,6 +150,7 @@ internal sealed record ContractShapeHeapObject(string Id, ClassDecl Class, IRead
 }
 internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractShapeValue> Inputs,
   IReadOnlyList<ContractShapeHeapObject>? Objects = null, string? ReceiverName = null) {
+  private const uint RefinementInlineDepthLimit = 8;
   public IReadOnlyList<(string Name, DafnyType Type)> Leaves => Inputs.Values.SelectMany(value => value.Leaves)
     .Concat((Objects ?? []).SelectMany(item => item.Fields.Values.Concat(item.Elements ?? []).SelectMany(value => value.Leaves))).ToList();
   public IEnumerable<string> ObjectParameters(Program program, Method method) => (Objects ?? []).Select(item => item.VariableName + ": " +
@@ -143,43 +196,57 @@ internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractSh
     }
     return result;
   }
-  public async Task<IReadOnlyList<ContractRefinementObligation>?> RefinementObligationsAsync(
+  public async Task<ContractRefinementResult> RefinementObligationsAsync(
     IReadOnlyDictionary<string, ContractValue> inputs, IReadOnlyList<ContractHeapObject> heap,
     ContractPreparedProgram prepared, IReadOnlyDictionary<string, string> verifiedRefinements,
     IDictionary<string, ContractRefinementReductionCacheEntry> reductionCache,
     CancellationToken cancellationToken) {
     var candidates = new List<ContractRefinementCandidate>();
-    var safe = true;
+    ContractRefinementResultKind resultKind = ContractRefinementResultKind.Complete;
+    ContractRefinementDiagnostic? diagnostic = null;
     foreach (var input in Inputs) {
-      CollectRefinements(input.Value, inputs[input.Key], prepared, candidates, ref safe);
+      CollectRefinements(input.Value, inputs[input.Key], "input '" + input.Key + "'", prepared, candidates,
+        ref resultKind, ref diagnostic);
     }
     foreach (var item in Objects ?? []) {
       var concrete = heap.Single(value => value.Id == "object" + item.Id);
       foreach (var field in item.Fields) {
-        CollectRefinements(field.Value, concrete.Fields[field.Key], prepared, candidates, ref safe);
+        CollectRefinements(field.Value, concrete.Fields[field.Key],
+          "heap '" + concrete.Id + "'." + field.Key, prepared, candidates,
+          ref resultKind, ref diagnostic);
       }
       if (item.Elements != null) {
-        foreach (var (shape, value) in item.Elements.Zip(concrete.Elements!)) {
-          CollectRefinements(shape, value, prepared, candidates, ref safe);
+        foreach (var (shape, value, index) in item.Elements.Zip(concrete.Elements!,
+                   (shape, value) => (shape, value)).Select((pair, index) => (pair.shape, pair.value, index))) {
+          CollectRefinements(shape, value, "heap '" + concrete.Id + "'[" + index + "]", prepared,
+            candidates, ref resultKind, ref diagnostic);
         }
       }
     }
-    if (!safe) {
-      return null;
+    if (resultKind != ContractRefinementResultKind.Complete) {
+      return new(resultKind, [], diagnostic);
     }
     candidates = candidates.GroupBy(candidate => candidate.Canonical, StringComparer.Ordinal)
       .Select(group => group.First()).ToList();
     if (candidates.Count == 0) {
-      return [];
+      return new(ContractRefinementResultKind.Complete, []);
     }
 
     var obligations = candidates.Select(candidate => new ContractRefinementObligation(
-      candidate.Value, candidate.TypeName, candidate.ConstraintSha256, null)).ToList();
+      candidate.Value, candidate.TypeName, candidate.ConstraintSha256, candidate.QuerySite, null)).ToList();
     for (var index = 0; index < obligations.Count; index++) {
       var obligation = obligations[index];
+      if (verifiedRefinements.TryGetValue(obligation.Sha256, out var verifiedCanonical) &&
+          verifiedCanonical != obligation.Canonical) {
+        return new(ContractRefinementResultKind.Failure, [],
+          new(ContractRefinementStage.ReductionCache,
+            "SHA-256 collision for refinement at " + candidates[index].Path + "."));
+      }
       if (reductionCache.TryGetValue(obligation.Sha256, out var cachedReduction)) {
         if (cachedReduction.Canonical != obligation.Canonical) {
-          return null;
+          return new(ContractRefinementResultKind.Failure, [],
+            new(ContractRefinementStage.ReductionCache,
+              "SHA-256 collision for refinement at " + candidates[index].Path + "."));
         }
         obligations[index] = obligation with { Reduction = cachedReduction.Reduction };
       }
@@ -189,7 +256,7 @@ internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractSh
                      cached != obligations[item.Index].Canonical)
       .Where(item => obligations[item.Index].Reduction == null).ToList();
     if (pending.Count == 0) {
-      return obligations;
+      return new(ContractRefinementResultKind.Complete, obligations);
     }
 
     var carrierPrefix = ContractBodyNames.Family(prepared.Program, "contractRefinementCarrier");
@@ -200,7 +267,7 @@ internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractSh
           typeArgumentPrefix + item.Index + "_" + argumentIndex + ": " + typeArgument)) + "): " +
       item.Candidate.BaseTypeName + " { " + item.Candidate.Value + " }"));
     var diagnosticContent = ContractHarnessBuilder.Insert(prepared, "\n" + declarations + "\n");
-    var diagnosticSources = ContractSourceSnapshot.Replace(prepared.SourceSnapshots,
+    var diagnosticSources = ContractSourceSnapshot.Replace(prepared.DiagnosticSourceSnapshots,
       prepared.Source.Path, diagnosticContent);
     var diagnosticOptions = new DafnyOptions(prepared.Program.Options, useNullWriters: true) {
       Compile = false
@@ -209,7 +276,10 @@ internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractSh
     var diagnosticProgram = await ContractSourceSnapshot.ParseAsync(reporter, diagnosticSources,
       cancellationToken);
     if (reporter.ErrorCount != 0) {
-      return null;
+      return new(ContractRefinementResultKind.Failure, [],
+        new(ContractRefinementStage.CarrierResolve,
+          "Concrete carriers for " + string.Join(", ", pending.Select(item => item.Candidate.Path)) +
+          " did not resolve:\n" + string.Join("\n", reporter.AllMessages.Select(message => message.Message))));
     }
 
     var functions = diagnosticProgram.RawModules().SelectMany(module => module.TopLevelDecls)
@@ -218,72 +288,132 @@ internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractSh
       .ToList();
     foreach (var item in pending) {
       var matching = functions.Where(function => function.Name == carrierPrefix + item.Index).ToList();
-      if (matching.Count != 1 || matching[0].Body == null ||
-          !TryReduceCarrier(matching[0], item.Candidate, diagnosticProgram, out var reduction)) {
-        return null;
+      if (matching.Count != 1 || matching[0].Body == null) {
+        return new(ContractRefinementResultKind.Failure, [],
+          new(ContractRefinementStage.CarrierExtraction,
+            "Expected one resolved carrier body for refinement at " + item.Candidate.Path +
+            " of type '" + item.Candidate.TypeName + "'; found " + matching.Count + "."));
+      }
+      var extractionFailure = TryReduceCarrier(matching[0], item.Candidate, diagnosticProgram, out var reduction);
+      if (extractionFailure != null) {
+        return new(ContractRefinementResultKind.Failure, [], extractionFailure);
       }
       obligations[item.Index] = obligations[item.Index] with { Reduction = reduction };
-      reductionCache.Add(obligations[item.Index].Sha256,
-        new(obligations[item.Index].Canonical, reduction));
-    }
-    return obligations;
-  }
-
-  private static void CollectRefinements(ContractShapeValue shape, ContractValue value,
-    ContractPreparedProgram prepared,
-    ICollection<ContractRefinementCandidate> candidates, ref bool safe) {
-    if (ContractShapeValue.IsRefined(shape.Type)) {
-      if (ContainsReference(value)) {
-        safe = false;
-      } else {
-        var typeName = shape.Type.ToString().Replace(" ", "", StringComparison.Ordinal);
-        if (!ContractPatternCodec.IsTypeName(typeName)) {
-          safe = false;
-        } else {
-          try {
-            var expression = ContractModelCodec.ToDafny(value,
-              prepared.Method.EnclosingClass.EnclosingModuleDefinition.FullDafnyName);
-            if (!TryCarrierTypes(shape.Type, prepared, out var baseTypeName, out var declarationName,
-                  out var typeArgumentNames, out var constraintSha256)) {
-              safe = false;
-            } else if (baseTypeName != null) {
-              candidates.Add(new(expression, typeName, baseTypeName, declarationName!, typeArgumentNames!,
-                constraintSha256!));
-            }
-          } catch (ArgumentException) {
-            safe = false;
-          }
-        }
+      var cacheEntry = new ContractRefinementReductionCacheEntry(obligations[item.Index].Canonical, reduction);
+      if (!reductionCache.TryAdd(obligations[item.Index].Sha256, cacheEntry) &&
+          reductionCache[obligations[item.Index].Sha256].Canonical != obligations[item.Index].Canonical) {
+        return new(ContractRefinementResultKind.Failure, [],
+          new(ContractRefinementStage.ReductionCache,
+            "SHA-256 collision for refinement at " + item.Candidate.Path + "."));
       }
     }
+    return new(ContractRefinementResultKind.Complete, obligations);
+  }
+
+  private static void CollectRefinements(ContractShapeValue shape, ContractValue value, string path,
+    ContractPreparedProgram prepared,
+    ICollection<ContractRefinementCandidate> candidates, ref ContractRefinementResultKind resultKind,
+    ref ContractRefinementDiagnostic? diagnostic) {
+    CollectRefinementLayers(shape, value, path, prepared, candidates, ref resultKind, ref diagnostic);
     if (shape.Items != null) {
-      foreach (var (nested, nestedValue) in shape.Items.Zip(value.Items!)) {
-        CollectRefinements(nested, nestedValue, prepared, candidates, ref safe);
+      foreach (var (nested, nestedValue, index) in shape.Items.Zip(value.Items!,
+                 (nested, nestedValue) => (nested, nestedValue))
+               .Select((pair, index) => (pair.nested, pair.nestedValue, index))) {
+        CollectRefinements(nested, nestedValue, path + "[" + index + "]", prepared, candidates,
+          ref resultKind, ref diagnostic);
       }
     }
     if (shape.MapEntries != null) {
-      foreach (var (entry, concrete) in shape.MapEntries.Zip(value.Entries!)) {
-        CollectRefinements(entry.Key, concrete.Key, prepared, candidates, ref safe);
-        CollectRefinements(entry.Value, concrete.Value, prepared, candidates, ref safe);
+      foreach (var (entry, concrete, index) in shape.MapEntries.Zip(value.Entries!,
+                 (entry, concrete) => (entry, concrete))
+               .Select((pair, index) => (pair.entry, pair.concrete, index))) {
+        CollectRefinements(entry.Key, concrete.Key, path + ".keys[" + index + "]", prepared, candidates,
+          ref resultKind, ref diagnostic);
+        CollectRefinements(entry.Value, concrete.Value, path + ".values[" + index + "]", prepared, candidates,
+          ref resultKind, ref diagnostic);
       }
     }
     if (shape.Fields != null) {
       foreach (var field in shape.Fields) {
-        CollectRefinements(field.Value, value.Fields![field.Key], prepared, candidates, ref safe);
+        CollectRefinements(field.Value, value.Fields![field.Key], path + "." + field.Key, prepared, candidates,
+          ref resultKind, ref diagnostic);
       }
     }
   }
 
+  private static void CollectRefinementLayers(ContractShapeValue shape, ContractValue value, string path,
+    ContractPreparedProgram prepared, ICollection<ContractRefinementCandidate> candidates,
+    ref ContractRefinementResultKind resultKind, ref ContractRefinementDiagnostic? diagnostic) {
+    var current = shape.Type;
+    var visited = new HashSet<RedirectingTypeDecl>();
+    while (ContractShapeValue.TryRefinementApplication(current, out var applied, out var declaration)) {
+      if (!visited.Add(declaration)) {
+        SetDiagnostic(ref resultKind, ref diagnostic, ContractRefinementResultKind.Failure,
+        "A redirecting type cycle prevents a concrete carrier at " + path + " for '" + current + "'.");
+        return;
+      }
+      if (ContainsReference(value)) {
+        SetDiagnostic(ref resultKind, ref diagnostic, ContractRefinementResultKind.Unavailable,
+        "Refined value at " + path + " of type '" + current +
+        "' contains a heap reference and requires whole-P SMT.");
+        return;
+      }
+      var typeName = current.ToString().Replace(" ", "", StringComparison.Ordinal);
+      if (!ContractPatternCodec.IsTypeName(typeName)) {
+        SetDiagnostic(ref resultKind, ref diagnostic, ContractRefinementResultKind.Failure,
+        "Unsupported source type name '" + typeName + "' at " + path + ".");
+        return;
+      }
+      try {
+        var expression = ContractModelCodec.ToDafny(shape.QualifyConstructors(value),
+          prepared.Method.EnclosingClass.EnclosingModuleDefinition.FullDafnyName);
+        if (!TryCarrierTypes(current, prepared, out var baseTypeName, out var declarationName,
+              out var typeArgumentNames, out var constraintSha256, out var querySite)) {
+          SetDiagnostic(ref resultKind, ref diagnostic, ContractRefinementResultKind.Failure,
+            "Cannot construct a concrete base carrier for '" + typeName + "' at " + path + ".");
+          return;
+        }
+        if (baseTypeName != null) {
+          candidates.Add(new(expression, typeName, baseTypeName, declarationName!, typeArgumentNames!,
+            constraintSha256!, querySite, path));
+        }
+      } catch (ArgumentException error) {
+        SetDiagnostic(ref resultKind, ref diagnostic, ContractRefinementResultKind.Failure,
+          "Cannot render concrete value of type '" + typeName + "' at " + path + ": " + error.Message);
+        return;
+      } catch (NotSupportedException error) {
+        SetDiagnostic(ref resultKind, ref diagnostic, ContractRefinementResultKind.Failure,
+          "Cannot render concrete value of type '" + typeName + "' at " + path + ": " + error.Message);
+        return;
+      }
+      current = declaration switch {
+        SubsetTypeDecl subset => subset.RhsWithArgument(applied.TypeArgs),
+        NewtypeDecl newtype => newtype.ConcreteBaseType(applied.TypeArgs),
+        _ => current
+      };
+    }
+  }
+
+  private static void SetDiagnostic(ref ContractRefinementResultKind resultKind,
+    ref ContractRefinementDiagnostic? diagnostic, ContractRefinementResultKind nextKind, string message) {
+    if (resultKind == ContractRefinementResultKind.Failure ||
+        resultKind == ContractRefinementResultKind.Unavailable && nextKind != ContractRefinementResultKind.Failure) {
+      return;
+    }
+    resultKind = nextKind;
+    diagnostic = new(ContractRefinementStage.CandidateCollection, message);
+  }
+
   private static bool TryCarrierTypes(DafnyType type, ContractPreparedProgram prepared,
     out string? baseTypeName, out string? declarationName,
-    out IReadOnlyList<string>? typeArgumentNames, out string? constraintSha256) {
-    var applied = type.NormalizeExpandKeepConstraints() as UserDefinedType ??
-                  type.NormalizeExpand(true) as UserDefinedType;
-    if (applied?.ResolvedClass is not RedirectingTypeDecl declaration) {
+    out IReadOnlyList<string>? typeArgumentNames, out string? constraintSha256,
+    out ContractRefinementQuerySite? querySite) {
+    if (!ContractShapeValue.TryRefinementApplication(type, out var applied, out var declaration)) {
       baseTypeName = null;
       declarationName = null;
       typeArgumentNames = null;
       constraintSha256 = null;
+      querySite = null;
       return false;
     }
     if (declaration.Var == null || declaration.Constraint == null) {
@@ -291,6 +421,7 @@ internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractSh
       declarationName = null;
       typeArgumentNames = null;
       constraintSha256 = null;
+      querySite = null;
       return true;
     }
     var typeParameters = applied.ResolvedClass switch {
@@ -303,6 +434,7 @@ internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractSh
       declarationName = null;
       typeArgumentNames = null;
       constraintSha256 = null;
+      querySite = null;
       return false;
     }
     var baseType = applied.ResolvedClass switch {
@@ -315,12 +447,14 @@ internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractSh
       declarationName = null;
       typeArgumentNames = null;
       constraintSha256 = null;
+      querySite = null;
       return false;
     }
     if (!TryErasedTypeName(baseType, out baseTypeName)) {
       declarationName = null;
       typeArgumentNames = null;
       constraintSha256 = null;
+      querySite = null;
       return false;
     }
     var arguments = new List<string>();
@@ -330,6 +464,7 @@ internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractSh
         declarationName = null;
         typeArgumentNames = null;
         constraintSha256 = null;
+        querySite = null;
         return false;
       }
       arguments.Add(name);
@@ -338,6 +473,16 @@ internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractSh
     typeArgumentNames = arguments;
     constraintSha256 = ContractHarnessBuilder.Hash(declaration.FullDafnyName + "\n" +
       Printer.ExprToString(prepared.Program.Options, declaration.Constraint));
+    var matchingSources = prepared.SourceSnapshots.Where(source =>
+      ContractSourceSnapshot.UriFor(source.Path) == declaration.Origin.Uri).ToList();
+    if (matchingSources.Count != 1 || declaration.StartToken.Uri != declaration.Origin.Uri ||
+        declaration.StartToken.pos < 0) {
+      querySite = null;
+      return true;
+    }
+    var source = matchingSources[0];
+    querySite = new ContractRefinementQuerySite(source.Path, source.Sha256,
+      BytePosition: declaration.StartToken.pos);
     return true;
   }
 
@@ -386,7 +531,7 @@ internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractSh
     return ContractPatternCodec.IsTypeName(name);
   }
 
-  private static bool TryReduceCarrier(Function carrier, ContractRefinementCandidate candidate,
+  private static ContractRefinementDiagnostic? TryReduceCarrier(Function carrier, ContractRefinementCandidate candidate,
     Program diagnosticProgram,
     out ContractReductionResult reduction) {
     reduction = null!;
@@ -396,7 +541,9 @@ internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractSh
       .Distinct().ToList();
     if (declarations.Count != 1 || declarations[0].Var == null || declarations[0].Constraint == null ||
         carrier.Body == null) {
-      return false;
+      return new(ContractRefinementStage.ConstraintExtraction,
+        "Expected one resolved constraint and bound variable for '" + candidate.DeclarationName +
+        "' at " + candidate.Path + "; found " + declarations.Count + " declarations.");
     }
     var declaration = declarations[0];
     var typeParameters = declaration switch {
@@ -405,18 +552,27 @@ internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractSh
       _ => null
     };
     if (typeParameters == null || typeParameters.Count != carrier.Ins.Count) {
-      return false;
+      return new(ContractRefinementStage.ConstraintExtraction,
+        "Carrier type argument arity does not match '" + candidate.DeclarationName +
+        "' at " + candidate.Path + ".");
     }
     var typeMap = TypeParameter.SubstitutionMap(typeParameters,
       carrier.Ins.Select(formal => formal.Type).ToList());
     var constraint = new Substituter(null, new Dictionary<IVariable, Expression>(), typeMap,
       null, diagnosticProgram.SystemModuleManager).Substitute(declaration.Constraint);
     var reducer = new ContractExpressionReducer(diagnosticProgram.Options,
-      carrier.EnclosingClass.EnclosingModuleDefinition, diagnosticProgram.SystemModuleManager);
+      declaration.Module, diagnosticProgram.SystemModuleManager,
+      declaration.Module.VisibilityScope);
+    if (!constraint.WasResolved() || constraint.Type == null ||
+        !carrier.Body.WasResolved() || carrier.Body.Type == null) {
+      return new(ContractRefinementStage.Reduction,
+        "Constraint or concrete carrier is not resolved and typed for '" + candidate.DeclarationName +
+        "' at " + candidate.Path + ".");
+    }
     reduction = reducer.Reduce(constraint, new Dictionary<IVariable, Expression> {
       [declaration.Var] = carrier.Body
-    });
-    return true;
+    }, new ContractReductionBudget(inlineDepthLimit: RefinementInlineDepthLimit));
+    return null;
   }
 
   private static bool ContainsReference(ContractValue value) => value.Kind == ContractValueKind.Reference ||
@@ -547,7 +703,7 @@ public sealed class ContractTypeShapeGenerator(ContractGenerationBounds bounds) 
         throw new ArgumentException("Concrete pattern datatype does not match its resolved constructor.");
       }
       var substitution = TypeParameter.SubstitutionMap(datatype.TypeArgs, expected.TypeArgs);
-      return new(expected, Constructor: datatype.Name + "." + constructor.Name,
+      return new(expected, Constructor: datatype.Name + "." + constructor.Name, ResolvedConstructor: constructor,
         Fields: constructor.Formals.ToDictionary(formal => formal.Name,
           formal => ConcreteValue(value.Fields[formal.Name], formal.Type.Subst(substitution), objects),
           StringComparer.Ordinal));
@@ -649,7 +805,7 @@ public sealed class ContractTypeShapeGenerator(ContractGenerationBounds bounds) 
           continue;
         }
         foreach (var values in Product(constructor.Formals.Select(formal => formal.Type.Subst(substitution)), depth - 1, objects)) {
-          yield return new(type, Constructor: datatype.Name + "." + constructor.Name,
+          yield return new(type, Constructor: datatype.Name + "." + constructor.Name, ResolvedConstructor: constructor,
             Fields: constructor.Formals.Select((formal, index) => (formal.Name, values[index]))
               .ToDictionary(pair => pair.Name, pair => pair.Item2));
         }

@@ -483,6 +483,52 @@ public class ContractPatternTests {
     Assert.Equal("7", Assert.Single(generated.Heap!).Fields["proof"].Value);
   }
 
+  // Cross-file pattern rechecks resolve hidden ghost fields through the same diagnostic source edits as execution.
+  [Fact]
+  public async Task ReferencePatternRechecksHiddenGhostFieldAcrossModules() {
+    const string library = """
+      module Store {
+        export reveals Box
+        class Box {
+          ghost var proof: int
+        }
+      }
+      """;
+    const string client = """
+      module Client {
+        import Store
+        method Entry(box: Store.Box)
+          requires box != null
+        { }
+      }
+      """;
+    var sources = new[] {
+      new ContractSource("store.dfy", library, ContractHarnessBuilder.Hash(library)),
+      new ContractSource("client.dfy", client, ContractHarnessBuilder.Hash(client))
+    };
+    var request = ContractInputTests.Request(client, count: 2,
+      bounds: new(MaxInputs: 2, MaxHeapObjects: 1)) with {
+      Sources = sources,
+      Entry = new("Client.Entry"),
+      GenerationStrategy = ContractGenerationStrategy.InputPatterns,
+      PatternCampaign = Campaign(2, new ContractCompleteInputPattern("cross-file", 1,
+        new Dictionary<string, ContractInputPattern> {
+          ["box"] = new(ContractInputPatternKind.Reference, Type: "Store.Box", ObjectId: "box",
+            Fields: new Dictionary<string, ContractInputPattern> {
+              ["proof"] = Literal(Integer("7"))
+            })
+        }))
+    };
+
+    var result = await ContractInputGenerator.GenerateAsync(request, ContractInputTests.Options(),
+      CancellationToken.None);
+
+    var generated = Assert.Single(result.Inputs.Where(input =>
+      input.PatternProvenance?.PatternId == "cross-file"));
+    Assert.Equal("7", Assert.Single(generated.Request.Heap!).Fields["proof"].Value);
+    Assert.All(request.Sources, source => Assert.Equal(ContractHarnessBuilder.Hash(source.Content), source.Sha256));
+  }
+
   // A general finite-map pattern is materialized and checked against the original resolved entry precondition.
   [Fact]
   public async Task MapPatternPassesOriginalPreconditionRecheck() {
@@ -775,11 +821,183 @@ public class ContractPatternTests {
     var result = await ContractInputGenerator.GenerateAsync(request, ContractInputTests.Options(),
       CancellationToken.None);
 
-    var generated = Assert.Single(result.Inputs.Where(input =>
-      input.PatternProvenance?.PatternId == "valid-complex"));
+    var directMatches = result.Inputs.Where(input =>
+      input.PatternProvenance?.PatternId == "valid-complex").ToList();
+    Assert.True(directMatches.Count == 1, JsonSerializer.Serialize(result, ContractJson.Options));
+    var generated = directMatches[0];
     Assert.Empty(generated.Queries);
     Assert.Contains("direct refinement memberships were verified",
       result.Goals.Single(goal => goal.Id.Contains("valid-complex", StringComparison.Ordinal)).Reason);
+  }
+
+  private const string RecursiveForestSource = """
+    datatype Tree = Leaf(value:int) | Branch(children:seq<Tree>)
+    predicate ValidTree(tree:Tree)
+      decreases tree
+    {
+      (tree.Leaf? && 0 <= tree.value < 10) ||
+      (tree.Branch? && forall i | 0 <= i < |tree.children| :: ValidTree(tree.children[i]))
+    }
+    predicate ValidForest(forest:map<int,Tree>) {
+      forall key <- forest.Keys :: ValidTree(forest[key])
+    }
+    type FileSystem = forest:map<int,Tree> | ValidForest(forest) witness map[]
+    method Entry(forest:FileSystem) { }
+    """;
+
+  private static async Task<ContractGenerationResult> GenerateImportedRefinement(string value) {
+    var library = "module Store {\n" + RecursiveForestSource.Replace(
+      "type FileSystem = forest:map<int,Tree> | ValidForest(forest) witness map[]\nmethod Entry(forest:FileSystem) { }",
+      "datatype Parcel = Pack(forest:map<int,Tree>)\n" +
+      "type FileSystem = data:Parcel | ValidForest(data.forest) witness Pack(map[])") + "\n}";
+    const string client = "module Client { import Store method Entry(forest:Store.FileSystem) { } }";
+    var leaf = new ContractInputPattern(ContractInputPatternKind.Datatype, Constructor: "Tree.Leaf",
+      Fields: new Dictionary<string, ContractInputPattern> { ["value"] = Literal(Integer(value)) });
+    var branch = new ContractInputPattern(ContractInputPatternKind.Datatype, Constructor: "Tree.Branch",
+      Fields: new Dictionary<string, ContractInputPattern> {
+        ["children"] = new(ContractInputPatternKind.Sequence, MinLength: 1, MaxLength: 1, Element: leaf)
+      });
+    var parcel = new ContractInputPattern(ContractInputPatternKind.Datatype, Constructor: "Parcel.Pack",
+      Fields: new Dictionary<string, ContractInputPattern> {
+        ["forest"] = MapPattern(1, 1, Literal(Integer("1")), branch)
+      });
+    var sources = new[] {
+      new ContractSource("store.dfy", library, ContractHarnessBuilder.Hash(library)),
+      new ContractSource("client.dfy", client, ContractHarnessBuilder.Hash(client))
+    };
+    var request = ContractInputTests.Request(client, "Client.Entry", count: 1) with {
+      Sources = sources,
+      GenerationStrategy = ContractGenerationStrategy.InputPatterns,
+      PatternCampaign = Campaign(1, new ContractCompleteInputPattern("imported", 1,
+        new Dictionary<string, ContractInputPattern> { ["forest"] = parcel }))
+    };
+
+    var result = await ContractInputGenerator.GenerateAsync(request, ContractInputTests.Options(),
+      CancellationToken.None);
+
+    Assert.Equal(sources, request.Sources);
+    Assert.Equal("Parcel.Pack", parcel.Constructor);
+    Assert.Equal("Tree.Leaf", leaf.Constructor);
+    return result;
+  }
+
+  // A valid imported subset uses resolved nested constructor identities and is accepted without SMT.
+  [Fact]
+  public async Task ImportedRefinementCarrierAcceptsResolvedNestedConstructors() {
+    var result = await GenerateImportedRefinement("7");
+
+    var generated = Assert.Single(result.Inputs.Where(input => input.PatternProvenance?.PatternId == "imported"));
+    Assert.Empty(generated.Queries);
+    var goal = Assert.Single(result.Goals.Where(goal => goal.Id.Contains("imported", StringComparison.Ordinal)));
+    Assert.Contains("decision=True", goal.Reason);
+    Assert.Contains("ran 0 SMT queries", goal.Reason);
+  }
+
+  // An invalid imported subset uses resolved nested constructor identities and is rejected without SMT.
+  [Fact]
+  public async Task ImportedRefinementCarrierRejectsResolvedNestedConstructors() {
+    var result = await GenerateImportedRefinement("12");
+
+    Assert.DoesNotContain(result.Inputs, input => input.PatternProvenance?.PatternId == "imported");
+    Assert.True(result.Counts.PatternPreconditionFalse >= 1, JsonSerializer.Serialize(result, ContractJson.Options));
+    var goal = Assert.Single(result.Goals.Where(goal => goal.Id.Contains("imported", StringComparison.Ordinal)));
+    Assert.Contains("decision=False", goal.Reason);
+    Assert.Contains("ran 0 SMT queries", goal.Reason);
+  }
+
+  // A residual imported refinement is queried in its declaration module with its local predicate and datatype visible.
+  [Fact]
+  public async Task ImportedResidualRefinementUsesDeclarationQuerySite() {
+    const string store = """
+      module Store {
+        datatype Parcel = Pack(value:int)
+        predicate IsParcel(parcel:Parcel) {
+          parcel.Pack?
+        }
+        // 한글 주석으로 UTF-8 바이트 위치와 UTF-16 삽입 위치를 구분한다.
+        type Accepted = parcel:Parcel |
+          parcel.value == 0 && IsParcel(parcel) &&
+          forall i:int :: IsParcel(Pack(i)) == IsParcel(Pack(i))
+          witness Pack(0)
+      }
+      """;
+    const string client = "module Client { import Store method Entry(parcel:Store.Accepted) { } }";
+    var sources = new[] {
+      new ContractSource("store.dfy", store, ContractHarnessBuilder.Hash(store)),
+      new ContractSource("client.dfy", client, ContractHarnessBuilder.Hash(client))
+    };
+    var parcel = new ContractInputPattern(ContractInputPatternKind.Datatype, Constructor: "Parcel.Pack",
+      Fields: new Dictionary<string, ContractInputPattern> { ["value"] = Literal(Integer("0")) });
+    var request = ContractInputTests.Request(client, "Client.Entry", count: 1) with {
+      Sources = sources,
+      GenerationStrategy = ContractGenerationStrategy.InputPatterns,
+      PatternCampaign = Campaign(2, new ContractCompleteInputPattern("imported-residual", 1,
+        new Dictionary<string, ContractInputPattern> { ["parcel"] = parcel }))
+    };
+
+    var result = await ContractInputGenerator.GenerateAsync(request, ContractInputTests.Options(),
+      CancellationToken.None);
+
+    var matching = result.Inputs.Where(input =>
+      input.PatternProvenance?.PatternId == "imported-residual").ToList();
+    Assert.True(matching.Count == 1, JsonSerializer.Serialize(result, ContractJson.Options));
+    var generated = matching[0];
+    Assert.Equal(ContractQueryOutcome.Unsat, Assert.Single(generated.Queries).Outcome);
+    Assert.Contains("decision=Residual",
+      Assert.Single(result.Goals.Where(goal => goal.Id.Contains("imported-residual", StringComparison.Ordinal))).Reason);
+    Assert.Equal(sources, request.Sources);
+    Assert.Equal("Parcel.Pack", parcel.Constructor);
+  }
+
+  // A concrete nested tree reaches the refinement carrier and reduces recursive map membership to true without SMT.
+  [Fact]
+  public async Task RecursiveForestPatternAcceptsNestedTreeWithoutSolver() {
+    var leaf = new ContractInputPattern(ContractInputPatternKind.Datatype, Constructor: "Tree.Leaf",
+      Fields: new Dictionary<string, ContractInputPattern> { ["value"] = Literal(Integer("7")) });
+    var branch = new ContractInputPattern(ContractInputPatternKind.Datatype, Constructor: "Tree.Branch",
+      Fields: new Dictionary<string, ContractInputPattern> {
+        ["children"] = new(ContractInputPatternKind.Sequence, MinLength: 1, MaxLength: 1, Element: leaf)
+      });
+    var request = ContractInputTests.Request(RecursiveForestSource, count: 2) with {
+      GenerationStrategy = ContractGenerationStrategy.InputPatterns,
+      PatternCampaign = Campaign(2, new ContractCompleteInputPattern("valid-forest", 1,
+        new Dictionary<string, ContractInputPattern> {
+          ["forest"] = MapPattern(1, 1, Literal(Integer("1")), branch)
+        }))
+    };
+
+    var result = await ContractInputGenerator.GenerateAsync(request, ContractInputTests.Options(),
+      CancellationToken.None);
+
+    var generated = Assert.Single(result.Inputs.Where(input =>
+      input.PatternProvenance?.PatternId == "valid-forest"));
+    Assert.Empty(generated.Queries);
+    var goal = Assert.Single(result.Goals.Where(goal => goal.Id.Contains("valid-forest", StringComparison.Ordinal)));
+    Assert.Contains("FileSystem: decision=True", goal.Reason);
+    Assert.Contains("ran 0 SMT queries", goal.Reason);
+  }
+
+  // An invalid concrete leaf reaches the refinement carrier and reduces recursive map membership to false without SMT.
+  [Fact]
+  public async Task RecursiveForestPatternRejectsInvalidLeafWithoutSolver() {
+    var leaf = new ContractInputPattern(ContractInputPatternKind.Datatype, Constructor: "Tree.Leaf",
+      Fields: new Dictionary<string, ContractInputPattern> { ["value"] = Literal(Integer("12")) });
+    var request = ContractInputTests.Request(RecursiveForestSource, count: 2) with {
+      GenerationStrategy = ContractGenerationStrategy.InputPatterns,
+      PatternCampaign = Campaign(2, new ContractCompleteInputPattern("invalid-forest", 1,
+        new Dictionary<string, ContractInputPattern> {
+          ["forest"] = MapPattern(1, 1, Literal(Integer("1")), leaf)
+        }))
+    };
+
+    var result = await ContractInputGenerator.GenerateAsync(request, ContractInputTests.Options(),
+      CancellationToken.None);
+
+    Assert.DoesNotContain(result.Inputs, input => input.PatternProvenance?.PatternId == "invalid-forest");
+    Assert.Equal(1, result.Counts.PatternPreconditionFalse);
+    var goal = Assert.Single(result.Goals.Where(goal => goal.Id.Contains("invalid-forest", StringComparison.Ordinal)));
+    Assert.Contains("FileSystem: decision=False", goal.Reason);
+    Assert.Contains("ran 0 SMT queries", goal.Reason);
   }
 
   // Repeated concrete membership obligations are verified once while unrelated pattern inputs still vary.
@@ -940,8 +1158,10 @@ public class ContractPatternTests {
     var result = await ContractInputGenerator.GenerateAsync(request, ContractInputTests.Options(),
       CancellationToken.None);
 
-    var generated = Assert.Single(result.Inputs.Where(input =>
-      input.PatternProvenance?.PatternId == "exhausted"));
+    var exhaustedMatches = result.Inputs.Where(input =>
+      input.PatternProvenance?.PatternId == "exhausted").ToList();
+    Assert.True(exhaustedMatches.Count == 1, JsonSerializer.Serialize(result, ContractJson.Options));
+    var generated = exhaustedMatches[0];
     Assert.Equal(ContractQueryOutcome.Unsat, Assert.Single(generated.Queries).Outcome);
   }
 

@@ -11,6 +11,204 @@ using Xunit;
 namespace DafnyTestGeneration.Test;
 
 public class ContractHeapTests {
+  private static async Task<(ContractPreparedProgram Prepared, ContractTestRequest Request)> PrepareModules(
+    bool ghost, int value = 7, string export = "export reveals Box, Box.Value", string extraMember = "",
+    string import = "import Store") {
+    var library = $$"""
+      module Store {
+        {{export}}
+        class Box {
+          {{(ghost ? "ghost " : "")}}var value: int
+          ghost function Value(): int { 7 }
+          {{extraMember}}
+        }
+      }
+      """;
+    var entry = $$"""
+      module Client {
+        {{import}}
+        method Entry(box: Store.Box) returns (r: int)
+          requires box.Value() == 7
+          ensures r == box.Value()
+        { r := 7; }
+      }
+      """;
+    var sources = new[] { new ContractSource("library.dfy", library, ContractHarnessBuilder.Hash(library)),
+      new ContractSource("client.dfy", entry, ContractHarnessBuilder.Hash(entry)) };
+    var request = new ContractTestRequest(1, sources, new("Client.Entry"),
+      new Dictionary<string, ContractValue> { ["box"] = Reference("box") },
+      [new("box", "Store.Box", new Dictionary<string, ContractValue> { ["value"] = Integer(value) })]);
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.TimeLimit = 10;
+    var reporter = new BatchErrorReporter(options);
+    var program = await ContractSourceSnapshot.ParseAsync(reporter, sources, CancellationToken.None);
+    Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+    return (ContractHarnessBuilder.Prepare(program, request), request);
+  }
+
+  private static Task<ContractQueryResult> CheckModules(ContractPreparedProgram prepared,
+    ContractTestRequest request, ContractQueryKind kind, bool negate = false,
+    IReadOnlyDictionary<string, ContractValue> outputs = null,
+    IReadOnlyList<string> choiceConstraints = null) =>
+    ContractSolver.CheckAsync(ContractQueryBuilder.Build(prepared, request, kind, outputs, negate,
+        choiceConstraints: choiceConstraints),
+      kind, prepared.Program.Options, CancellationToken.None, queryName: ContractQueryBuilder.Name(prepared),
+      sourceSnapshots: prepared.DiagnosticSourceSnapshots, sourcePath: prepared.Source.Path);
+
+  private static async Task<(ContractPreparedProgram Prepared, ContractTestRequest Request)> PrepareSameModule(
+    bool ghost, int value) {
+    var content = $$"""
+      module Store {
+        export reveals Box
+        class Box {
+          {{(ghost ? "ghost " : "")}}var value: int
+        }
+        method Entry(box: Box) returns (r: int)
+          requires box.value == 7
+          ensures r == box.value
+        { r := 7; }
+      }
+      """;
+    var sources = new[] { new ContractSource("store.dfy", content, ContractHarnessBuilder.Hash(content)) };
+    var request = new ContractTestRequest(1, sources, new("Store.Entry"),
+      new Dictionary<string, ContractValue> { ["box"] = Reference("box") },
+      [new("box", "Store.Box", new Dictionary<string, ContractValue> { ["value"] = Integer(value) })]);
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.TimeLimit = 10;
+    var reporter = new BatchErrorReporter(options);
+    var program = await ContractSourceSnapshot.ParseAsync(reporter, sources, CancellationToken.None);
+    Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+    return (ContractHarnessBuilder.Prepare(program, request), request);
+  }
+
+  // Hidden field bindings in another source must describe a satisfiable heap, including ghost cells.
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task HiddenModuleFieldPremiseIsSatisfiable(bool ghost) {
+    var (prepared, request) = await PrepareModules(ghost);
+    var result = await CheckModules(prepared, request, ContractQueryKind.PremiseConsistency);
+    Assert.True(result.Outcome == ContractQueryOutcome.Sat, result.Diagnostics);
+  }
+
+  // A contradictory hidden-field premise is unsatisfiable, so the concrete binding cannot be omitted.
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task HiddenModuleFieldBindingCannotBeContradicted(bool ghost) {
+    var (prepared, request) = await PrepareModules(ghost);
+    var access = prepared.Heap!.ReferenceExpression("box") + ".value";
+    var result = await CheckModules(prepared, request, ContractQueryKind.PremiseConsistency,
+      choiceConstraints: [access + " != 7"]);
+    Assert.True(result.Outcome == ContractQueryOutcome.Unsat, result.Diagnostics);
+  }
+
+  // Same-module P reads the hidden field and distinguishes valid from invalid concrete values.
+  [Theory]
+  [InlineData(true, 7, false, ContractQueryOutcome.Unsat)]
+  [InlineData(false, 7, false, ContractQueryOutcome.Unsat)]
+  [InlineData(true, 8, false, ContractQueryOutcome.Sat)]
+  [InlineData(false, 8, true, ContractQueryOutcome.Unsat)]
+  public async Task SameModuleHiddenFieldDeterminesPrecondition(bool ghost, int value, bool negate,
+    ContractQueryOutcome expected) {
+    var (prepared, request) = await PrepareSameModule(ghost, value);
+    Assert.DoesNotContain(prepared.Heap!.SourceEdits, edit => edit.Text.Contains(" provides ", StringComparison.Ordinal));
+    var result = await CheckModules(prepared, request, ContractQueryKind.EntryPrecondition, negate);
+    Assert.True(result.Outcome == expected, result.Diagnostics);
+  }
+
+  // Same-module Q also remains tied to the requested hidden field value.
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task SameModuleHiddenFieldRejectsWrongPostcondition(bool ghost) {
+    var (prepared, request) = await PrepareSameModule(ghost, 7);
+    var outputs = new Dictionary<string, ContractValue> { ["r"] = Integer(8) };
+    var result = await CheckModules(prepared, request, ContractQueryKind.ObservedPostcondition, outputs: outputs);
+    Assert.True(result.Outcome == ContractQueryOutcome.Sat, result.Diagnostics);
+  }
+
+  // A wrong observed output remains a definite violation of the original Q over the hidden field.
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task HiddenModuleFieldRejectsWrongPostcondition(bool ghost) {
+    var (prepared, request) = await PrepareModules(ghost);
+    var outputs = new Dictionary<string, ContractValue> { ["r"] = Integer(8) };
+    var result = await CheckModules(prepared, request, ContractQueryKind.ObservedPostcondition, outputs: outputs);
+    Assert.True(result.Outcome == ContractQueryOutcome.Sat, result.Diagnostics);
+    var opposite = await CheckModules(prepared, request, ContractQueryKind.ObservedPostcondition, true, outputs);
+    Assert.True(opposite.Outcome == ContractQueryOutcome.Unsat, opposite.Diagnostics);
+  }
+
+  // Runtime constructors and field exports are inserted only into hash-bound diagnostic copies.
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task HiddenModuleFieldRuntimeSourcesResolveWithoutChangingSnapshots(bool ghost) {
+    var (prepared, request) = await PrepareModules(ghost);
+    var original = request.Sources.ToList();
+    var runtime = ContractHarnessBuilder.RuntimeSources(prepared, request);
+    var reporter = new BatchErrorReporter(prepared.Program.Options);
+    _ = await ContractSourceSnapshot.ParseAsync(reporter, runtime, CancellationToken.None);
+    Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+    Assert.Equal(original, request.Sources);
+    Assert.Equal(original, prepared.SourceSnapshots);
+    Assert.All(runtime, source => Assert.Equal(ContractHarnessBuilder.Hash(source.Content), source.Sha256));
+    Assert.All(prepared.Heap.SourceEdits, edit => Assert.Equal(ContractSourceSnapshot.UriFor("library.dfy"), edit.SourceUri));
+  }
+
+  // A wildcard default view already exports the synthetic members and must not receive duplicate entries.
+  [Fact]
+  public async Task HiddenModuleWildcardDefaultExportRemainsResolvable() {
+    var (prepared, request) = await PrepareModules(true, export: "export reveals Box provides *");
+    var sources = ContractHarnessBuilder.RuntimeSources(prepared, request);
+    var reporter = new BatchErrorReporter(prepared.Program.Options);
+
+    _ = await ContractSourceSnapshot.ParseAsync(reporter, sources, CancellationToken.None);
+
+    Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+  }
+
+  // A selected named-only view that reveals the heap class receives the diagnostic constructor safely.
+  [Theory]
+  [InlineData("Public")]
+  [InlineData("ContractDiagnosticCreate")]
+  public async Task HiddenModuleNamedOnlyExportRemainsResolvable(string exportName) {
+    var (prepared, request) = await PrepareModules(true,
+      export: "export " + exportName + " reveals Box, Box.Value", import: "import Store = Store`" + exportName);
+    var reporter = new BatchErrorReporter(prepared.Program.Options);
+
+    _ = await ContractSourceSnapshot.ParseAsync(reporter,
+      ContractHarnessBuilder.RuntimeSources(prepared, request), CancellationToken.None);
+
+    Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+  }
+
+  // A named import receives constructor access even when a different default export also exists.
+  [Fact]
+  public async Task HiddenModuleSelectedNamedExportAlongsideDefaultRemainsResolvable() {
+    var (prepared, request) = await PrepareModules(true,
+      export: "export reveals Box, Box.Value\nexport Public reveals Box, Box.Value",
+      import: "import Store = Store`Public");
+    var reporter = new BatchErrorReporter(prepared.Program.Options);
+
+    _ = await ContractSourceSnapshot.ParseAsync(reporter,
+      ContractHarnessBuilder.RuntimeSources(prepared, request), CancellationToken.None);
+
+    Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+  }
+
+  // A user-provided constructor cannot replace the diagnostic allocator or execute its body.
+  [Fact]
+  public async Task HiddenModuleReservedConstructorFailsClosed() {
+    var error = await Assert.ThrowsAsync<ArgumentException>(() => PrepareModules(true,
+      extraMember: "constructor ContractDiagnosticCreate() { value := 99; }"));
+    Assert.Contains("reserved member 'ContractDiagnosticCreate'", error.Message);
+  }
+
   private static async Task<(Program Program, ContractTestRequest Request)> Resolve(
     string source,
     string symbol,
@@ -34,6 +232,348 @@ public class ContractHeapTests {
   private static Method FindMethod(Program program, string name) => program.RawModules()
     .SelectMany(module => module.TopLevelDecls).OfType<TopLevelDeclWithMembers>()
     .SelectMany(type => type.Members).OfType<Method>().Single(method => method.Name == name);
+
+  private static async Task<(ContractPreparedProgram Prepared, ContractTestRequest Request)> PreparePartialHeap(
+    string source, IReadOnlyList<ContractHeapObject> heap) {
+    var snapshot = new ContractSource("partial-heap.dfy", source, ContractHarnessBuilder.Hash(source));
+    var request = new ContractTestRequest(ContractJson.SchemaVersion, [snapshot], new("PartialHeap.Entry"),
+      new Dictionary<string, ContractValue> { ["box"] = Reference("box") }, heap);
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    var reporter = new BatchErrorReporter(options);
+    var program = await ContractSourceSnapshot.ParseAsync(reporter, request.Sources, CancellationToken.None);
+    Assert.True(reporter.ErrorCount == 0,
+      string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+    return (ContractHarnessBuilder.Prepare(program, request), request);
+  }
+
+  private const string IrrelevantFunctionFieldSource = """
+module PartialHeap {
+  class Box {
+    ghost var callback: int -> int
+    var value: int
+  }
+
+  method Entry(box: Box) returns (result: int)
+    ensures result == box.value
+  {
+    result := box.value;
+  }
+}
+""";
+
+  private static ContractHeapObject PartialBox(string id = "box") => new(id, "PartialHeap.Box",
+    new Dictionary<string, ContractValue> { ["value"] = Integer(7) });
+
+  private static async Task<(ContractPreparedProgram Prepared, ContractTestRequest Request)>
+    PrepareCrossModuleSubsetHeap(bool useSubset) {
+    var store = """
+module Store {
+  export reveals Box, GoodBox provides Box.callback
+  class Box {
+    ghost var callback: int -> int
+    var value: int
+  }
+  type GoodBox = box: Box | box != null && box.callback(0) == 0 witness *
+}
+""";
+    var parameterType = useSubset ? "Store.GoodBox" : "Store.Box";
+    var client = $$"""
+module Client {
+  import Store
+  method Entry(box: {{parameterType}}) returns (result: int)
+    ensures result == 7
+  {
+    result := 7;
+  }
+}
+""";
+    var sources = new[] {
+      new ContractSource("store.dfy", store, ContractHarnessBuilder.Hash(store)),
+      new ContractSource("client.dfy", client, ContractHarnessBuilder.Hash(client))
+    };
+    var request = new ContractTestRequest(ContractJson.SchemaVersion, sources, new("Client.Entry"),
+      new Dictionary<string, ContractValue> { ["box"] = Reference("box") },
+      [new("box", "Store.Box", new Dictionary<string, ContractValue> { ["value"] = Integer(7) })]);
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    var reporter = new BatchErrorReporter(options);
+    var program = await ContractSourceSnapshot.ParseAsync(reporter, sources, CancellationToken.None);
+    Assert.True(reporter.ErrorCount == 0,
+      string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+    return (ContractHarnessBuilder.Prepare(program, request), request);
+  }
+
+  // An irrelevant unsupported ghost function field may be omitted while diagnostic source still resolves.
+  [Fact]
+  public async Task IrrelevantGhostFunctionFieldMayBeOmitted() {
+    var (prepared, request) = await PreparePartialHeap(IrrelevantFunctionFieldSource, [PartialBox()]);
+
+    var constructor = Assert.Single(prepared.Heap!.SourceInsertions).Text;
+    Assert.Contains("constructor ContractDiagnosticCreate(value: int)", constructor);
+    Assert.Contains("ghost var contractOmittedGhostWitness0: int -> int :| true;", constructor);
+    Assert.DoesNotContain(prepared.Heap.InitialConstraints, constraint => constraint.Contains("callback"));
+    Assert.DoesNotContain("callback", prepared.Heap.InitialCaptureStatements);
+    Assert.Equal("contractHeap0.value := 7;", prepared.Heap.QueryAssignments(
+      new Dictionary<string, ContractValue> { ["$final/box/value"] = Integer(7) }));
+    var reporter = new BatchErrorReporter(prepared.Program.Options);
+    _ = await ContractSourceSnapshot.ParseAsync(reporter,
+      ContractHarnessBuilder.RuntimeSources(prepared, request), CancellationToken.None);
+    Assert.True(reporter.ErrorCount == 0,
+      string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+  }
+
+  // A nested datatype mismatch identifies its containing heap cell and map/datatype path.
+  [Fact]
+  public async Task NestedDatatypeHeapMismatchReportsCellPath() {
+    const string source = """
+module PartialHeap {
+  datatype Inner = InnerValue(number: int)
+  datatype Outer = OuterValue(inner: Inner)
+  class Box { var payload: map<int, Outer> }
+  method Entry(box: Box) {}
+}
+""";
+    var invalidInner = new ContractValue(ContractValueKind.Datatype, Constructor: "Inner.Missing",
+      Fields: new Dictionary<string, ContractValue> { ["number"] = Integer(1) });
+    var outer = new ContractValue(ContractValueKind.Datatype, Constructor: "Outer.OuterValue",
+      Fields: new Dictionary<string, ContractValue> { ["inner"] = invalidInner });
+    var payload = new ContractValue(ContractValueKind.Map,
+      Entries: [new ContractMapEntry(Integer(0), outer)]);
+    var box = new ContractHeapObject("box", "PartialHeap.Box",
+      new Dictionary<string, ContractValue> { ["payload"] = payload });
+
+    var error = await Assert.ThrowsAsync<ArgumentException>(() => PreparePartialHeap(source, [box]));
+
+    Assert.Equal("Heap value at 'box.payload[0].value.inner': " +
+      "Datatype constructor and fields do not match the expected heap value type.", error.Message);
+  }
+
+  // An omitted ghost field referenced by the selected entry precondition is rejected before source generation.
+  [Fact]
+  public async Task OmittedGhostFieldInEntryRequiresFailsClosed() {
+    var source = IrrelevantFunctionFieldSource.Replace("ensures result == box.value",
+      "requires box.callback(0) == 0\n    ensures result == box.value");
+
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => PreparePartialHeap(source, [PartialBox()]));
+
+    Assert.Contains("PartialHeap.Box.callback", error.Message);
+    Assert.Contains("PartialHeap.Entry", error.Message);
+  }
+
+  // An omitted ghost field referenced by the selected entry postcondition is rejected before source generation.
+  [Fact]
+  public async Task OmittedGhostFieldInEntryEnsuresFailsClosed() {
+    var source = IrrelevantFunctionFieldSource.Replace("ensures result == box.value",
+      "ensures result == box.value && box.callback(0) == 0");
+
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => PreparePartialHeap(source, [PartialBox()]));
+
+    Assert.Contains("PartialHeap.Box.callback", error.Message);
+    Assert.Contains("PartialHeap.Entry", error.Message);
+  }
+
+  // An omitted ghost field referenced by a reachable internal body is rejected through the resolved call graph.
+  [Fact]
+  public async Task OmittedGhostFieldInReachableInternalBodyFailsClosed() {
+    var source = IrrelevantFunctionFieldSource.Replace("method Entry(box: Box)",
+      "method Inspect(box: Box) { ghost var observed := box.callback(0); }\n\n  method Entry(box: Box)")
+      .Replace("result := box.value;", "Inspect(box);\n    result := box.value;");
+
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => PreparePartialHeap(source, [PartialBox()]));
+
+    Assert.Contains("PartialHeap.Box.callback", error.Message);
+    Assert.Contains("PartialHeap.Inspect", error.Message);
+  }
+
+  // A first-class function reference remains a transitive dependency when auditing an omitted ghost field.
+  [Fact]
+  public async Task OmittedGhostFieldUsedThroughFirstClassFunctionFailsClosed() {
+    var source = IrrelevantFunctionFieldSource.Replace("method Entry(box: Box)",
+      "ghost function Read(box: Box): int reads box { box.callback(0) }\n\n" +
+      "  ghost function Select(): Box -> int { Read }\n\n  method Entry(box: Box)")
+      .Replace("ensures result == box.value", "requires Select()(box) == 0\n    ensures result == box.value");
+
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => PreparePartialHeap(source, [PartialBox()]));
+
+    Assert.Contains("PartialHeap.Box.callback", error.Message);
+    Assert.Contains("PartialHeap.Read", error.Message);
+  }
+
+  // An entry formal's resolved subset type makes its field-reading constraint relevant to omission safety.
+  [Fact]
+  public async Task OmittedGhostFieldUsedByEntryFormalSubsetConstraintFailsClosed() {
+    var source = IrrelevantFunctionFieldSource.Replace("method Entry(box: Box)",
+      "type GoodBox = box: Box | box != null && box.callback(0) == 0 witness *\n\n" +
+      "  method Entry(box: GoodBox)");
+
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => PreparePartialHeap(source, [PartialBox()]));
+
+    Assert.Contains("PartialHeap.Box.callback", error.Message);
+    Assert.Contains("PartialHeap.GoodBox", error.Message);
+  }
+
+  // An imported subset formal transitively exposes its cross-module field-reading constraint to the audit.
+  [Fact]
+  public async Task OmittedGhostFieldUsedByCrossModuleFormalSubsetConstraintFailsClosed() {
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => PrepareCrossModuleSubsetHeap(true));
+
+    Assert.Contains("Store.Box.callback", error.Message);
+    Assert.Contains("Store.GoodBox", error.Message);
+  }
+
+  // An unused imported subset declaration is not scanned globally when the entry uses the underlying class.
+  [Fact]
+  public async Task OmittedGhostFieldUsedByUnusedCrossModuleSubsetIsAllowed() {
+    var (prepared, _) = await PrepareCrossModuleSubsetHeap(false);
+
+    Assert.Contains(prepared.Heap!.SourceEdits,
+      edit => edit.Text.Contains("contractOmittedGhostWitness", StringComparison.Ordinal));
+  }
+
+  // A reachable internal method's formal subset type is followed through the resolved type-dependency graph.
+  [Fact]
+  public async Task OmittedGhostFieldUsedByReachableInternalFormalTypeFailsClosed() {
+    var source = IrrelevantFunctionFieldSource.Replace("method Entry(box: Box)",
+      "type GoodBox = box: Box | box != null && box.callback(0) == 0 witness *\n\n" +
+      "  method Inspect(box: GoodBox) {}\n\n  method Entry(box: Box)")
+      .Replace("result := box.value;", "Inspect(box);\n    result := box.value;");
+
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => PreparePartialHeap(source, [PartialBox()]));
+
+    Assert.Contains("PartialHeap.Box.callback", error.Message);
+    Assert.Contains("PartialHeap.GoodBox", error.Message);
+  }
+
+  // A reachable bodyless extern's formal subset type remains relevant even though its source body is excluded.
+  [Fact]
+  public async Task OmittedGhostFieldUsedByReachableExternFormalTypeFailsClosed() {
+    var source = IrrelevantFunctionFieldSource.Replace("method Entry(box: Box)",
+      "type GoodBox = box: Box | box != null && box.callback(0) == 0 witness *\n\n" +
+      "  method {:extern} Inspect(box: GoodBox)\n\n  method Entry(box: Box)")
+      .Replace("result := box.value;", "Inspect(box);\n    result := box.value;");
+
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => PreparePartialHeap(source, [PartialBox()]));
+
+    Assert.Contains("PartialHeap.Box.callback", error.Message);
+    Assert.Contains("PartialHeap.GoodBox", error.Message);
+  }
+
+  // A subset type used only by an extern body local does not make its unexecuted constraint relevant.
+  [Fact]
+  public async Task OmittedGhostFieldUsedOnlyByExternBodyLocalTypeIsAllowed() {
+    var source = IrrelevantFunctionFieldSource.Replace("method Entry(box: Box)",
+      "type GoodBox = box: Box | box != null && box.callback(0) == 0 witness *\n\n" +
+      "  method {:extern} Inspect(box: Box) { ghost var ignored: GoodBox := box; }\n\n  method Entry(box: Box)")
+      .Replace("result := box.value;", "Inspect(box);\n    result := box.value;");
+
+    var (prepared, _) = await PreparePartialHeap(source, [PartialBox()]);
+
+    Assert.Contains("contractOmittedGhostWitness", Assert.Single(prepared.Heap!.SourceInsertions).Text);
+  }
+
+  // An omitted ghost field referenced by a reachable extern contract is rejected without inspecting its body.
+  [Fact]
+  public async Task OmittedGhostFieldInReachableExternContractFailsClosed() {
+    var source = IrrelevantFunctionFieldSource.Replace("method Entry(box: Box)",
+      "method {:extern} Inspect(box: Box) requires box.callback(0) == 0\n\n  method Entry(box: Box)")
+      .Replace("result := box.value;", "Inspect(box);\n    result := box.value;");
+
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => PreparePartialHeap(source, [PartialBox()]));
+
+    Assert.Contains("PartialHeap.Box.callback", error.Message);
+    Assert.Contains("PartialHeap.Inspect", error.Message);
+  }
+
+  // Calls that occur only in an extern source body do not make that unexecuted helper relevant to omission safety.
+  [Fact]
+  public async Task OmittedGhostFieldUsedOnlyByExternBodyHelperIsAllowed() {
+    var source = IrrelevantFunctionFieldSource.Replace("method Entry(box: Box)",
+      "ghost function Callback(box: Box): int reads box { box.callback(0) }\n\n" +
+      "  method {:extern} Inspect(box: Box) { ghost var observed := Callback(box); }\n\n  method Entry(box: Box)")
+      .Replace("result := box.value;", "Inspect(box);\n    result := box.value;");
+
+    var (prepared, _) = await PreparePartialHeap(source, [PartialBox()]);
+
+    Assert.Contains("contractOmittedGhostWitness", Assert.Single(prepared.Heap!.SourceInsertions).Text);
+  }
+
+  // A first-class function reference that occurs only in an extern source body remains irrelevant to omission safety.
+  [Fact]
+  public async Task OmittedGhostFieldUsedOnlyByExternBodyFunctionValueIsAllowed() {
+    var source = IrrelevantFunctionFieldSource.Replace("method Entry(box: Box)",
+      "ghost function Read(box: Box): int reads box { box.callback(0) }\n\n" +
+      "  method {:extern} Inspect(box: Box) {\n" +
+      "    ghost var selected: Box -> int := Read;\n" +
+      "    ghost var observed := selected(box);\n" +
+      "  }\n\n  method Entry(box: Box)")
+      .Replace("result := box.value;", "Inspect(box);\n    result := box.value;");
+
+    var (prepared, _) = await PreparePartialHeap(source, [PartialBox()]);
+
+    Assert.Contains("contractOmittedGhostWitness", Assert.Single(prepared.Heap!.SourceInsertions).Text);
+  }
+
+  // A pure helper called from an extern contract remains transitively relevant and rejects its omitted field read.
+  [Fact]
+  public async Task OmittedGhostFieldUsedByExternContractHelperFailsClosed() {
+    var source = IrrelevantFunctionFieldSource.Replace("method Entry(box: Box)",
+      "ghost function Callback(box: Box): int reads box { box.callback(0) }\n\n" +
+      "  method {:extern} Inspect(box: Box) requires Callback(box) == 0\n\n  method Entry(box: Box)")
+      .Replace("result := box.value;", "Inspect(box);\n    result := box.value;");
+
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => PreparePartialHeap(source, [PartialBox()]));
+
+    Assert.Contains("PartialHeap.Box.callback", error.Message);
+    Assert.Contains("PartialHeap.Callback", error.Message);
+  }
+
+  // Every runtime-visible field remains mandatory in a partial heap object.
+  [Fact]
+  public async Task OmittedNonGhostFieldFailsClosed() {
+    var incomplete = new ContractHeapObject("box", "PartialHeap.Box",
+      new Dictionary<string, ContractValue>());
+
+    var error = await Assert.ThrowsAsync<ArgumentException>(() =>
+      PreparePartialHeap(IrrelevantFunctionFieldSource, [incomplete]));
+
+    Assert.Contains("omits required non-ghost field 'PartialHeap.Box.value'", error.Message);
+  }
+
+  // A supplied field name must resolve to a declared instance field of the requested class.
+  [Fact]
+  public async Task UnknownPartialHeapFieldFailsClosed() {
+    var unknown = new ContractHeapObject("box", "PartialHeap.Box",
+      new Dictionary<string, ContractValue> { ["value"] = Integer(7), ["missing"] = Integer(0) });
+
+    var error = await Assert.ThrowsAsync<ArgumentException>(() =>
+      PreparePartialHeap(IrrelevantFunctionFieldSource, [unknown]));
+
+    Assert.Contains("supplies unknown field 'missing'", error.Message);
+  }
+
+  // Objects of one class cannot select different logical field subsets for shared runtime metadata.
+  [Fact]
+  public async Task SameClassInconsistentPartialFieldSetsFailClosed() {
+    const string source = """
+module PartialHeap {
+  class Box {
+    ghost var left: int
+    ghost var right: int
+    var value: int
+  }
+  method Entry(box: Box) {}
+}
+""";
+    var first = new ContractHeapObject("box", "PartialHeap.Box",
+      new Dictionary<string, ContractValue> { ["left"] = Integer(1), ["value"] = Integer(7) });
+    var second = new ContractHeapObject("other", "PartialHeap.Box",
+      new Dictionary<string, ContractValue> { ["right"] = Integer(2), ["value"] = Integer(8) });
+
+    var error = await Assert.ThrowsAsync<ArgumentException>(() => PreparePartialHeap(source, [first, second]));
+
+    Assert.Contains("must supply the same field set", error.Message);
+  }
 
   private const string CellSource = """
 module Heap {
@@ -235,6 +775,7 @@ module HiddenHeap {
     var plan = ContractHeapFactory.Prepare(program, request);
 
     Assert.Contains("ghost proof: int", Assert.Single(plan.SourceInsertions).Text);
+    Assert.DoesNotContain("contractOmittedGhostWitness", plan.SourceInsertions[0].Text);
     Assert.Contains("ContractDiagnosticCreate(1, 1)", plan.AllocationStatements);
     Assert.DoesNotContain("proof", plan.InitialCaptureStatements);
     var assignments = plan.QueryAssignments(new Dictionary<string, ContractValue> {

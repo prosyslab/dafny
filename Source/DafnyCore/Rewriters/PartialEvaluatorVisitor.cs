@@ -489,6 +489,8 @@ internal sealed partial class PartialEvaluatorEngine {
           return SimplifyParensExpr(parens, state);
         case LiteralExpr:
           return false;
+        case ConversionExpr conversionExpr:
+          return SimplifyConversionExpr(conversionExpr, state);
         case IdentifierExpr identifierExpr:
           return SimplifyIdentifierExpr(identifierExpr);
         case UnaryOpExpr unary:
@@ -521,6 +523,8 @@ internal sealed partial class PartialEvaluatorEngine {
           return SimplifySetDisplayExpr(setDisplayExpr, state);
         case MultiSetDisplayExpr multiSetDisplayExpr:
           return SimplifyMultiSetDisplayExpr(multiSetDisplayExpr, state);
+        case MapDisplayExpr mapDisplayExpr:
+          return SimplifyMapDisplayExpr(mapDisplayExpr, state);
         case SeqSelectExpr seqSelectExpr:
           return SimplifySeqSelectExpr(seqSelectExpr, state);
         case SeqUpdateExpr seqUpdateExpr:
@@ -542,6 +546,18 @@ internal sealed partial class PartialEvaluatorEngine {
       if (identifierExpr.Var != null && TryLookupConst(identifierExpr.Var, out var constValue)) {
         var result = constValue.CreateExpression(identifierExpr.Type);
         SetReplacement(identifierExpr, result);
+      }
+      return false;
+    }
+
+    private bool SimplifyConversionExpr(ConversionExpr conversionExpr, PartialEvalState state) {
+      if (!engine.UsesContractConcreteProfile) {
+        return false;
+      }
+
+      conversionExpr.E = SimplifyExpression(conversionExpr.E, state);
+      if (TryEvaluateContractConcreteConversion(conversionExpr, out var convertedLiteral)) {
+        SetReplacement(conversionExpr, convertedLiteral);
       }
       return false;
     }
@@ -870,6 +886,30 @@ internal sealed partial class PartialEvaluatorEngine {
 
     private bool SimplifyMemberSelectExpr(MemberSelectExpr memberSelectExpr, PartialEvalState state) {
       memberSelectExpr.Obj = SimplifyExpression(memberSelectExpr.Obj, state);
+      if (engine.UsesContractConcreteProfile &&
+          memberSelectExpr.Member is SpecialField { SpecialId: SpecialField.ID.Keys } &&
+          memberSelectExpr.Obj is MapDisplayExpr mapDisplay &&
+          TryNormalizeContractConcreteMapEntries(mapDisplay, out var entries)) {
+        SetReplacement(memberSelectExpr, CreateSetDisplayLiteral(memberSelectExpr.Origin,
+          entries.Select(entry => entry.A).ToList(), memberSelectExpr.Type));
+        return false;
+      }
+      if (engine.UsesContractConcreteProfile &&
+          memberSelectExpr.Obj is DatatypeValue { Ctor: { } ctor } datatype &&
+          IsContractConcreteValue(datatype)) {
+        if (memberSelectExpr.Member is DatatypeDiscriminator discriminator) {
+          SetReplacement(memberSelectExpr,
+            Expression.CreateBoolLiteral(memberSelectExpr.Origin, ReferenceEquals(ctor.QueryField, discriminator)));
+          return false;
+        }
+        if (memberSelectExpr.Member is DatatypeDestructor destructor) {
+          var index = ctor.Destructors.FindIndex(candidate => ReferenceEquals(candidate, destructor));
+          if (0 <= index && index < datatype.Arguments.Count) {
+            SetReplacement(memberSelectExpr, datatype.Arguments[index]);
+            return false;
+          }
+        }
+      }
       if (TryGetTupleLiteral(memberSelectExpr.Obj, out var tuple) &&
           int.TryParse(memberSelectExpr.MemberName, out var tupleIndex) &&
           0 <= tupleIndex && tupleIndex < tuple.Arguments.Count &&
@@ -944,7 +984,7 @@ internal sealed partial class PartialEvaluatorEngine {
       }
 
       var inlineDepthForUnrolledInstances = Math.Max(0, state.Depth - 1);
-      if (!hasRecursiveLogicalBody &&
+      if ((!hasRecursiveLogicalBody || engine.UsesContractConcreteProfile) &&
           engine.TryUnrollQuantifier(
             quantifierExpr,
             expr => SimplifyExpression(expr, state.WithDepth(inlineDepthForUnrolledInstances)),
@@ -2221,6 +2261,17 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
+    private bool SimplifyMapDisplayExpr(MapDisplayExpr mapDisplayExpr, PartialEvalState state) {
+      if (!engine.UsesContractConcreteProfile) {
+        return false;
+      }
+      foreach (var entry in mapDisplayExpr.Elements) {
+        entry.A = SimplifyExpression(entry.A, state);
+        entry.B = SimplifyExpression(entry.B, state);
+      }
+      return false;
+    }
+
     // ------------------- Expression rewriting: sequence operations -------------------
 
     private bool SimplifySeqSelectExpr(SeqSelectExpr seqSelectExpr, PartialEvalState state) {
@@ -2233,6 +2284,17 @@ internal sealed partial class PartialEvaluatorEngine {
         seqSelectExpr.E1 = SimplifyExpression(seqSelectExpr.E1, state);
       }
       if (seqSelectExpr.SelectOne) {
+        if (engine.UsesContractConcreteProfile &&
+            seqSelectExpr.Seq is MapDisplayExpr mapDisplay &&
+            seqSelectExpr.E0 != null && IsContractConcreteValue(seqSelectExpr.E0) &&
+            TryNormalizeContractConcreteMapEntries(mapDisplay, out var entries)) {
+          var entry = entries.LastOrDefault(candidate =>
+            AreContractConcreteExpressionsEqual(candidate.A, seqSelectExpr.E0));
+          if (entry != null) {
+            SetReplacement(seqSelectExpr, entry.B);
+            return false;
+          }
+        }
         if (TryGetStringLiteral(seqSelectExpr.Seq, out var strValue, out var strVerbatim) &&
             seqSelectExpr.E0 != null &&
             TryGetIntLiteralValue(seqSelectExpr.E0, out var index) &&
@@ -2242,11 +2304,13 @@ internal sealed partial class PartialEvaluatorEngine {
           return false;
         }
         if (TryGetSeqDisplayLiteral(seqSelectExpr.Seq, out var display) &&
-            AllElementsAreLiterals(display) &&
+            (AllElementsAreLiterals(display) ||
+             engine.UsesContractConcreteProfile && display.Elements.All(IsContractConcreteValue)) &&
             seqSelectExpr.E0 != null &&
             TryGetIntLiteralValue(seqSelectExpr.E0, out index) &&
             0 <= index && index < display.Elements.Count &&
-            IsLiteralLike(display.Elements[index])) {
+            (IsLiteralLike(display.Elements[index]) ||
+             engine.UsesContractConcreteProfile && IsContractConcreteValue(display.Elements[index]))) {
           SetReplacement(seqSelectExpr, display.Elements[index]);
           return false;
         }
@@ -2262,7 +2326,8 @@ internal sealed partial class PartialEvaluatorEngine {
         }
       }
       if (TryGetSeqDisplayLiteral(seqSelectExpr.Seq, out var sourceSeq) &&
-          AllElementsAreLiterals(sourceSeq) &&
+          (AllElementsAreLiterals(sourceSeq) ||
+           engine.UsesContractConcreteProfile && sourceSeq.Elements.All(IsContractConcreteValue)) &&
           TryGetSliceBounds(seqSelectExpr, sourceSeq.Elements.Count, out var seqStart, out var seqEnd)) {
         var sliced = sourceSeq.Elements.GetRange(seqStart, seqEnd - seqStart);
         result = CreateSeqDisplayLiteral(seqSelectExpr.Origin, sliced, seqSelectExpr.Type);

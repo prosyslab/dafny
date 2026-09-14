@@ -27,6 +27,8 @@ public sealed class ContractHeapPlan {
   private readonly IReadOnlyDictionary<string, HeapSlot> slots;
   private readonly IReadOnlyList<HeapSlot> orderedSlots;
   internal IReadOnlyList<HeapSlot> Slots => orderedSlots;
+  internal IReadOnlySet<Field> TrackedGhostFields => orderedSlots.SelectMany(slot => slot.Fields)
+    .Where(field => field.IsGhost).ToHashSet();
   internal string ValueExpression(ContractValue value, DafnyType? type) => ContractHeapFactory.ValueExpression(value, type, slots);
 
   internal string LogicalFieldsBase64(string id) {
@@ -172,7 +174,8 @@ public sealed class ContractHeapPlan {
 internal sealed record HeapCell(string Name, string Access, DafnyType Type,
   ContractValue InitialValue, bool RuntimeVisible = true, bool Mutable = true, int? Index = null);
 internal sealed record HeapSlot(ContractHeapObject Object, ClassDecl Class,
-  IReadOnlyList<Field> Fields, string VariableName, string SourceTypeName, string SourceModuleName,
+  IReadOnlyList<Field> Fields, IReadOnlyList<Field> OmittedGhostFields,
+  string VariableName, string SourceTypeName, string SourceModuleName,
   DafnyType? ElementType = null) {
   public bool IsArray => ElementType != null;
   public IReadOnlyList<HeapCell> Cells => IsArray
@@ -227,7 +230,7 @@ public static class ContractHeapFactory {
         if (!arrayTypes.TryGetValue(item.Type, out var arrayType)) {
           throw new ArgumentException("The array heap type does not match a resolved one-dimensional array type in the source: " + item.Type);
         }
-        slots.Add(item.Id, new HeapSlot(item, arrayType.AsArrayType!, [], heapPrefix + index,
+        slots.Add(item.Id, new HeapSlot(item, arrayType.AsArrayType!, [], [], heapPrefix + index,
           ArrayTypeName(arrayType), entry.EnclosingClass.EnclosingModuleDefinition.FullDafnyName,
           arrayType.NormalizeExpand().TypeArgs[0]));
         continue;
@@ -240,12 +243,14 @@ public static class ContractHeapFactory {
       }
       var classDecl = matches[0];
       ValidateClass(program, entry, classDecl);
-      var fields = ValidateFields(program, entry, classDecl, item);
+      var (fields, omittedGhostFields) = ValidateFields(classDecl, item);
       var sourceTypeName = SourceTypeName(program, entry, classDecl);
-      slots.Add(item.Id, new HeapSlot(item, classDecl, fields, heapPrefix + index, sourceTypeName,
+      slots.Add(item.Id, new HeapSlot(item, classDecl, fields, omittedGhostFields, heapPrefix + index, sourceTypeName,
         entry.EnclosingClass.EnclosingModuleDefinition.FullDafnyName));
     }
 
+    ValidateConsistentFieldSets(slots.Values);
+    ValidateOmittedGhostFields(program, OriginalCallable(entry), slots.Values);
     ValidateInputReferences(entry, request.Inputs, slots);
     ValidateFieldValues(slots);
     var orderedSlots = TopologicalOrder(slots);
@@ -330,22 +335,189 @@ public static class ContractHeapFactory {
     }
   }
 
-  private static IReadOnlyList<Field> ValidateFields(Program program, Method entry, ClassDecl classDecl, ContractHeapObject item) {
+  private static (IReadOnlyList<Field> Supplied, IReadOnlyList<Field> OmittedGhost) ValidateFields(
+    ClassDecl classDecl, ContractHeapObject item) {
     var declaredFields = classDecl.Members.OfType<Field>()
       .Where(field => field.Origin.line > 0 && !field.IsStatic).ToList();
-    var scope = program.ModuleSigs[entry.EnclosingClass.EnclosingModuleDefinition].VisibilityScope;
-    var unavailable = declaredFields.FirstOrDefault(field =>
-      !field.IsRevealedInScope(scope) || !field.IsVisibleInScope(scope));
-    if (unavailable != null) {
-      throw new NotSupportedException(
-        $"Heap type '{classDecl.FullDafnyName}' contains unavailable field '{unavailable.Name}'.");
-    }
-    var declaredNames = declaredFields.Select(field => field.Name).ToHashSet(StringComparer.Ordinal);
-    if (!declaredNames.SetEquals(item.Fields.Keys)) {
+    var declaredByName = declaredFields.ToDictionary(field => field.Name, StringComparer.Ordinal);
+    var unknown = item.Fields.Keys.FirstOrDefault(name => !declaredByName.ContainsKey(name));
+    if (unknown != null) {
       throw new ArgumentException(
-        $"Heap object '{item.Id}' fields must exactly match the available instance fields of '{classDecl.FullDafnyName}'.");
+        $"Heap object '{item.Id}' supplies unknown field '{unknown}' for '{classDecl.FullDafnyName}'.");
     }
-    return declaredFields;
+    var omittedRuntimeField = declaredFields.FirstOrDefault(field => !field.IsGhost && !item.Fields.ContainsKey(field.Name));
+    if (omittedRuntimeField != null) {
+      throw new ArgumentException(
+        $"Heap object '{item.Id}' omits required non-ghost field '{classDecl.FullDafnyName}.{omittedRuntimeField.Name}'.");
+    }
+    return (declaredFields.Where(field => item.Fields.ContainsKey(field.Name)).ToList(),
+      declaredFields.Where(field => field.IsGhost && !item.Fields.ContainsKey(field.Name)).ToList());
+  }
+
+  private static void ValidateConsistentFieldSets(IEnumerable<HeapSlot> slots) {
+    foreach (var group in slots.Where(slot => !slot.IsArray).GroupBy(slot => slot.Class)) {
+      var first = group.First();
+      var supplied = first.Fields.Select(field => field.Name).ToHashSet(StringComparer.Ordinal);
+      var inconsistent = group.Skip(1).FirstOrDefault(slot =>
+        !supplied.SetEquals(slot.Fields.Select(field => field.Name)));
+      if (inconsistent != null) {
+        throw new ArgumentException($"Heap objects '{first.Object.Id}' and '{inconsistent.Object.Id}' of class " +
+          $"'{first.Class.FullDafnyName}' must supply the same field set.");
+      }
+    }
+  }
+
+  private static void ValidateOmittedGhostFields(Program program, MethodOrFunction entry,
+    IEnumerable<HeapSlot> slots) {
+    var omitted = slots.Where(slot => !slot.IsArray).SelectMany(slot => slot.OmittedGhostFields)
+      .ToHashSet();
+    if (omitted.Count == 0) {
+      return;
+    }
+    foreach (var callable in RelevantReachableCallables(program, entry)) {
+      foreach (var member in RelevantNodes(callable).OfType<MemberSelectExpr>()) {
+        if (member.Member is Field field && omitted.Contains(field)) {
+          throw new NotSupportedException($"Heap field '{field.EnclosingClass.FullDafnyName}.{field.Name}' is omitted, " +
+            $"but reachable callable '{CallableName(callable)}' references it at " +
+            $"{member.Origin.line}:{member.Origin.col}.");
+        }
+      }
+    }
+  }
+
+  private static IReadOnlySet<ICallable> RelevantReachableCallables(Program program,
+    MethodOrFunction entry) {
+    var resolvedEdges = program.RawModules()
+      .SelectMany(module => module.CallGraph.GetVertices().Concat(module.InterModuleCallGraph.GetVertices()))
+      .GroupBy(vertex => vertex.N).ToDictionary(group => group.Key,
+        group => group.SelectMany(vertex => vertex.Successors).Select(vertex => vertex.N).Distinct().ToList());
+    var allCallables = program.RawModules().SelectMany(module => module.TopLevelDecls)
+      .OfType<TopLevelDeclWithMembers>().SelectMany(declaration => declaration.Members)
+      .OfType<MethodOrFunction>().ToList();
+    var reachable = new HashSet<ICallable>();
+    var pending = new Stack<ICallable>();
+    pending.Push((ICallable)entry);
+    while (pending.TryPop(out var callable)) {
+      if (!reachable.Add(callable)) {
+        continue;
+      }
+      var relevantNodes = RelevantNodes(callable).ToList();
+      IEnumerable<ICallable> referencedCallables = UsesFullResolvedDependencies(callable)
+        ? resolvedEdges.GetValueOrDefault(callable)?.ToList() ?? []
+        : relevantNodes.Select(ReferencedCallable).OfType<ICallable>();
+      var callees = referencedCallables
+        .Concat(TypeDependencies(DeclaredTypes(callable).Concat(relevantNodes.OfType<DafnyType>())))
+        .Distinct().ToList();
+      if (callable is Function { ByMethodDecl: { } byMethod }) {
+        callees.Add(byMethod);
+      }
+      if (callable is PrefixPredicate prefixPredicate) {
+        callees.Add(prefixPredicate.ExtremePred);
+      } else if (callable is PrefixLemma prefixLemma) {
+        callees.Add(prefixLemma.ExtremeLemma);
+      }
+      foreach (var callee in callees) {
+        pending.Push(callee);
+        if (callee is MethodOrFunction methodOrFunction) {
+          foreach (var implementation in allCallables.Where(candidate => candidate.Overrides(methodOrFunction))) {
+            pending.Push((ICallable)implementation);
+          }
+        }
+      }
+    }
+    return reachable;
+  }
+
+  private static bool UsesFullResolvedDependencies(ICallable callable) {
+    if (callable is not MethodOrFunction methodOrFunction) {
+      return true;
+    }
+    var hasBody = methodOrFunction switch {
+      Method method => method.Body != null,
+      Function function => function.Body != null || function.ByMethodBody != null,
+      _ => false
+    };
+    return !Attributes.Contains(methodOrFunction.Attributes, "extern") && hasBody;
+  }
+
+  private static IEnumerable<DafnyType> DeclaredTypes(ICallable callable) {
+    return callable switch {
+      Function function => function.Ins.Select(formal => formal.Type).Append(function.ResultType),
+      MethodOrConstructor method => method.Ins.Select(formal => formal.Type)
+        .Concat(method.Outs.Select(formal => formal.Type)),
+      ConstantField constantField => [constantField.Type],
+      NewtypeDecl newtype => [newtype.BaseType],
+      TypeSynonymDeclBase synonym => [synonym.Rhs],
+      DatatypeDecl datatype => datatype.Ctors.SelectMany(constructor => constructor.Formals)
+        .Select(formal => formal.Type),
+      IteratorDecl iterator => iterator.Ins.Concat(iterator.Outs).Select(formal => formal.Type),
+      _ => []
+    };
+  }
+
+  private static IEnumerable<ICallable> TypeDependencies(IEnumerable<DafnyType> types) {
+    var dependencies = new HashSet<ICallable>();
+    foreach (var type in types.Where(type => type is NonProxyType)) {
+      type.ForeachTypeComponent(component => {
+        if ((component as UserDefinedType)?.ResolvedClass is ICallable callable) {
+          dependencies.Add(callable);
+        }
+      });
+    }
+    return dependencies;
+  }
+
+  private static ICallable? ReferencedCallable(INode node) {
+    return node switch {
+      FunctionCallExpr functionCall => functionCall.Function,
+      MemberSelectExpr { Member: Function function } => function,
+      MemberSelectExpr { Member: ConstantField constantField } => constantField,
+      CallStmt methodCall => methodCall.Method,
+      DatatypeValue datatypeValue => datatypeValue.Type.AsDatatype,
+      _ => null
+    };
+  }
+
+  private static IEnumerable<INode> RelevantNodes(ICallable callable) {
+    if (callable is MethodOrFunction methodOrFunction) {
+      var hasBody = methodOrFunction switch {
+        Method method => method.Body != null,
+        Function function => function.Body != null || function.ByMethodBody != null,
+        _ => false
+      };
+      if (!Attributes.Contains(methodOrFunction.Attributes, "extern") && hasBody) {
+        return methodOrFunction.Descendants().Prepend((INode)methodOrFunction);
+      }
+      IEnumerable<INode> contractRoots = methodOrFunction.Req.Cast<INode>()
+        .Concat(methodOrFunction.Ens)
+        .Concat(methodOrFunction.Reads.Expressions ?? [])
+        .Concat(methodOrFunction.Decreases.Expressions ?? [])
+        .Concat(methodOrFunction.Ins.Select(formal => formal.DefaultValue).OfType<Expression>());
+      if (methodOrFunction is Method methodCallable) {
+        contractRoots = contractRoots.Concat(methodCallable.Mod.Expressions ?? []);
+      }
+      return contractRoots.SelectMany(root => root.Descendants().Prepend(root));
+    }
+    IEnumerable<INode> roots = callable switch {
+      ConstantField { Rhs: { } rhs } => [rhs],
+      RedirectingTypeDecl redirectingType => new[] { redirectingType.Constraint, redirectingType.Witness }
+        .OfType<Expression>(),
+      DatatypeDecl datatype => datatype.Ctors.SelectMany(constructor => constructor.Formals)
+        .Select(formal => formal.DefaultValue).OfType<Expression>(),
+      _ => callable.Descendants().Prepend(callable)
+    };
+    return roots.SelectMany(root => root.Descendants().Prepend(root));
+  }
+
+  private static string CallableName(ICallable callable) {
+    return callable is ICanVerify verifiable ? verifiable.FullDafnyName : callable.NameRelativeToModule;
+  }
+
+  private static MethodOrFunction OriginalCallable(Method entry) {
+    if (entry is ContractConcreteMethod concrete) {
+      return concrete.OriginalCallable;
+    }
+    return (MethodOrFunction?)entry.FunctionFromWhichThisIsByMethodDecl ?? entry;
   }
 
   private static void ValidateInputReferences(Method entry, IReadOnlyDictionary<string, ContractValue> inputs,
@@ -377,16 +549,17 @@ public static class ContractHeapFactory {
     foreach (var slot in slots.Values) {
       foreach (var cell in slot.Cells) {
         var value = cell.InitialValue;
+        var path = cell.Name.StartsWith("[", StringComparison.Ordinal)
+          ? slot.Object.Id + cell.Name
+          : slot.Object.Id + "." + cell.Name;
         if (IsReferenceType(cell.Type, out _, out var permitsNull)) {
           if (value.Kind == ContractValueKind.Null && permitsNull) { continue; }
           if (value.Kind != ContractValueKind.Reference || value.Value == null ||
               !slots.TryGetValue(value.Value, out var target) || !IsExactReferenceType(cell.Type, target, out _)) {
-            throw new ArgumentException("Heap cell '" + slot.Object.Id + "." + cell.Name + "' does not name a compatible heap object.");
+            throw new ArgumentException("Heap cell '" + path + "' does not name a compatible heap object.");
           }
-        } else if (!ValueMatchesType(value, cell.Type)) {
-          throw new ArgumentException("Heap cell '" + slot.Object.Id + "." + cell.Name + "' has an incompatible concrete value.");
         }
-        _ = ValueExpression(value, cell.Type, slots);
+        _ = ValueExpressionAt(value, cell.Type, slots, path);
       }
     }
   }
@@ -417,15 +590,57 @@ public static class ContractHeapFactory {
 
   private static IReadOnlyList<ContractSourceEdit> BuildConstructorInsertions(
     IEnumerable<HeapSlot> slots) {
-    return slots.Where(slot => !slot.IsArray).GroupBy(slot => slot.Class).Select(group => {
-      var slot = group.First();
+    var classes = slots.Where(slot => !slot.IsArray).GroupBy(slot => slot.Class).Select(group => group.First()).ToList();
+    var edits = classes.Select(slot => {
       var parameters = string.Join(", ", slot.Fields.Select(field =>
         (field.IsGhost ? "ghost " : "") + field.Name + ": " + field.Type));
-      var assignments = string.Join("\n", slot.Fields.Select(field => $"    this.{field.Name} := {field.Name};"));
-      var body = assignments.Length == 0 ? "" : "\n" + assignments + "\n  ";
+      var names = slot.Fields.Select(field => field.Name).ToHashSet(StringComparer.Ordinal);
+      var assignments = slot.Fields.Select(field => $"    this.{field.Name} := {field.Name};").ToList();
+      foreach (var (field, index) in slot.OmittedGhostFields.Select((field, index) => (field, index))) {
+        var witness = "contractOmittedGhostWitness" + index;
+        while (!names.Add(witness)) {
+          witness += "_";
+        }
+        assignments.Add($"    ghost var {witness}: {field.Type} :| true;");
+        assignments.Add($"    this.{field.Name} := {witness};");
+      }
+      var assignmentsText = string.Join("\n", assignments);
+      var body = assignmentsText.Length == 0 ? "" : "\n" + assignmentsText + "\n  ";
       var declaration = $"\n  constructor {ConstructorName}({parameters}) {{" + body + "}\n";
       return new ContractSourceEdit(slot.Class.Origin.Uri, slot.Class.EndToken.pos, declaration);
     }).ToList();
+    foreach (var group in classes.GroupBy(slot => slot.Class.EnclosingModuleDefinition)) {
+      if (group.All(slot => slot.SourceModuleName == group.Key.FullDafnyName)) {
+        continue;
+      }
+      var exports = group.Key.TopLevelDecls.OfType<ModuleExportDecl>().ToList();
+      // With no explicit export sets, Dafny already exports every new member.
+      // Otherwise amend each existing view that reveals the heap class; this includes
+      // the named view an allocation site may have imported without broadening opaque views.
+      if (exports.Count == 0) { continue; }
+      var slotsByExport = exports.ToDictionary(export => export, export => group.Where(slot =>
+        slot.Class.IsVisibleInScope(export.Signature.VisibilityScope) &&
+        slot.Class.IsRevealedInScope(export.Signature.VisibilityScope)).ToList());
+      var unavailable = group.FirstOrDefault(slot => slotsByExport.Values.All(slots => !slots.Contains(slot)));
+      if (unavailable != null) {
+        throw new NotSupportedException($"Diagnostic heap access requires an export view that reveals heap type " +
+          $"'{unavailable.Class.FullDafnyName}' in module '{group.Key.FullDafnyName}'.");
+      }
+      foreach (var (export, exposedSlots) in slotsByExport.Where(pair => pair.Value.Count > 0)) {
+        var members = exposedSlots.SelectMany(slot => slot.Fields
+          .Where(field => !field.IsVisibleInScope(export.Signature.VisibilityScope))
+          .Select(field => slot.Class.Name + "." + field.Name)).ToList();
+        var constructors = export.ProvideAll || export.RevealAll
+          ? []
+          : exposedSlots.Select(slot => slot.Class.Name + "." + ConstructorName).ToList();
+        var text = " provides " + string.Join(", ", constructors.Concat(members)) + "\n";
+        if (constructors.Any() || members.Count > 0) {
+          edits.Add(new ContractSourceEdit(export.Origin.Uri,
+            export.EndToken.pos + export.EndToken.val.Length, text));
+        }
+      }
+    }
+    return edits;
   }
 
   private static string CaptureStatements(IEnumerable<HeapSlot> slots, bool initial) {
@@ -472,81 +687,102 @@ public static class ContractHeapFactory {
   }
 
   internal static string ValueExpression(ContractValue value, DafnyType? expectedType,
-    IReadOnlyDictionary<string, HeapSlot> slots) {
+    IReadOnlyDictionary<string, HeapSlot> slots) => ValueExpressionAt(value, expectedType, slots, null);
+
+  private static string ValueExpressionAt(ContractValue value, DafnyType? expectedType,
+    IReadOnlyDictionary<string, HeapSlot> slots, string? path) {
     if (expectedType?.NormalizeExpandKeepConstraints() is UserDefinedType {
       ResolvedClass: SubsetTypeDecl subset
     } subsetType) {
-      return ValueExpression(value, subset.RhsWithArgument(subsetType.TypeArgs), slots);
+      return ValueExpressionAt(value, subset.RhsWithArgument(subsetType.TypeArgs), slots, path);
     }
     if (expectedType?.NormalizeExpandKeepConstraints() is UserDefinedType {
       ResolvedClass: NewtypeDecl newtype
     } newtypeType) {
-      return ValueExpression(value, newtype.ConcreteBaseType(newtypeType.TypeArgs), slots);
+      return ValueExpressionAt(value, newtype.ConcreteBaseType(newtypeType.TypeArgs), slots, path);
     }
     if (value.Kind == ContractValueKind.Reference) {
       if (value.Value == null || !slots.TryGetValue(value.Value, out var slot)) {
-        throw new ArgumentException("Reference value does not name a heap object.", nameof(value));
+        throw ValueError(path, "Reference value does not name a heap object.");
       }
       if (expectedType != null && !IsExactReferenceType(expectedType, slot, out _)) {
-        throw new ArgumentException("Reference value has an incompatible heap type.", nameof(value));
+        throw ValueError(path, "Reference value has an incompatible heap type.");
       }
       return slot.VariableName;
     }
     var module = slots.Values.FirstOrDefault()?.SourceModuleName;
     if (value.Kind == ContractValueKind.Sequence && value.Items != null) {
       if (expectedType != null && expectedType.AsSeqType == null) {
-        throw new ArgumentException("Sequence value does not match the expected heap value type.");
+        throw ValueError(path, "Sequence value does not match the expected heap value type.");
       }
-      return "[" + string.Join(", ", value.Items.Select(item => ValueExpression(item, expectedType?.AsSeqType?.Arg, slots))) + "]";
+      return "[" + string.Join(", ", value.Items.Select((item, index) =>
+        ValueExpressionAt(item, expectedType?.AsSeqType?.Arg, slots, NestedPath(path, $"[{index}]")))) + "]";
     }
     if (value.Kind == ContractValueKind.Set && value.Items != null) {
       var set = expectedType?.AsSetType;
       if (expectedType != null && set is not { Finite: true }) {
-        throw new ArgumentException("Set value does not match the expected heap value type.");
+        throw ValueError(path, "Set value does not match the expected heap value type.");
       }
-      return "{" + string.Join(", ", value.Items.Select(item => ValueExpression(item, set?.Arg, slots))) + "}";
+      return "{" + string.Join(", ", value.Items.Select((item, index) =>
+        ValueExpressionAt(item, set?.Arg, slots, NestedPath(path, $"[{index}]")))) + "}";
     }
     if (value.Kind == ContractValueKind.Multiset && value.Items != null) {
       var multiset = expectedType?.AsMultiSetType;
       if (expectedType != null && multiset == null) {
-        throw new ArgumentException("Multiset value does not match the expected heap value type.");
+        throw ValueError(path, "Multiset value does not match the expected heap value type.");
       }
-      return "multiset{" + string.Join(", ", value.Items.Select(item => ValueExpression(item, multiset?.Arg, slots))) + "}";
+      return "multiset{" + string.Join(", ", value.Items.Select((item, index) =>
+        ValueExpressionAt(item, multiset?.Arg, slots, NestedPath(path, $"[{index}]")))) + "}";
     }
     if (value.Kind == ContractValueKind.Map && value.Entries != null) {
       var map = expectedType?.AsMapType;
       if (expectedType != null && map is not { Finite: true }) {
-        throw new ArgumentException("Map value does not match the expected heap value type.");
+        throw ValueError(path, "Map value does not match the expected heap value type.");
       }
-      return "map[" + string.Join(", ", value.Entries.Select(entry =>
-        ValueExpression(entry.Key, map?.Domain, slots) + " := " +
-        ValueExpression(entry.Value, map?.Range, slots))) + "]";
+      return "map[" + string.Join(", ", value.Entries.Select((entry, index) =>
+        ValueExpressionAt(entry.Key, map?.Domain, slots, NestedPath(path, $"[{index}].key")) + " := " +
+        ValueExpressionAt(entry.Value, map?.Range, slots, NestedPath(path, $"[{index}].value")))) + "]";
     }
     if (value.Kind == ContractValueKind.Datatype && value.Fields != null && value.Constructor != null) {
       // Reuse the codec's constructor/field identifier checks before rendering nested heap references.
-      _ = ContractModelCodec.ToDafny(value with {
+      _ = CodecExpressionAt(value with {
         Fields = value.Fields.ToDictionary(field => field.Key,
         _ => new ContractValue(ContractValueKind.Boolean, "false"))
-      }, module);
+      }, module, path);
       Dictionary<string, DafnyType>? fieldTypes = null;
       if (expectedType != null) {
-        var datatype = expectedType.AsDatatype ?? throw new ArgumentException("Datatype value does not match the expected heap value type.");
+        var datatype = expectedType.AsDatatype ??
+          throw ValueError(path, "Datatype value does not match the expected heap value type.");
         var constructor = datatype.Ctors.SingleOrDefault(candidate => value.Constructor == candidate.FullName ||
           value.Constructor == datatype.Name + "." + candidate.Name ||
           value.Constructor == datatype.FullDafnyName + "." + candidate.Name || value.Constructor == candidate.Name);
         if (constructor == null || !constructor.Formals.Select(formal => formal.Name).ToHashSet().SetEquals(value.Fields.Keys)) {
-          throw new ArgumentException("Datatype constructor and fields do not match the expected heap value type.");
+          throw ValueError(path, "Datatype constructor and fields do not match the expected heap value type.");
         }
         var substitution = TypeParameter.SubstitutionMap(datatype.TypeArgs, expectedType.TypeArgs);
         fieldTypes = constructor.Formals.ToDictionary(formal => formal.Name, formal => formal.Type.Subst(substitution));
       }
       return ContractModelCodec.LocalName(value.Constructor, module) + "(" + string.Join(", ", value.Fields.Select(field =>
-        field.Key + " := " + ValueExpression(field.Value, fieldTypes?[field.Key], slots))) + ")";
+        field.Key + " := " + ValueExpressionAt(field.Value, fieldTypes?[field.Key], slots,
+          NestedPath(path, "." + field.Key)))) + ")";
     }
     if (expectedType != null && !ValueMatchesType(value, expectedType)) {
-      throw new ArgumentException("Concrete heap value does not match its expected type.");
+      throw ValueError(path, "Concrete heap value does not match its expected type.");
     }
-    return ContractModelCodec.ToDafny(value, slots.Values.FirstOrDefault()?.SourceModuleName);
+    return CodecExpressionAt(value, slots.Values.FirstOrDefault()?.SourceModuleName, path);
+  }
+
+  private static string? NestedPath(string? path, string suffix) => path == null ? null : path + suffix;
+
+  private static ArgumentException ValueError(string? path, string message) =>
+    new(path == null ? message : $"Heap value at '{path}': {message}");
+
+  private static string CodecExpressionAt(ContractValue value, string? module, string? path) {
+    try {
+      return ContractModelCodec.ToDafny(value, module);
+    } catch (ArgumentException error) when (path != null) {
+      throw new ArgumentException($"Heap value at '{path}': {error.Message}", error);
+    }
   }
 
   private static bool IsExactReferenceType(DafnyType type, HeapSlot expected, out bool permitsNull) {

@@ -364,7 +364,8 @@ internal sealed class QuantifierBounds {
   /// quantifier to cover the remaining domain.
   /// </summary>
   internal bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, Func<Expression, Expression> simplifyAfterSubst,
-    out Expression rewritten, bool emitOverflowResidual = true) {
+    out Expression rewritten, bool emitOverflowResidual = true,
+    Func<Expression, IReadOnlyDictionary<IVariable, Expression>, bool>? reserveInstanceExpansion = null) {
     rewritten = quantifierExpr;
 
     if (quantifierExpr.SplitQuantifier != null || quantifierExpr.SplitQuantifierExpression != null) {
@@ -474,8 +475,13 @@ internal sealed class QuantifierBounds {
 
     uint instanceCount = 0;
     bool reachedInstanceCap = false;
+    bool reachedExpressionNodeLimit = false;
 
     bool HandleInstance(Substituter substituter) {
+      if (reserveInstanceExpansion != null && !reserveInstanceExpansion(logicalBody, substMap)) {
+        reachedExpressionNodeLimit = true;
+        return true;
+      }
       expansionBudget?.ConsumeInstance();
       var inst = substituter.Substitute(logicalBody);
       inst = simplifyAfterSubst(inst);
@@ -494,8 +500,12 @@ internal sealed class QuantifierBounds {
           substMap,
           typeMap,
           HandleInstance,
-          () => IsShortCircuited() || reachedInstanceCap)) {
+          () => IsShortCircuited() || reachedInstanceCap || reachedExpressionNodeLimit)) {
       return false;
+    }
+    if (reachedExpressionNodeLimit) {
+      rewritten = quantifierExpr;
+      return true;
     }
     if (expansionBudget != null && reachedInstanceCap && new BigInteger(instanceCount) < size) {
       exceedsMaxInstances = true;

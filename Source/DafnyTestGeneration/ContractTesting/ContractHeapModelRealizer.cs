@@ -95,7 +95,7 @@ public static partial class ContractModelRealizer {
         "assert {:error \"" + ContractQueryBuilder.TargetMarker + "\"} " + assertion + ";\n}\n";
       var source = ContractHarnessBuilder.Insert(childPrepared, declaration);
       var result = await ContractSolver.CheckAsync(source, kind, prepared.Program.Options, cancellationToken, captureModel,
-        ContractQueryBuilder.Name(prepared), prepared.SourceSnapshots, childPrepared.Source.Path);
+        ContractQueryBuilder.Name(prepared), childPrepared.DiagnosticSourceSnapshots, childPrepared.Source.Path);
       queries.Add(result);
       return result;
     }

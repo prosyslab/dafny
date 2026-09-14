@@ -8,6 +8,69 @@ using System.Text;
 
 namespace Microsoft.Dafny;
 
+internal enum PartialEvaluationProfile {
+  Default,
+  ContractConcrete
+}
+
+internal sealed class ExpressionExpansionBudget {
+  private readonly uint limit;
+
+  internal uint Used { get; private set; }
+  internal bool IsExhausted { get; private set; }
+
+  internal ExpressionExpansionBudget(uint limit) {
+    this.limit = limit;
+  }
+
+  internal bool TryReserve(Expression expression) {
+    return TryReserveNodeCount(CountExpressionNodes(expression));
+  }
+
+  internal bool TryReserveSubstitution(Expression template, IEnumerable<Expression> substitutionValues) {
+    var templateNodeCount = CountExpressionNodes(template);
+    ulong multiplier = 1;
+    foreach (var substitutionValue in substitutionValues) {
+      multiplier += CountExpressionNodes(substitutionValue);
+      if (multiplier > uint.MaxValue) {
+        IsExhausted = true;
+        return false;
+      }
+    }
+    var upperBound = (ulong)templateNodeCount * multiplier;
+    if (upperBound > uint.MaxValue) {
+      IsExhausted = true;
+      return false;
+    }
+    return TryReserveNodeCount((uint)upperBound);
+  }
+
+  private bool TryReserveNodeCount(uint nodeCount) {
+    if (nodeCount > limit - Used) {
+      IsExhausted = true;
+      return false;
+    }
+    Used += nodeCount;
+    return true;
+  }
+
+  private static uint CountExpressionNodes(Expression expression) {
+    var seen = new HashSet<Expression>();
+    var pending = new Stack<Expression>();
+    pending.Push(expression);
+    while (pending.Count > 0) {
+      var current = pending.Pop();
+      if (!seen.Add(current)) {
+        continue;
+      }
+      foreach (var child in current.SubExpressions) {
+        pending.Push(child);
+      }
+    }
+    return checked((uint)seen.Count);
+  }
+}
+
 internal sealed partial class PartialEvaluatorEngine {
   private const uint DefaultPartialEvalUnrollCap = 100;
   private readonly DafnyOptions options;
@@ -18,12 +81,19 @@ internal sealed partial class PartialEvaluatorEngine {
   private readonly uint? quantifierUnrollCapOverride;
   private readonly QuantifierExpansionBudget quantifierExpansionBudget;
   private readonly bool emitQuantifierOverflowResidual;
+  private readonly PartialEvaluationProfile evaluationProfile;
+  private readonly ExpressionExpansionBudget expressionExpansionBudget;
   private readonly HelperFunctionInterpreter helperInterpreter;
   private readonly Dictionary<string, CachedLiteral> inlineCallCache = new(StringComparer.Ordinal);
+  private readonly Dictionary<DatatypeCtor, uint> contractConcreteConstructorIds = new();
+  private uint nextContractConcreteConstructorId;
   private QuantifierBounds quantifierBounds;
 
   internal HelperFunctionInterpreter HelperInterpreter => helperInterpreter;
   internal bool InlineDepthExhausted { get; private set; }
+  internal bool UsesContractConcreteProfile => evaluationProfile == PartialEvaluationProfile.ContractConcrete;
+  internal bool ExpressionNodeLimitExhausted => expressionExpansionBudget?.IsExhausted ?? false;
+  internal uint ExpressionExpansionNodesReserved => expressionExpansionBudget?.Used ?? 0;
 
   // ------------------- Construction and entry points -------------------
 
@@ -38,7 +108,9 @@ internal sealed partial class PartialEvaluatorEngine {
   internal PartialEvaluatorEngine(DafnyOptions options, ModuleDefinition module,
     SystemModuleManager systemModuleManager, uint inlineDepth, VisibilityScope effectiveScope,
     uint? quantifierUnrollCap, QuantifierExpansionBudget quantifierExpansionBudget,
-    bool emitQuantifierOverflowResidual) {
+    bool emitQuantifierOverflowResidual,
+    PartialEvaluationProfile evaluationProfile = PartialEvaluationProfile.Default,
+    ExpressionExpansionBudget expressionExpansionBudget = null) {
     this.options = options;
     this.module = module;
     this.systemModuleManager = systemModuleManager;
@@ -47,6 +119,8 @@ internal sealed partial class PartialEvaluatorEngine {
     quantifierUnrollCapOverride = quantifierUnrollCap;
     this.quantifierExpansionBudget = quantifierExpansionBudget;
     this.emitQuantifierOverflowResidual = emitQuantifierOverflowResidual;
+    this.evaluationProfile = evaluationProfile;
+    this.expressionExpansionBudget = expressionExpansionBudget;
     helperInterpreter = new HelperFunctionInterpreter(this, systemModuleManager);
   }
 
@@ -139,7 +213,14 @@ internal sealed partial class PartialEvaluatorEngine {
       quantifierExpr,
       simplifyAfterSubst,
       out rewritten,
-      emitOverflowResidual);
+      emitOverflowResidual,
+      UsesContractConcreteProfile ? TryReserveQuantifierInstanceExpansion : null);
+  }
+
+  private bool TryReserveQuantifierInstanceExpansion(
+    Expression expression, IReadOnlyDictionary<IVariable, Expression> substitutions) {
+    return expressionExpansionBudget == null ||
+           expressionExpansionBudget.TryReserveSubstitution(expression, substitutions.Values);
   }
 
   internal uint GetQuantifierUnrollLimit() {
@@ -492,7 +573,7 @@ internal sealed partial class PartialEvaluatorEngine {
     return false;
   }
 
-  private static Expression SimplifyEquality(BinaryExpr binary, bool isEq) {
+  private Expression SimplifyEquality(BinaryExpr binary, bool isEq) {
     if (Expression.IsBoolLiteral(binary.E0, out var leftBool) && Expression.IsBoolLiteral(binary.E1, out var rightBool)) {
       return CreateBoolLiteral(binary.Origin, isEq ? leftBool == rightBool : leftBool != rightBool);
     }
@@ -507,6 +588,11 @@ internal sealed partial class PartialEvaluatorEngine {
         AllElementsAreLiterals(leftTuple.Arguments) &&
         AllElementsAreLiterals(rightTuple.Arguments)) {
       var equal = TupleLiteralsEqual(leftTuple, rightTuple);
+      return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
+    }
+    if (UsesContractConcreteProfile &&
+        IsContractConcreteValue(binary.E0) && IsContractConcreteValue(binary.E1)) {
+      var equal = AreContractConcreteExpressionsEqual(binary.E0, binary.E1);
       return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
     }
     return binary;
@@ -551,6 +637,12 @@ internal sealed partial class PartialEvaluatorEngine {
     if (TryGetSeqDisplayLiteral(binary.E0, out var leftSeq) && TryGetSeqDisplayLiteral(binary.E1, out var rightSeq) &&
         AllElementsAreLiterals(leftSeq) && AllElementsAreLiterals(rightSeq)) {
       var equal = SeqDisplayLiteralsEqual(leftSeq, rightSeq);
+      return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
+    }
+    if (UsesContractConcreteProfile &&
+        binary.E0 is SeqDisplayExpr && binary.E1 is SeqDisplayExpr &&
+        IsContractConcreteValue(binary.E0) && IsContractConcreteValue(binary.E1)) {
+      var equal = AreContractConcreteExpressionsEqual(binary.E0, binary.E1);
       return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
     }
 
@@ -764,13 +856,17 @@ internal sealed partial class PartialEvaluatorEngine {
     return binary;
   }
 
-  private static Expression SimplifyMapEquality(BinaryExpr binary, bool isEq) {
+  private Expression SimplifyMapEquality(BinaryExpr binary, bool isEq) {
     if (binary.E0 is not MapDisplayExpr leftMap || binary.E1 is not MapDisplayExpr rightMap) {
       return binary;
     }
 
     if (!TryNormalizeLiteralMapEntries(leftMap, out var leftEntries) ||
         !TryNormalizeLiteralMapEntries(rightMap, out var rightEntries)) {
+      if (UsesContractConcreteProfile && IsContractConcreteValue(leftMap) && IsContractConcreteValue(rightMap)) {
+        var contractEqual = AreContractConcreteExpressionsEqual(leftMap, rightMap);
+        return CreateBoolLiteral(binary.Origin, isEq ? contractEqual : !contractEqual);
+      }
       return binary;
     }
 
@@ -1022,6 +1118,9 @@ internal sealed partial class PartialEvaluatorEngine {
         break;
       }
     }
+    if (!hasInlineableArgument && UsesContractConcreteProfile) {
+      hasInlineableArgument = callExpr.Args.Any(IsContractConcreteValue);
+    }
     if (!hasInlineableArgument) {
       return false;
     }
@@ -1032,11 +1131,15 @@ internal sealed partial class PartialEvaluatorEngine {
     }
 
     var allInlineableArguments = AreAllInlineableArguments(callExpr.Args);
-    if (function.IsRecursive && ContainsQuantifierOrComprehension(function.Body)) {
+    var allContractConcreteArguments = UsesContractConcreteProfile &&
+      callExpr.Args.All(IsContractConcreteValue);
+    var allEligibleArguments = allInlineableArguments || allContractConcreteArguments;
+    var hasQuantifiedRecursiveBody = function.IsRecursive && ContainsQuantifierOrComprehension(function.Body);
+    if (hasQuantifiedRecursiveBody && !allContractConcreteArguments) {
       return false;
     }
 
-    if (function.IsRecursive && !allInlineableArguments && !HasCollectionLiteralArgument(callExpr.Args)) {
+    if (function.IsRecursive && !allEligibleArguments && !HasCollectionLiteralArgument(callExpr.Args)) {
       return false;
     }
 
@@ -1044,17 +1147,16 @@ internal sealed partial class PartialEvaluatorEngine {
       return true;
     }
 
-    var callKey = BuildInlineCallCycleKey(callExpr);
+    var callKey = BuildInlineCallCycleKey(callExpr, UsesContractConcreteProfile);
     if (!state.InlineCallStack.Add(callKey)) {
       return false;
     }
     var addedFunction = state.InlineStack.Add(function);
     if (!addedFunction) {
       var canContinueRecursiveInlining = function.IsRecursive &&
-        !ContainsQuantifierOrComprehension(function.Body) &&
-        HasCollectionLiteralArgument(callExpr.Args);
-      if ((!allInlineableArguments && !canContinueRecursiveInlining) ||
-          ContainsQuantifierOrComprehension(function.Body)) {
+        (HasCollectionLiteralArgument(callExpr.Args) ||
+         UsesContractConcreteProfile && hasQuantifiedRecursiveBody && allContractConcreteArguments);
+      if (!allEligibleArguments && !canContinueRecursiveInlining) {
         state.InlineCallStack.Remove(callKey);
         return false;
       }
@@ -1067,6 +1169,15 @@ internal sealed partial class PartialEvaluatorEngine {
       }
 
       Expression receiverReplacement = function.IsStatic ? null : callExpr.Receiver;
+      if (UsesContractConcreteProfile && expressionExpansionBudget != null) {
+        IEnumerable<Expression> substitutionValues = substMap.Values;
+        if (receiverReplacement != null) {
+          substitutionValues = substitutionValues.Append(receiverReplacement);
+        }
+        if (!expressionExpansionBudget.TryReserveSubstitution(function.Body, substitutionValues)) {
+          return false;
+        }
+      }
       var typeMap = callExpr.GetTypeArgumentSubstitutions();
       var substituter = new Substituter(receiverReplacement, substMap, typeMap, null, systemModuleManager);
       var body = substituter.Substitute(function.Body);
@@ -1464,7 +1575,6 @@ internal sealed partial class PartialEvaluatorEngine {
     return false;
   }
 
-
   // ------------------- Literal equality helpers -------------------
 
   private static bool AreLiteralExpressionsEqual(Expression left, Expression right) {
@@ -1699,7 +1809,7 @@ internal sealed partial class PartialEvaluatorEngine {
 
   // ------------------- Inlining cycle keys and cached literals -------------------
 
-  private static string BuildInlineCallCycleKey(FunctionCallExpr callExpr) {
+  private string BuildInlineCallCycleKey(FunctionCallExpr callExpr, bool useContractConcreteIdentity) {
     var builder = new StringBuilder();
     builder.Append(RuntimeHelpers.GetHashCode(callExpr.Function));
     builder.Append("|r=");
@@ -1709,7 +1819,9 @@ internal sealed partial class PartialEvaluatorEngine {
     builder.Append("|a=");
     for (var i = 0; i < callExpr.Args.Count; i++) {
       var arg = callExpr.Args[i];
-      if (Expression.IsIntLiteral(arg, out var intValue)) {
+      if (useContractConcreteIdentity && IsContractConcreteValue(arg)) {
+        AppendContractConcreteIdentity(builder, arg);
+      } else if (Expression.IsIntLiteral(arg, out var intValue)) {
         builder.Append("i").Append(intValue);
       } else if (Expression.IsBoolLiteral(arg, out var boolValue)) {
         builder.Append("b").Append(boolValue ? "1" : "0");
@@ -1733,6 +1845,240 @@ internal sealed partial class PartialEvaluatorEngine {
       builder.Append(string.Join(",", callExpr.TypeApplication_JustFunction.Select(t => t.ToString())));
     }
     return builder.ToString();
+  }
+
+  private static Expression NormalizeContractConcreteExpression(Expression expression) {
+    while (true) {
+      if (expression is ConcreteSyntaxExpression { ResolvedExpression: not null } concreteSyntax) {
+        expression = concreteSyntax.ResolvedExpression;
+        continue;
+      }
+      if (expression is ConversionExpr conversionExpr &&
+          TryEvaluateContractConcreteConversion(conversionExpr, out var convertedLiteral)) {
+        expression = convertedLiteral;
+        continue;
+      }
+      return expression;
+    }
+  }
+
+  private static bool TryEvaluateContractConcreteConversion(
+    ConversionExpr conversionExpr, out LiteralExpr convertedLiteral) {
+    convertedLiteral = null;
+    var targetType = conversionExpr.Type;
+    if (targetType == null) {
+      return false;
+    }
+    var constraintPreservingTargetType = targetType.NormalizeExpandKeepConstraints();
+    if (constraintPreservingTargetType.AsSubsetType != null) {
+      return false;
+    }
+    var unconstrainedTargetType = ConstantFolder.AsUnconstrainedType(constraintPreservingTargetType);
+    if (unconstrainedTargetType == null ||
+        unconstrainedTargetType is not IntType && !unconstrainedTargetType.IsBitVectorType) {
+      return false;
+    }
+
+    var operand = NormalizeContractConcreteExpression(conversionExpr.E);
+    if (operand is not LiteralExpr || operand.Type == null) {
+      return false;
+    }
+    var operandType = operand.Type;
+    if (!operandType.IsBitVectorType &&
+        !operandType.IsNumericBased(Type.NumericPersuasion.Int) &&
+        !operandType.IsCharType) {
+      return false;
+    }
+
+    var conversionToFold = ReferenceEquals(operand, conversionExpr.E)
+      ? conversionExpr
+      : new ConversionExpr(conversionExpr.Origin, operand, targetType) { Type = targetType };
+    if (ConstantFolder.TryFoldInteger(conversionToFold) is not { } value) {
+      return false;
+    }
+
+    convertedLiteral = CreateIntLiteral(conversionExpr.Origin, value, targetType);
+    return true;
+  }
+
+  private static bool IsContractConcreteValue(Expression expression) {
+    expression = NormalizeContractConcreteExpression(expression);
+    if (expression is LiteralExpr) {
+      return true;
+    }
+    if (expression is SeqDisplayExpr sequence) {
+      return sequence.Elements.All(IsContractConcreteValue);
+    }
+    if (expression is SetDisplayExpr set) {
+      return set.Elements.All(IsContractConcreteValue);
+    }
+    if (expression is MultiSetDisplayExpr multiset) {
+      return multiset.Elements.All(IsContractConcreteValue);
+    }
+    if (expression is MapDisplayExpr map) {
+      return map.Finite && map.Elements.All(entry =>
+        IsContractConcreteValue(entry.A) && IsContractConcreteValue(entry.B));
+    }
+    return expression is DatatypeValue { Ctor: not null } datatype &&
+           datatype.Arguments.All(IsContractConcreteValue);
+  }
+
+  private static bool AreContractConcreteExpressionsEqual(Expression left, Expression right) {
+    left = NormalizeContractConcreteExpression(left);
+    right = NormalizeContractConcreteExpression(right);
+    if (left is DatatypeValue leftDatatype && right is DatatypeValue rightDatatype) {
+      return ReferenceEquals(leftDatatype.Ctor, rightDatatype.Ctor) &&
+             leftDatatype.Arguments.Count == rightDatatype.Arguments.Count &&
+             leftDatatype.Arguments.Zip(rightDatatype.Arguments)
+               .All(arguments => AreContractConcreteExpressionsEqual(arguments.First, arguments.Second));
+    }
+    if (left is SeqDisplayExpr leftSequence && right is SeqDisplayExpr rightSequence) {
+      return leftSequence.Elements.Count == rightSequence.Elements.Count &&
+             leftSequence.Elements.Zip(rightSequence.Elements)
+               .All(elements => AreContractConcreteExpressionsEqual(elements.First, elements.Second));
+    }
+    if (left is SetDisplayExpr leftSet && right is SetDisplayExpr rightSet) {
+      return ContractConcreteSetEquals(leftSet.Elements, rightSet.Elements);
+    }
+    if (left is MultiSetDisplayExpr leftMultiset && right is MultiSetDisplayExpr rightMultiset) {
+      return ContractConcreteMultisetEquals(leftMultiset.Elements, rightMultiset.Elements);
+    }
+    if (left is MapDisplayExpr leftMap && right is MapDisplayExpr rightMap) {
+      return ContractConcreteMapEquals(leftMap, rightMap);
+    }
+    return AreLiteralExpressionsEqual(left, right);
+  }
+
+  private static bool ContractConcreteSetEquals(IReadOnlyList<Expression> left, IReadOnlyList<Expression> right) {
+    var comparer = ContractConcreteExpressionEqualityComparer.Instance;
+    return new HashSet<Expression>(left, comparer).SetEquals(new HashSet<Expression>(right, comparer));
+  }
+
+  private static bool ContractConcreteMultisetEquals(
+    IReadOnlyList<Expression> left, IReadOnlyList<Expression> right) {
+    var comparer = ContractConcreteExpressionEqualityComparer.Instance;
+    var counts = new Dictionary<Expression, int>(comparer);
+    foreach (var expression in left) {
+      counts.TryGetValue(expression, out var count);
+      counts[expression] = count + 1;
+    }
+    foreach (var expression in right) {
+      if (!counts.TryGetValue(expression, out var count)) {
+        return false;
+      }
+      if (count == 1) {
+        counts.Remove(expression);
+      } else {
+        counts[expression] = count - 1;
+      }
+    }
+    return counts.Count == 0;
+  }
+
+  private static bool ContractConcreteMapEquals(MapDisplayExpr left, MapDisplayExpr right) {
+    if (!TryNormalizeContractConcreteMapEntries(left, out var leftEntries) ||
+        !TryNormalizeContractConcreteMapEntries(right, out var rightEntries) ||
+        leftEntries.Count != rightEntries.Count) {
+      return false;
+    }
+    var rightByKey = new Dictionary<Expression, Expression>(ContractConcreteExpressionEqualityComparer.Instance);
+    foreach (var entry in rightEntries) {
+      rightByKey[entry.A] = entry.B;
+    }
+    return leftEntries.All(entry => rightByKey.TryGetValue(entry.A, out var rightValue) &&
+                                    AreContractConcreteExpressionsEqual(entry.B, rightValue));
+  }
+
+  private static bool TryNormalizeContractConcreteMapEntries(
+    MapDisplayExpr map, out List<MapDisplayEntry> normalizedEntries) {
+    normalizedEntries = null;
+    if (!IsContractConcreteValue(map)) {
+      return false;
+    }
+    normalizedEntries = [];
+    var indexByKey = new Dictionary<Expression, int>(ContractConcreteExpressionEqualityComparer.Instance);
+    foreach (var entry in map.Elements) {
+      if (indexByKey.TryGetValue(entry.A, out var existingIndex)) {
+        normalizedEntries[existingIndex] = new MapDisplayEntry(entry.A, entry.B);
+      } else {
+        indexByKey[entry.A] = normalizedEntries.Count;
+        normalizedEntries.Add(new MapDisplayEntry(entry.A, entry.B));
+      }
+    }
+    return true;
+  }
+
+  private void AppendContractConcreteIdentity(StringBuilder builder, Expression expression) {
+    expression = NormalizeContractConcreteExpression(expression);
+    switch (expression) {
+      case DatatypeValue datatype:
+        builder.Append("d").Append(GetContractConcreteConstructorId(datatype.Ctor)).Append("[");
+        AppendContractConcreteIdentities(builder, datatype.Arguments);
+        builder.Append("]");
+        return;
+      case SeqDisplayExpr sequence:
+        builder.Append("q[");
+        AppendContractConcreteIdentities(builder, sequence.Elements);
+        builder.Append("]");
+        return;
+      case SetDisplayExpr set:
+        AppendOrderIndependentConcreteIdentity(builder, "e", set.Elements);
+        return;
+      case MultiSetDisplayExpr multiset:
+        AppendOrderIndependentConcreteIdentity(builder, "u", multiset.Elements);
+        return;
+      case MapDisplayExpr map when TryNormalizeContractConcreteMapEntries(map, out var entries):
+        var mapParts = entries.Select(entry => {
+          var part = new StringBuilder();
+          AppendContractConcreteIdentity(part, entry.A);
+          part.Append("=");
+          AppendContractConcreteIdentity(part, entry.B);
+          return part.ToString();
+        }).OrderBy(part => part, StringComparer.Ordinal);
+        builder.Append("m{").Append(string.Join(";", mapParts)).Append("}");
+        return;
+      case StringLiteralExpr stringLiteral when stringLiteral.Value is string value:
+        builder.Append("s").Append(value.Length).Append(":").Append(value)
+          .Append(stringLiteral.IsVerbatim ? "v" : "e");
+        return;
+      case LiteralExpr literal:
+        builder.Append("l").Append(literal.Value?.GetType().FullName).Append(":")
+          .Append(literal.Value);
+        return;
+      default:
+        builder.Append("x");
+        return;
+    }
+  }
+
+  private void AppendContractConcreteIdentities(StringBuilder builder, IEnumerable<Expression> expressions) {
+    var first = true;
+    foreach (var expression in expressions) {
+      if (!first) {
+        builder.Append(",");
+      }
+      AppendContractConcreteIdentity(builder, expression);
+      first = false;
+    }
+  }
+
+  private void AppendOrderIndependentConcreteIdentity(
+    StringBuilder builder, string prefix, IEnumerable<Expression> expressions) {
+    var parts = expressions.Select(expression => {
+      var part = new StringBuilder();
+      AppendContractConcreteIdentity(part, expression);
+      return part.ToString();
+    }).OrderBy(part => part, StringComparer.Ordinal);
+    builder.Append(prefix).Append("{").Append(string.Join(";", parts)).Append("}");
+  }
+
+  private uint GetContractConcreteConstructorId(DatatypeCtor constructor) {
+    if (contractConcreteConstructorIds.TryGetValue(constructor, out var id)) {
+      return id;
+    }
+    id = nextContractConcreteConstructorId++;
+    contractConcreteConstructorIds.Add(constructor, id);
+    return id;
   }
 
   // ------------------- Cached literal representation -------------------
@@ -1791,6 +2137,76 @@ internal sealed partial class PartialEvaluatorEngine {
   }
 
   // ------------------- Hash-based literal collections -------------------
+
+  private sealed class ContractConcreteExpressionEqualityComparer : IEqualityComparer<Expression> {
+    public static readonly ContractConcreteExpressionEqualityComparer Instance = new();
+
+    public bool Equals(Expression x, Expression y) {
+      if (ReferenceEquals(x, y)) {
+        return true;
+      }
+      return x != null && y != null && AreContractConcreteExpressionsEqual(x, y);
+    }
+
+    public int GetHashCode(Expression expression) {
+      if (expression == null) {
+        return 0;
+      }
+      expression = NormalizeContractConcreteExpression(expression);
+      if (expression is DatatypeValue datatype) {
+        var hash = new HashCode();
+        hash.Add(typeof(DatatypeValue));
+        hash.Add(datatype.Ctor);
+        foreach (var argument in datatype.Arguments) {
+          hash.Add(GetHashCode(argument));
+        }
+        return hash.ToHashCode();
+      }
+      if (expression is SeqDisplayExpr sequence) {
+        var hash = new HashCode();
+        hash.Add(typeof(SeqDisplayExpr));
+        foreach (var element in sequence.Elements) {
+          hash.Add(GetHashCode(element));
+        }
+        return hash.ToHashCode();
+      }
+      if (expression is SetDisplayExpr set) {
+        return ComputeOrderIndependentHash(typeof(SetDisplayExpr),
+          new HashSet<Expression>(set.Elements, this));
+      }
+      if (expression is MultiSetDisplayExpr multiset) {
+        var counts = new Dictionary<Expression, int>(this);
+        foreach (var element in multiset.Elements) {
+          counts.TryGetValue(element, out var count);
+          counts[element] = count + 1;
+        }
+        return ComputeOrderIndependentHash(typeof(MultiSetDisplayExpr), counts.Select(entry =>
+          HashCode.Combine(GetHashCode(entry.Key), entry.Value)));
+      }
+      if (expression is MapDisplayExpr map && TryNormalizeContractConcreteMapEntries(map, out var entries)) {
+        return ComputeOrderIndependentHash(typeof(MapDisplayExpr), entries.Select(entry =>
+          HashCode.Combine(GetHashCode(entry.A), GetHashCode(entry.B))));
+      }
+      return LiteralExpressionEqualityComparer.Instance.GetHashCode(expression);
+    }
+
+    private static int ComputeOrderIndependentHash(System.Type expressionType, IEnumerable<Expression> expressions) {
+      return ComputeOrderIndependentHash(expressionType,
+        expressions.Select(Instance.GetHashCode));
+    }
+
+    private static int ComputeOrderIndependentHash(System.Type expressionType, IEnumerable<int> hashes) {
+      var count = 0;
+      var sum = 0;
+      var xor = 0;
+      foreach (var hash in hashes) {
+        count++;
+        sum = unchecked(sum + hash);
+        xor ^= hash;
+      }
+      return HashCode.Combine(expressionType, count, sum, xor);
+    }
+  }
 
   private sealed class LiteralExpressionEqualityComparer : IEqualityComparer<Expression> {
     public static readonly LiteralExpressionEqualityComparer Instance = new();
@@ -1875,10 +2291,11 @@ internal sealed partial class PartialEvaluatorEngine {
         }
         return HashCode.Combine(typeof(MapDisplayExpr), normalizedEntries.Count, sum, xor);
       }
-      if (TryGetTupleLiteral(expr, out var tuple)) {
+      if (TryGetTupleLiteral(expr, out var datatype)) {
         var hash = new HashCode();
         hash.Add(typeof(DatatypeValue));
-        foreach (var arg in tuple.Arguments) {
+        hash.Add(datatype.Ctor);
+        foreach (var arg in datatype.Arguments) {
           hash.Add(ComputeHash(arg));
         }
         return hash.ToHashCode();
