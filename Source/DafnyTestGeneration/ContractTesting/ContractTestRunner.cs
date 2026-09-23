@@ -155,7 +155,7 @@ public sealed class ContractTestRunner(IContractProgramCompiler compiler) {
         prepared.Method.EnclosingClass.EnclosingModuleDefinition.FullDafnyName);
       var query = await ContractSolver.CheckAsync(ContractQueryBuilder.Build(prepared, request, kind, outputs, negate, finalObservations, choices),
         kind, prepared.Program.Options, cancellationToken, queryName: ContractQueryBuilder.Name(prepared),
-        sourceSnapshots: prepared.SourceSnapshots, sourcePath: prepared.Source.Path);
+        sourceSnapshots: prepared.DiagnosticSourceSnapshots, sourcePath: prepared.Source.Path);
       queries.Add(query);
       return query;
     }

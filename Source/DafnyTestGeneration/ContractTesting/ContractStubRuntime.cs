@@ -12,6 +12,7 @@ namespace DafnyTestGeneration.ContractTesting;
 public static class ContractStubRuntime {
   public static string BridgeSource(string observationPath, ContractPreparedProgram prepared) {
     var program = prepared.Program;
+    var trackedGhostFields = prepared.Heap?.TrackedGhostFields ?? new HashSet<Field>();
     var concreteTypes = prepared.ConcreteCalls.ToDictionary(pair => pair.Key,
       pair => pair.Value.ConcreteTypeArguments.Select(type => type.ToString()).ToList());
     string RuntimeTypeName(TopLevelDecl declaration) =>
@@ -29,7 +30,8 @@ public static class ContractStubRuntime {
             mutable = field.IsMutable,
             shape = TypeShape(field.Type)
           }).ToList(),
-        logicalFields = declaration.Members.OfType<Field>().Where(field => field.IsGhost && !field.IsStatic)
+        logicalFields = declaration.Members.OfType<Field>().Where(field =>
+            field.IsGhost && !field.IsStatic && trackedGhostFields.Contains(field))
           .Select(field => new { name = field.Name, mutable = field.IsMutable }).ToList()
       }).ToList();
     var shapes = program.RawModules().SelectMany(module => module.TopLevelDecls).OfType<DatatypeDecl>()
@@ -729,14 +731,14 @@ public sealed class ContractRuntimeSession {
       child.Method.EnclosingClass.EnclosingModuleDefinition.FullDafnyName);
     var premise = await ContractSolver.CheckAsync(ContractQueryBuilder.Build(child, childRequest, ContractQueryKind.PremiseConsistency, choiceConstraints: choices),
       ContractQueryKind.PremiseConsistency, prepared.Program.Options, cancellationToken, queryName: ContractQueryBuilder.Name(child),
-      sourceSnapshots: child.SourceSnapshots, sourcePath: child.Source.Path);
+      sourceSnapshots: child.DiagnosticSourceSnapshots, sourcePath: child.Source.Path);
     queries.Add(premise);
     if (premise.Outcome != ContractQueryOutcome.Sat) {
       return new(ContractRealizationStatus.Inconclusive, null, queries, "Call-state premise was not established satisfiable before body entry.");
     }
     var check = await ContractSolver.CheckAsync(ContractQueryBuilder.Build(child, childRequest, ContractQueryKind.CallPrecondition, choiceConstraints: choices),
       ContractQueryKind.CallPrecondition, prepared.Program.Options, cancellationToken, queryName: ContractQueryBuilder.Name(child),
-      sourceSnapshots: child.SourceSnapshots, sourcePath: child.Source.Path);
+      sourceSnapshots: child.DiagnosticSourceSnapshots, sourcePath: child.Source.Path);
     queries.Add(check);
     if (check.Outcome == ContractQueryOutcome.Unsat) {
       return new(ContractRealizationStatus.Realized, new Dictionary<string, ContractValue>(), queries, "Call precondition holds before body entry.");
@@ -744,7 +746,7 @@ public sealed class ContractRuntimeSession {
     if (check.Outcome == ContractQueryOutcome.Sat) {
       var opposite = await ContractSolver.CheckAsync(ContractQueryBuilder.Build(child, childRequest, ContractQueryKind.CallPrecondition, negate: true, choiceConstraints: choices),
         ContractQueryKind.CallPrecondition, prepared.Program.Options, cancellationToken, queryName: ContractQueryBuilder.Name(child),
-        sourceSnapshots: child.SourceSnapshots, sourcePath: child.Source.Path);
+        sourceSnapshots: child.DiagnosticSourceSnapshots, sourcePath: child.Source.Path);
       queries.Add(opposite);
       if (opposite.Outcome == ContractQueryOutcome.Unsat) {
         return new(ContractRealizationStatus.CallPreconditionViolation, null, queries, "Call precondition is false before body entry.");
