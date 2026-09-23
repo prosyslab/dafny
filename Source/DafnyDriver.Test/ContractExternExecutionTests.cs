@@ -14,6 +14,62 @@ using Xunit;
 namespace DafnyDriver.Test;
 
 public class ContractExternExecutionTests {
+  // A diagnostic executable realizes an object while omitting an irrelevant ghost function-valued field.
+  [Fact]
+  public async Task DiagnosticExecutableSupportsPartialLogicalHeap() {
+    var directory = Path.Combine(Path.GetTempPath(), "contract-partial-heap-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(directory);
+    try {
+      const string source = """
+        module PartialHeap {
+          class Box {
+            ghost var callback: int -> int
+            ghost var counter: int
+            var value: int
+          }
+          method {:extern} Advance(box: Box)
+            modifies box
+            ensures box.counter == old(box.counter) + 1 && box.value == old(box.value)
+          method Entry(box: Box) returns (result: int)
+            modifies box
+            ensures result == box.value && box.counter == old(box.counter) + 1
+          {
+            Advance(box);
+            result := box.value;
+          }
+        }
+        """;
+      var sourcePath = Path.Combine(directory, "program.dfy");
+      var request = new ContractTestRequest(ContractJson.SchemaVersion,
+        [new(sourcePath, source, ContractHarnessBuilder.Hash(source))], new("PartialHeap.Entry"),
+        new Dictionary<string, ContractValue> { ["box"] = new(ContractValueKind.Reference, "box") },
+        [new("box", "PartialHeap.Box", new Dictionary<string, ContractValue> {
+          ["counter"] = new(ContractValueKind.Integer, "3"),
+          ["value"] = new(ContractValueKind.Integer, "7")
+        })], TimeoutMilliseconds: 60000);
+      var options = new DafnyOptions(DafnyOptions.Default);
+      options.ApplyDefaultOptionsWithoutSettingsDefault();
+      using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+      var prepared = await ContractCompilerWorker.ParseAsync(request, options, timeout.Token);
+
+      var result = await new ContractTestRunner(new DriverContractProgramCompiler())
+        .RunAsync(prepared, request, Path.Combine(directory, "output"), timeout.Token);
+
+      Assert.True(result.Status == ContractTestStatus.Passed,
+        $"{result.Status}: {result.Reason}\n{result.StandardError}");
+      Assert.Equal(new ContractValue(ContractValueKind.Integer, "7"), result.Outputs!["result"]);
+      var initial = Assert.Single(result.InitialHeap!);
+      Assert.Equal(["counter", "value"], initial.Fields.Keys);
+      Assert.Equal(new ContractValue(ContractValueKind.Integer, "3"), initial.Fields["counter"]);
+      var final = Assert.Single(result.FinalHeap!);
+      Assert.Equal(["counter", "value"], final.Fields.Keys);
+      Assert.Equal(new ContractValue(ContractValueKind.Integer, "4"), final.Fields["counter"]);
+    }
+    finally {
+      Directory.Delete(directory, true);
+    }
+  }
+
   // The compiler worker executes the contract model while a linked native extern remains observably uncalled.
   [Fact]
   public async Task DiagnosticExecutableDoesNotInvokeNativeExtern() {
