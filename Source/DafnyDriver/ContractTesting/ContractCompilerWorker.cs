@@ -35,9 +35,35 @@ public static class ContractCompilerWorker {
     await File.WriteAllTextAsync(observationPath, "", cancellationToken);
     var bridgePath = Path.Combine(request.OutputDirectory, "ContractBridge.cs");
     await File.WriteAllTextAsync(bridgePath, ContractStubRuntime.BridgeSource(observationPath, prepared), cancellationToken);
+    return await CompileSourcesAsync(sources, source, request.Test.Dependencies, request.OutputDirectory,
+      bridgePath, observationPath, prepared.Location,
+      ContractHarnessBuilder.QualifiedDiagnosticName(prepared, ContractHarnessBuilder.MainName), options, cancellationToken);
+  }
+
+  public static async Task<ContractCompileResult> CompileRuntimeAsync(ContractRuntimeTransformation transformation,
+    ContractRuntimeCampaignRequest request, string outputDirectory, DafnyOptions options, CancellationToken cancellationToken) {
+    Directory.CreateDirectory(outputDirectory);
+    await File.WriteAllTextAsync(Path.Combine(outputDirectory, "NuGet.Config"),
+      "<configuration><packageSources><clear /></packageSources></configuration>", cancellationToken);
+    await File.WriteAllTextAsync(Path.Combine(outputDirectory, "Directory.Build.props"),
+      "<Project><PropertyGroup><UseSharedCompilation>false</UseSharedCompilation></PropertyGroup></Project>", cancellationToken);
+    options.Set(CommonOptionBag.OptimizeErasableDatatypeWrapper, false);
+    var observationPath = Path.Combine(outputDirectory, "observations.jsonl");
+    var bridgePath = Path.Combine(outputDirectory, "ContractBridge.cs");
+    await File.WriteAllTextAsync(bridgePath,
+      ContractRuntimeInstrumentation.BridgeSource(observationPath, transformation), cancellationToken);
+    var source = ContractSourceSnapshot.Find(transformation.Sources, transformation.Prepared.Method.Origin.Uri).Content;
+    return await CompileSourcesAsync(transformation.Sources, source, request.Dependencies, outputDirectory,
+      bridgePath, observationPath, transformation.Prepared.Location, transformation.MainName, options, cancellationToken);
+  }
+
+  private static async Task<ContractCompileResult> CompileSourcesAsync(IReadOnlyList<ContractSource> sources,
+    string source, IReadOnlyList<ContractDependency> sourceDependencies, string outputDirectory,
+    string bridgePath, string observationPath, ContractSourceLocation location, string mainName,
+    DafnyOptions options, CancellationToken cancellationToken) {
     var dependencies = new List<string> { bridgePath };
     var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ContractBridge.cs", "diagnostic.dll", "DafnyRuntime.dll" };
-    foreach (var dependency in request.Test.Dependencies ?? []) {
+    foreach (var dependency in sourceDependencies ?? []) {
       var name = Path.GetFileName(dependency.Path);
       if (Path.GetExtension(name) is not (".cs" or ".dll") || !names.Add(name)) {
         throw new ArgumentException("Unsupported or conflicting dependency file name: " + name);
@@ -46,13 +72,13 @@ public static class ContractCompilerWorker {
       if (Convert.ToHexString(SHA256.HashData(content)).ToLowerInvariant() != dependency.Sha256) {
         throw new ArgumentException("Dependency hash mismatch: " + name);
       }
-      var staged = Path.Combine(request.OutputDirectory, name);
+      var staged = Path.Combine(outputDirectory, name);
       await File.WriteAllBytesAsync(staged, content, cancellationToken);
       dependencies.Add(staged);
     }
-    var diagnosticPath = Path.Combine(request.OutputDirectory, "diagnostic.dfy");
+    var diagnosticPath = Path.Combine(outputDirectory, "diagnostic.dfy");
     await File.WriteAllTextAsync(diagnosticPath, source, cancellationToken);
-    options.MainMethod = ContractHarnessBuilder.QualifiedDiagnosticName(prepared, ContractHarnessBuilder.MainName);
+    options.MainMethod = mainName;
     options.Compile = true;
     options.RunAfterCompile = false;
     options.ForceCompile = true;
@@ -62,25 +88,28 @@ public static class ContractCompilerWorker {
     var program = await ContractSourceSnapshot.ParseAsync(reporter, sources, cancellationToken);
     if (reporter.ErrorCount > 0) {
       return new ContractCompileResult(ContractJson.SchemaVersion, ContractTestStatus.Error,
-        string.Join("\n", reporter.AllMessages.Select(message => message.Message)), Entry: prepared.Location);
+        string.Join("\n", reporter.AllMessages.Select(message => message.Message)), Entry: location);
     }
     if (!SinglePassCodeGenerator.HasMain(program, out var main) || main.FullDafnyName != options.MainMethod) {
       return new ContractCompileResult(ContractJson.SchemaVersion, ContractTestStatus.Error,
-        "Compiler did not select the diagnostic main.", Entry: prepared.Location);
+        "Compiler did not select the diagnostic main.", Entry: location);
     }
+    using var compilerOutput = new StringWriter();
+    var compilerWriter = new DafnyOptions(TextReader.Null, compilerOutput, compilerOutput).OutputWriter;
     if (!await SynchronousCliCompilation.CompileDafnyProgram(program, diagnosticPath,
-          new ReadOnlyCollection<string>(dependencies), true)) {
+          new ReadOnlyCollection<string>(dependencies), true, compilerWriter)) {
       return new ContractCompileResult(ContractJson.SchemaVersion, ContractTestStatus.Error,
-        "Diagnostic compilation failed: " + string.Join("\n", reporter.AllMessages.Select(message => message.Message)), Entry: prepared.Location);
+        "Diagnostic compilation failed: " + compilerOutput + "\n" +
+        string.Join("\n", reporter.AllMessages.Where(message => message.Level == ErrorLevel.Error).Select(message => message.Message)), Entry: location);
     }
-    var assemblyPath = Path.Combine(request.OutputDirectory, "diagnostic.dll");
-    if (!File.Exists(assemblyPath) || !File.Exists(Path.Combine(request.OutputDirectory, "diagnostic.runtimeconfig.json"))) {
+    var assemblyPath = Path.Combine(outputDirectory, "diagnostic.dll");
+    if (!File.Exists(assemblyPath) || !File.Exists(Path.Combine(outputDirectory, "diagnostic.runtimeconfig.json"))) {
       return new ContractCompileResult(ContractJson.SchemaVersion, ContractTestStatus.Error,
-        "Compiler did not emit an executable assembly and runtime configuration.", Entry: prepared.Location);
+        "Compiler did not emit an executable assembly and runtime configuration.", Entry: location);
     }
     var assemblyHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(assemblyPath, cancellationToken))).ToLowerInvariant();
     return new ContractCompileResult(ContractJson.SchemaVersion, ContractTestStatus.Passed, "Compiled diagnostic copy.",
-      assemblyPath, assemblyHash, observationPath, prepared.Location);
+      assemblyPath, assemblyHash, observationPath, location);
   }
 
   public static async Task<ContractPreparedProgram> ParseAsync(ContractTestRequest request,

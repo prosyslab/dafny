@@ -658,7 +658,8 @@ namespace Microsoft.Dafny {
     /// the target language compiler to compile it.
     /// </summary>
     public static async Task<bool> CompileDafnyProgram(Program dafnyProgram, string dafnyProgramName,
-                                           ReadOnlyCollection<string> otherFileNames, bool invokeCompiler) {
+                                           ReadOnlyCollection<string> otherFileNames, bool invokeCompiler,
+                                           IDafnyOutputWriter outputWriter = null) {
       var rewriters = RewriterCollection.GetRewriters(dafnyProgram.Reporter, dafnyProgram);
       foreach (var rewriter in rewriters) {
         rewriter.PostVerification(dafnyProgram);
@@ -667,7 +668,7 @@ namespace Microsoft.Dafny {
       Contract.Requires(dafnyProgram != null);
       Contract.Assert(dafnyProgramName != null);
 
-      var outputWriter = dafnyProgram.Options.OutputWriter;
+      outputWriter ??= dafnyProgram.Options.OutputWriter;
       var errorWriter = dafnyProgram.Options.ErrorWriter;
 
       // Compile the Dafny program into a string that contains the target program
@@ -725,7 +726,7 @@ namespace Microsoft.Dafny {
 
       var targetPaths = GenerateTargetPaths(options, dafnyProgramName);
       if (dafnyProgram.Reporter.FailCompilation) {
-        await dafnyProgram.Options.OutputWriter.Status($"Translation was aborted because {dafnyProgram.Reporter.FailCompilationMessage}");
+        await outputWriter.Status($"Translation was aborted because {dafnyProgram.Reporter.FailCompilationMessage}");
         return false;
       }
       // blurt out the code to a file, if requested, or if other target-language files were specified on the command line.

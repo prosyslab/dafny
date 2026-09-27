@@ -100,7 +100,8 @@ public static class ContractSolver {
     var verified = 0;
     var errors = 0;
     var selectedModules = new System.Collections.Generic.List<string>();
-    foreach (var (module, program) in BoogieGenerator.Translate(programSource, reporter)) {
+    // Translation keeps thread-static type-scope state, so it finishes on this thread before any awaited verification.
+    foreach (var (module, program) in BoogieGenerator.Translate(programSource, reporter).ToList()) {
       selectedModules.Add(module + "[" + string.Join(", ", program.Implementations.Select(implementation => implementation.Name)) + "]");
       cancellationToken.ThrowIfCancellationRequested();
       var (outcome, stats) = await DafnyMain.BoogieOnce(reporter, options, log, engine,

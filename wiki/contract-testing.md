@@ -298,3 +298,278 @@ The Java runtime can build offline using a writable copy of the installed Gradle
 cache, but Gradle and the .NET test runner require their local communication
 permissions. The final environment used .NET SDK 8.0.131 and system Z3 4.8.12. These environment facts
 are not proof or experiment results.
+
+## Runtime obligation checking (verified development snapshot)
+
+- Status: authorized implementation complete with bounded independent verification; support limits below remain explicit. Original fixed/generation/symbolic modes remain separate.
+- Origin: [runtime obligation plan](../plan/2026-09-26-runtime-obligation-checking.md).
+- Verified locally: 2026-09-27, working tree based on `f775837e648a3aede8521a99904fa744b4b8d4c1`.
+
+The final root r5 evaluation and independent artifact audit are complete:
+[offline results and limitations](../../../wiki/experiments/pbt-offline-evaluation.md).
+M1 detects 6/6 injected implementation mutants, with no spurious report on five
+included proof gaps; one verifying proof gap is excluded. All eight M2 campaigns
+are unsupported before sampling because the unchanged IO drafts call ghost
+functions in executable contexts. Their evaluable denominators are zero, and
+their rates are null. This is the recorded IO limitation, not operational IO
+acceptance; the original `IO.Init requires false` remains unchanged. These local
+catalog results do not establish agent performance or general correctness.
+
+`test-contracts request.json --runtime-check` accepts the version-1 runtime campaign
+wire contract in `ContractRuntimeModels.cs`. It executes a model-supplied Dafny
+generator and a detached diagnostic copy, once per sample ordinal in separate
+processes. The fixed seed/ordinal random stream uses the existing counter-stream
+byte layout with the `pbt-random` domain. The original source snapshots, benchmark
+contracts, candidate files, and evaluator results are not changed.
+
+The diagnostic preserves compilable ghost values and functions, strips proof-only
+statements, and wraps entry/callee contracts. Loop entry, repeated loop heads, and
+the final normal loop head are checked; a break does not create a final invariant
+obligation. Runtime checks record concrete observations. Non-executable clauses
+with capturable values use a bounded, deduplicated closed query whose only
+premises bind those values. Unavailable values, heap-dependent residual clauses,
+solver uncertainty, and query exhaustion remain `unchecked` with explicit reasons.
+This is a runtime counterexample diagnostic, not verification and not an assertion,
+frame, or termination checker.
+
+Entry precondition rejection and unchecked preconditions are excluded from valid
+samples. Callee contract violations/uncertainty, runtime failures, and sample
+timeouts are counted separately. A false direct-call precondition terminates the
+runtime sample before executing a callee outside its domain. Nested helper calls
+are checked for executable preconditions and callee postconditions. Only valid
+samples contribute goal violations, and zero valid samples is inconclusive.
+
+Draft preparation retains the original contract and replaces only missing/scaffold
+implementations after signature checking. Imported native extern bindings are
+removed on replaced diagnostic declarations. Generator formals match the goal's
+inputs, including compilable ghost formals and an instance receiver. Diagnostic
+source mapping uses byte-offset segments to recover the supplied original source
+path, line, column and hash after draft/generator insertion.
+
+The first full build passed with zero warnings/errors. The initial behavioral
+checkpoint passed 20 Driver execution tests, 7 transformation/wire tests, and 9
+source-preparation tests. Follow-up tests found an invalid export fixture and a
+real imported-static-receiver rendering issue; the plan records later corrections
+and exact test counts. Actual root offline probes also exposed a parser-recovery
+bug: parsing failures leave `Program.ModuleSigs` unset, so recovery must not call
+`RawModules()` before resolution exists. The worker now returns those parser
+diagnostics and preserves `transformed-sources.json` for general fixture reduction.
+No paid provider calls were made.
+
+Known current limits include generic wrapper specialization, collection-valued
+`unchanged` frames, independently unavailable ghost values, nested helper
+preconditions requiring a non-runtime decision, and construction of arbitrary
+function-valued ghost regions. These produce unsupported/unchecked diagnostics.
+The completed root offline evaluation and bounded independent reviews retain
+these limits.
+
+### T8 follow-up findings (H-E1–H-E5, 2026-09-26, implementation checks; independent review pending)
+
+- Diagnostic scope follows the native call graph rooted at the goal (or its original
+  function-by-method) and the generator. Only reachable ghost constructors, fields and
+  functions become executable; unrelated logical initialization (for example a
+  `requires false` constructor allocating ghost regions) stays ghost. Unreachable
+  non-ghost method/function/by-method bodies become runtime traps, so unrelated native
+  `{:extern}` users need no C# implementation. Contracts, constructors and overrides are
+  not rewritten. A trap that executes is a runtime error, never a valid sample.
+- Ghost fields actually compiled by the diagnostic are passed to the runtime bridge and
+  captured as flat `name.field` values; reference values still carry no `fields`.
+- A function-by-method goal additionally checks `result == <original definition>` as a
+  `postcondition` obligation located at the definition text, with the definition value in
+  `values` under `Goal(args)`. Goal-function calls inside obligations evaluate a compiled
+  copy of the definition, never the implementation under test; a non-compilable
+  definition makes such clauses non-runtime.
+- Top-level calls of contract-bearing, non-generic compiled functions inside goal
+  obligations go through one validity wrapper per function: evaluable `requires` must
+  hold (otherwise runtime error) and `ensures` are `callee_postcondition` obligations, so
+  a wrong spec function invalidates the sample instead of producing a goal violation.
+  This initial restriction was superseded by R-1–R-4 below: generic and nested spec calls are wrapped too.
+- Native AST facts: a `reveal`/`hide` statement range excludes its semicolon; members of
+  a parse-only program have no enclosing class, so `FullDafnyName` is unavailable; a
+  resolved by-method call statement keeps untyped call syntax beside its `CallStmt`, and
+  calling `.Resolved` on it fails a debug assertion.
+- Evidence (source working tree, Debug test build): Driver `~ContractRuntime` 46/46,
+  TestGeneration `~Contract` 279/279, Driver `~Contract` 50/50, Core reducer 27/27; details
+  and probe results are in the plan progress log.
+
+### Verifier follow-up findings (D-0–D-15, 2026-09-27, implementation checks; independent review pending)
+
+- Native facts: the resolver stores a trigger-split form of quantifiers, and `Printer`/`Substituter` emit that form;
+  `forall e :: e in r ==> A && B` then prints as a conjunction of separately ranged implications, which is not
+  compilable. Ghost inference silently turns such a check's local into ghost code, so the check disappears from the
+  compiled program without a resolver error. Runtime rendering therefore rebuilds the unsplit quantifier.
+- Structural safety net: after each diagnostic resolve the runner collects `PbtBridge.Check`/`Checkpoint` id literals
+  from compiled (non-ghost) code. Any obligation missing there is re-transformed as a closed query, then as unchecked
+  (`runtime_check_not_compiled`); a rendered check that fails to resolve falls back the same way. Valid samples
+  support `no_violation_found` only when a goal obligation was decided in them.
+- Closed queries decide a violation only when the negated clause is proven under the captured values; unprovable or
+  timed-out clauses are unchecked. Solver evaluation uses function bodies, so closed clauses calling
+  contract-bearing functions never indict the goal (`callee_contract_unvalidated`).
+- Declared subset/newtype constraints of goal inputs/outputs and callee inputs/outputs are runtime obligations via a
+  generated membership predicate placed beside the type and called through the call site's import name (resolved
+  type names lose their written qualifier). Non-null reference types are subset types natively; the initial exclusion was superseded by R-6 explicit checks below.
+- Execution reachability adds edges the native call graph omits: trait members to overrides, subset/newtype
+  constraints and witnesses of used types, and class constant initializers read by object capture. Abstract trait
+  members are never drafted. Missing drafts are limited to supplied sources and reported at original locations.
+- A resolver error in an imported module (for example a draft body that uses ghost state) leaves dependent modules
+  unregistered (members without an enclosing class); the runner reports this as `unsupported` with draft/generator
+  locations instead of searching the partial program.
+- `BoogieGenerator.Translate` keeps thread-static type-scope state; enumerating it lazily across awaits can fail an
+  assertion under concurrency, so `ContractSolver` materializes the translation first.
+- Evidence and probe outcomes: plan progress log entries dated 2026-09-27.
+
+
+### Independent-review fixes (R-1–R-4, 2026-09-27, bounded independent review accepted)
+
+Origin: [runtime obligation plan](../plan/2026-09-26-runtime-obligation-checking.md),
+source HEAD `f775837e` plus the recorded dirty implementation. These are local engine
+findings; they establish no benchmark proof or paid experiment result.
+
+- `ContractRuntimeObligationTransformer.HasContract` and `CalleePostconditions` include
+  function-by-method defining equality even when there are no explicit ensures. Detached
+  definition functions preserve definition recursion; evaluated callees receive validity
+  checks. Goal and callee mismatches retain their distinct classification.
+- `SpecWrapper` retains non-runtime requires as callee validity checkpoints. Closed-query
+  success may validate a domain, failure invalidates it, and unavailable/query-exhausted
+  evidence excludes the sample as `calleeContractUnchecked`. The existing
+  `callee_postcondition` validity category represents these domain checkpoints; no wire
+  fields or enum members were added. Executable false spec domains remain runtime errors.
+- `Check` wraps calls in callee contracts, and `CaptureOld` wraps calls when their value
+  is captured in the entry heap. An invalid function evaluated only on either path can
+  no longer produce a valid goal counterexample. Closed callee validity with unvalidated
+  contract-bearing function dependencies remains unchecked.
+- `GuardContracts` and the diagnostic `EnterContract`/`ExitContract` bridge avoid infinite
+  wrapping for mutual contracts. A pending validation can be shared only for a static
+  function with no declared reads and immutable scalar/collection inputs and result, using native Dafny tuple
+  equality over function identity, inputs and result. Different arguments/results get
+  separate checks. A reference, instance receiver, datatype or generic type may hide
+  mutable state: repeating such a pending validation emits `recursive_heap_contract`
+  unchecked evidence. No frame purity of an unverified by-method body is assumed.
+- Evidence: new Driver regression cases cover the four reported defects plus valid
+  recursive FBM definitions, decreasing and mutual scalar contracts, valid/invalid closed
+  domains, valid old-state transitive calls, and a mutable-heap mutual-contract case.
+  Final commands, results and build hashes are maintained in the originating plan.
+
+
+### Type-constraint predicate validity (R-5, 2026-09-27, bounded independent review accepted)
+
+`ContractRuntimeObligationTransformer.MembershipHelper` must render executable
+constraint expressions through `Render`, like ordinary contract expressions.
+Printing the raw constraint bypassed validity wrappers: a predicate returning true
+could admit an input while violating its own requires or ensures. The fixed helper
+checks predicate bodies through the existing spec-call path. Failed runtime domains
+are runtime errors, unavailable domain evidence is callee-contract unchecked, and
+failed predicate postconditions are callee-contract violations. None admits a goal
+counterexample. No original constraint or wire field changed.
+
+Evidence: 12 focused Driver cases passed (55s) for false/unchecked predicate domains
+and good/bad postconditions on integer subsets, nested subset collections, newtypes,
+nested newtype collections, and datatype-backed subsets. R-5 covers the helper path
+for a subset whose base type is a datatype; R-6 below adds declared constructor-field
+constraint traversal. Final owner regression/build evidence
+is in the [runtime obligation plan](../plan/2026-09-26-runtime-obligation-checking.md).
+
+
+### Structural declared-type validation (R-6, 2026-09-27, bounded independent review accepted)
+
+`HasConstraint` must inspect both map key and value types and every datatype
+constructor formal after type-argument substitution. Returning false beyond a fixed
+depth silently admitted invalid values; finite collection nesting now has no such
+cutoff. `Membership` checks finite nonrecursive datatype values with constructor
+matches, then recursively checks each declared field type. Recursive datatype
+membership, ghost/codatatype structure, and unsupported value membership explicitly
+remain unchecked. Analysis detects declaration cycles instead of treating them as
+unconstrained values. Existing serialization support limits still apply.
+
+Dafny resolution/compilation accepts `null` assigned to a non-null class formal or
+a datatype field of that type without verification. Explicit non-null membership
+checks therefore belong at declared input/output boundaries. Spec and nested
+function/method calls retain their declared input constraints even when no written
+requires or ensures exist. Direct goal-call type failures retain call-precondition
+classification; invalid spec/nested domains exclude the sample as callee validity
+failures. This adds no arbitrary class heap invariants or object construction.
+
+Evidence: 17 focused Driver cases passed (1m18s), covering invalid/valid datatype
+nat fields, datatype collection fields, map ranges, five nested sequence levels,
+recursive datatype unchecked results, non-null formals/fields, and spec/nested
+callee formal domains. The raw null probes before this refinement falsely reported
+valid=1/violation_found for both null shapes; paths and full validation checkpoints
+are in the [originating plan](../plan/2026-09-26-runtime-obligation-checking.md).
+
+
+Final independent evidence for R-1–R-6: required 26 structural/domain probes matched,
+10 selected existing Driver regressions passed, and 4 actual CoSyn integration tests
+passed against Driver `5cf53cadfd87cdd8a336050ebeb35d8e4b9d5c7874d7e443921069d17dc7727e`
+and TestGeneration `d37a454ffe5f2abb4fc4dca70d9fe70d711aa6bbc5d9d56ec9e764e778e36ba3`.
+The report is `/workspace/tmp/pbt-engine-structural-final-review-20260927-codex/REPORT.md`;
+source and production binary identities were unchanged during review. This is bounded
+engine evidence, not a proof or an M1/M2 benchmark result. Owner commands, the full
+Driver run's 113-pass/1-fail stale assertion result and its corrected 1/1 scoped
+recheck are recorded in the plan. TestGeneration Contract passed 279/279 and Core
+reducer passed 27/27. A test-only rebuild preserved every production DLL hash;
+the failed full Driver aggregate is not relabeled as passing.
+
+The independent extra `datatype Packet<T> = Wrap(v:T)` probes with formal
+`Packet<seq<nat>>` expose an existing observation-serialization limit: both `Wrap([7])`
+and `Wrap([-7])` fail with `Unsupported runtime observation type`, `runtimeErrors=1`,
+`valid=0`. These two predictions did not match (the complete matrix is 26/28), and
+neither value was silently accepted. Recursive datatype domain validation also remains
+unchecked for valid values, while supported nonrecursive counterparts remain usable.
+Ghost/codatatype handling was inspected but not dynamically probed by that review.
+
+The existing M2 ghost-draft limitation is separate: draft bodies must compile under
+plan §5.1. A non-ghost body that calls ghost functions or reads ghost fields can fail
+resolution; the engine returns `unsupported` with draft diagnostics. Arbitrary IO
+construction and class heap invariants remain outside the authorized implementation.
+Root owns fresh frozen-toolchain M1/M2 evidence.
+
+
+### Multi-result output checks and backend diagnostics (R-7, 2026-09-27, bounded independent review accepted)
+
+Dafny multi-result methods compile to C# out parameters. Datatype match expressions
+compile to immediately invoked lambdas, so a generated structural membership check
+that directly references an output formal fails with CS1628. Single-result methods
+compile to ordinary return values and do not reproduce this defect. The diagnostic
+transformer now copies executable output values into fresh locals before evaluating
+their declared membership; original formal names still label captured observations.
+Valid datatype/collection outputs remain accepted and invalid outputs retain goal or
+callee classification. This preserves the constraints themselves.
+
+`ContractCompilerWorker.CompileSourcesAsync` now captures backend messages via an
+optional `SynchronousCliCompilation.CompileDafnyProgram` output writer. Failed compiler
+results include actual backend output and reporter errors in the existing reason
+field. Previously only reporter messages were returned, often hiding C# errors behind
+trigger/induction information; public supervision discards unrelated worker stdout.
+Other compiler callers use their original output writer by default.
+
+Initial 11 focused regressions passed, including valid/invalid multi-result goal and
+callee datatype outputs, nested seq/map outputs, and a public CLI call with a deliberate
+invalid C# dependency that reports CS0103 and its undefined symbol. Final build passed
+with zero warnings/errors. Final affected Driver checks passed 43/43 (3m28s), and TestGeneration Contract passed 279/279
+(1m26s) after restoring missing test-output prerequisites as documented below. Full
+commands and independent review are recorded in the [runtime obligation plan](../plan/2026-09-26-runtime-obligation-checking.md).
+The R-7 follow-up did not rerun the entire Driver suite. Frozen r4 campaign results remain unchanged.
+
+
+For no-build owner tests, verify test-output dependencies as well as the public build:
+`Source/DafnyDriver.Test/bin/Debug/net8.0/` and
+`Source/DafnyTestGeneration.Test/bin/Debug/net8.0/` must contain `DafnyCore.dll` and
+`DafnyPrelude.bpl`. One R-7 post-build attempt lacked these files and failed Driver
+12/31 and TestGeneration 200/79 (passed/failed); this was not a passing regression
+result. Missing-file timestamps correlated with the preceding full build, but the
+precise build-copy cause was not proven. Sequential test-project-only builds with
+`-p:BuildProjectReferences=false` restored the dependencies, and before/after hashes
+of every public/net8.0 production DLL matched. Preserve initial failed logs and report
+retry results separately; do not rebuild production merely to repair test artifacts.
+
+
+Fresh independent R-7 review accepted the bounded compiler follow-up:
+`/workspace/tmp/pbt-engine-output-final-review-20260927-codex/REPORT.md`. Nine independently
+authored structural campaigns / 18 samples matched expected goal/callee/draft classifications;
+runtime and legacy compile-worker backend diagnostics, legacy worker success, and ordinary
+CLI execution (output 42) passed. Four actual CoSyn integrations passed in 9.57s. All 40
+selected source/binary identities remained unchanged, including Driver
+`10d811c8f5b70f6307af073cad2dd116176de039e03eb26726b0e877dbd03489` and TestGeneration
+`36f61694b37cc02cd621bc3722fd11e8ec3b15d4c23203451ffb9d1166305816`. This does not certify
+unrelated generic/recursive datatype support or benchmark outcomes; owner retry results
+and root frozen-toolchain acceptance are separate records.

@@ -53,6 +53,19 @@ public static class ContractQueryBuilder {
       $"{{ {assignments}\nassert {{:error \"{TargetMarker}\"}} {assertion}; }}\n");
   }
 
+  public static string BuildClosedClause(ContractPreparedProgram prepared, ContractRuntimeClause clause,
+    IReadOnlyDictionary<string, ContractValue> values, bool negate = false) {
+    var module = clause.Owner.EnclosingClass.EnclosingModuleDefinition.FullDafnyName;
+    var parameters = string.Join(", ", clause.Variables.Select(v => v.Name + ": " + v.Type));
+    var bindings = string.Join("\n", clause.Variables.Select(v => "requires " + v.Name + " == " + ContractModelCodec.ToDafny(values[v.Name], module)));
+    var declaration = "\nmethod " + Name(prepared) + "(" + parameters + ")\n" + bindings +
+      "\n{ assert {:error \"" + TargetMarker + "\"} " + (negate ? "!(" : "") + Printer.ExprToString(prepared.Program.Options, clause.Expression) + (negate ? ")" : "") + "; }\n";
+    var source = ContractSourceSnapshot.Find(prepared.SourceSnapshots, clause.Owner.Origin.Uri);
+    var insertion = clause.Owner.EnclosingClass is DefaultClassDecl ? clause.Owner.StartToken.pos : clause.Owner.EnclosingClass.StartToken.pos;
+    var index = System.Text.Encoding.UTF8.GetCharCount(System.Text.Encoding.UTF8.GetBytes(source.Content), 0, insertion);
+    return source.Content.Insert(index, declaration);
+  }
+
   public static string RenderExpression(ContractPreparedProgram prepared, Expression expression) {
     var method = prepared.Method;
     Expression? receiver = method.IsStatic ? null : new IdentifierExpr(method.Origin, prepared.ReceiverName) {

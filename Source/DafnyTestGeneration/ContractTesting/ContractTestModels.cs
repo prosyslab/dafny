@@ -17,7 +17,7 @@ public static class ContractJson {
 public enum ContractValueKind { Integer, Bitvector, Boolean, Character, Sequence, Set, Multiset, Map, Datatype, Reference, Null }
 public enum ContractTestStatus { Passed, Counterexample, InvalidInput, Unsupported, Inconclusive, Timeout, Cancelled, Error }
 public enum ContractQueryOutcome { Sat, Unsat, Unknown, Timeout, Error }
-public enum ContractQueryKind { PremiseConsistency, EntryPrecondition, ObservedPostcondition, CallPrecondition, ContractRealization }
+public enum ContractQueryKind { PremiseConsistency, EntryPrecondition, ObservedPostcondition, CallPrecondition, ContractRealization, ClosedClause }
 public enum ContractViolationKind { Postcondition, CallPrecondition, Frame, BodyAssertion }
 
 public sealed record ContractMapEntry([property: JsonRequired] ContractValue Key,

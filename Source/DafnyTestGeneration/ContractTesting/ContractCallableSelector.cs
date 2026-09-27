@@ -121,7 +121,7 @@ public static class ContractCallableSelector {
   public static string FunctionResultName(Program program, Function function) =>
     function.Result?.Name ?? ContractBodyNames.Family(program, "contractResult");
 
-  private static Method DescribeFunction(Program program, Function function) {
+  internal static Method DescribeFunction(Program program, Function function) {
     var resultName = FunctionResultName(program, function);
     var result = function.Result ?? new Formal(function.Origin, resultName, function.ResultType, false, false, null);
     var contractCloner = new FunctionDescriptorCloner(function, result, true);
@@ -145,17 +145,21 @@ public static class ContractCallableSelector {
   private sealed class FunctionDescriptorCloner(Function function, Formal result, bool replaceResultCalls)
     : Cloner(cloneResolvedFields: true) {
     public override Expression CloneExpr(Expression expression) {
-      if (expression?.Resolved is IdentifierExpr identifier &&
+      // A by-method call statement keeps its unresolved (untyped) method-call syntax beside the resolved CallStmt.
+      if (expression == null || !expression.WasResolved()) {
+        return base.CloneExpr(expression!);
+      }
+      if (expression.Resolved is IdentifierExpr identifier &&
           (identifier.Var == function.Result || function.ByMethodDecl?.Outs.Any(output => output == identifier.Var) == true)) {
         return Expression.CreateIdentExpr(result);
       }
-      if (replaceResultCalls && expression?.Resolved is FunctionCallExpr call && call.Function == function &&
+      if (replaceResultCalls && expression.Resolved is FunctionCallExpr call && call.Function == function &&
           (function.IsStatic || call.Receiver.Resolved is ThisExpr) &&
           call.Args.Count == function.Ins.Count && call.Args.Select((argument, index) =>
             argument.Resolved is IdentifierExpr argumentIdentifier && argumentIdentifier.Var == function.Ins[index]).All(matches => matches)) {
         return Expression.CreateIdentExpr(result);
       }
-      return base.CloneExpr(expression!);
+      return base.CloneExpr(expression);
     }
   }
 }

@@ -23,7 +23,12 @@ public static class TestContractsCommand {
     "Verify an exact entry implementation and its reachable internal implementations without execution.");
   private static readonly Option<string> SymbolicWorker = new("--symbolic-worker") { IsHidden = true };
 
+  private static readonly Option<bool> RuntimeCheck = new("--runtime-check", "Check concrete runtime obligations using a supplied generator.");
+  private static readonly Option<string> RuntimeWorker = new("--runtime-check-worker") { IsHidden = true };
+
   static TestContractsCommand() {
+    OptionRegistry.RegisterOption(RuntimeCheck, OptionScope.Cli);
+    OptionRegistry.RegisterOption(RuntimeWorker, OptionScope.Cli);
     OptionRegistry.RegisterOption(CompileWorker, OptionScope.Cli);
     OptionRegistry.RegisterOption(ExecuteWorker, OptionScope.Cli);
     OptionRegistry.RegisterOption(Generate, OptionScope.Cli);
@@ -36,6 +41,8 @@ public static class TestContractsCommand {
   public static Command Create() {
     var command = new Command("test-contracts", "Execute a diagnostic copy and check original contracts on concrete observations.");
     command.AddArgument(Request);
+    command.AddOption(RuntimeCheck);
+    command.AddOption(RuntimeWorker);
     command.AddOption(CompileWorker);
     command.AddOption(ExecuteWorker);
     command.AddOption(Generate);
@@ -59,10 +66,13 @@ public static class TestContractsCommand {
     var generationRequested = context.ParseResult.GetValueForOption(Generate) || generationResultPath != null;
     var symbolicResultPath = context.ParseResult.GetValueForOption(SymbolicWorker);
     var symbolicRequested = context.ParseResult.GetValueForOption(Symbolic) || symbolicResultPath != null;
-    var resultPath = compileResultPath ?? executionResultPath ?? generationResultPath ?? symbolicResultPath;
+    var runtimeResultPath = context.ParseResult.GetValueForOption(RuntimeWorker);
+    var runtimeRequested = context.ParseResult.GetValueForOption(RuntimeCheck) || runtimeResultPath != null;
+    var resultPath = runtimeResultPath ?? compileResultPath ?? executionResultPath ?? generationResultPath ?? symbolicResultPath;
+    string runtimeSeed = "";
     object result;
     try {
-      if (new[] { compileResultPath != null, executionResultPath != null, generationRequested, symbolicRequested }
+      if (new[] { compileResultPath != null, executionResultPath != null, generationRequested, symbolicRequested, runtimeRequested }
           .Count(selected => selected) > 1) {
         throw new ArgumentException("Compilation, execution, generation, and symbolic modes are mutually exclusive.");
       }
@@ -70,7 +80,14 @@ public static class TestContractsCommand {
         throw new ArgumentException("A generation checkpoint requires generation mode and an absolute path.");
       }
       var json = await File.ReadAllTextAsync(file.FullName, cancellationToken);
-      if (symbolicRequested) {
+      if (runtimeRequested) {
+        var request = JsonSerializer.Deserialize<ContractRuntimeCampaignRequest>(json, ContractJson.Options)
+          ?? throw new JsonException("Null runtime campaign request.");
+        runtimeSeed = request.Seed;
+        result = runtimeResultPath != null
+          ? await ContractRuntimeCampaignRunner.RunAsync(request, options, Path.GetDirectoryName(runtimeResultPath)!, cancellationToken)
+          : await SuperviseRuntimeAsync(request, cancellationToken);
+      } else if (symbolicRequested) {
         var request = JsonSerializer.Deserialize<ContractSymbolicRequest>(json, ContractJson.Options)
           ?? throw new JsonException("Null symbolic contract request.");
         result = symbolicResultPath != null
@@ -137,11 +154,40 @@ public static class TestContractsCommand {
     }
     return 0;
 
-    object Failure(ContractTestStatus status, string reason) => generationRequested
+    object Failure(ContractTestStatus status, string reason) => runtimeRequested
+      ? ContractRuntimeCampaignRunner.Failure(status == ContractTestStatus.Unsupported ? ContractRuntimeStatus.Unsupported : ContractRuntimeStatus.Error, reason, runtimeSeed)
+      : generationRequested
       ? GenerationFailure(status, reason)
       : compileResultPath == null
         ? new ContractTestResult(ContractJson.SchemaVersion, status, reason)
         : new ContractCompileResult(ContractJson.SchemaVersion, status, reason);
+  }
+
+  private static async Task<ContractRuntimeCampaignResult> SuperviseRuntimeAsync(ContractRuntimeCampaignRequest request,
+    CancellationToken cancellationToken) {
+    if (request.TimeoutMilliseconds <= 0) { throw new ArgumentException("Runtime checking requires a positive deadline."); }
+    var directory = Path.Combine(Path.GetTempPath(), "dafny-runtime-check-" + Guid.NewGuid().ToString("N"));
+    Directory.CreateDirectory(directory);
+    var requestPath = Path.Combine(directory, "request.json");
+    var resultPath = Path.Combine(directory, "result.json");
+    await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request, ContractJson.Options), cancellationToken);
+    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+    timeout.CancelAfter(request.TimeoutMilliseconds);
+    var process = await ContractExecutionProcess.RunAsync("dotnet", [typeof(DafnyNewCli).Assembly.Location,
+      "test-contracts",
+      requestPath,
+      "--runtime-check-worker",
+      resultPath], directory, timeout.Token);
+    if (process.Cancelled) {
+      return ContractRuntimeCampaignRunner.Failure(ContractRuntimeStatus.Inconclusive,
+        "Runtime campaign deadline expired or was cancelled; process tree reaped.", request.Seed);
+    }
+    if (process.ExitCode != 0 || !File.Exists(resultPath)) {
+      return ContractRuntimeCampaignRunner.Failure(ContractRuntimeStatus.Error,
+        "Runtime worker returned no structured result. " + process.StandardError, request.Seed);
+    }
+    return JsonSerializer.Deserialize<ContractRuntimeCampaignResult>(await File.ReadAllTextAsync(resultPath, cancellationToken), ContractJson.Options)
+      ?? throw new JsonException("Runtime worker returned null.");
   }
 
   private static ContractGenerationResult GenerationFailure(ContractTestStatus status, string reason) =>

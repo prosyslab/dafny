@@ -10,10 +10,12 @@ using Microsoft.Dafny;
 namespace DafnyTestGeneration.ContractTesting;
 
 public static class ContractStubRuntime {
-  public static string BridgeSource(string observationPath, ContractPreparedProgram prepared) {
+  public static string BridgeSource(string observationPath, ContractPreparedProgram prepared, bool runtimeReferences = false,
+    IReadOnlySet<Field>? compiledGhostFields = null) {
     var program = prepared.Program;
     var trackedGhostFields = prepared.Heap?.TrackedGhostFields ?? new HashSet<Field>();
-    var concreteTypes = prepared.ConcreteCalls.ToDictionary(pair => pair.Key,
+    // Runtime diagnostics never dispatch through observed call stubs, so they need no concrete call evidence.
+    var concreteTypes = runtimeReferences ? new Dictionary<string, List<string>>() : prepared.ConcreteCalls.ToDictionary(pair => pair.Key,
       pair => pair.Value.ConcreteTypeArguments.Select(type => type.ToString()).ToList());
     string RuntimeTypeName(TopLevelDecl declaration) =>
       ((declaration.EnclosingModuleDefinition.TryToAvoidName ? declaration.EnclosingModuleDefinition.GetCompileName(program.Options) + "." : "") +
@@ -23,7 +25,7 @@ public static class ContractStubRuntime {
       .Select(declaration => new {
         runtimeType = RuntimeTypeName(declaration),
         type = declaration.FullDafnyName,
-        fields = declaration.Members.OfType<Field>().Where(field => !field.IsGhost && !field.IsStatic)
+        fields = declaration.Members.OfType<Field>().Where(field => (!field.IsGhost || compiledGhostFields?.Contains(field) == true) && !field.IsStatic)
           .Select(field => new {
             name = field.Name,
             runtimeName = field.GetCompileName(program.Options).Replace("@", ""),
@@ -149,6 +151,12 @@ public static class ContractStubRuntime {
           return new { kind = "map", entries = encodedEntries.OrderBy(entry => entry.SortKey, StringComparer.Ordinal)
             .Select(entry => entry.Entry).ToList() };
         }
+        if (RUNTIME_REFERENCES && value is Array) {
+          // A Dafny array is a heap reference; its length and elements are captured as flat named values.
+          var reference = "pbt-reference-" + references.Count;
+          references.Add(value, reference);
+          return new { kind = "reference", value = reference };
+        }
         if (value is IEnumerable sequence) {
           var items = new List<object>();
           foreach (var item in sequence) { items.Add(Encode(item, shape?.GetProperty("element"))); }
@@ -164,7 +172,57 @@ public static class ContractStubRuntime {
           }
           return new { kind = "datatype", constructor = datatypeShape.GetProperty("constructor").GetString(), fields };
         }
+        if (RUNTIME_REFERENCES && heapShapes.EnumerateArray().Any(item => item.GetProperty("runtimeType").GetString() == value.GetType().FullName)) {
+          var reference = "pbt-reference-" + references.Count;
+          references.Add(value, reference);
+          return new { kind = "reference", value = reference };
+        }
         throw Unsupported("Unsupported runtime observation type: " + value.GetType());
+      }
+      private static void AddRuntimeFields(string name, object value, Dictionary<string, object> values, HashSet<object> visiting) {
+        if (value is Array array) {
+          if (!visiting.Add(value)) { return; }
+          try {
+            for (var dimension = 0; dimension < array.Rank; dimension++) {
+              values.Add(name + (array.Rank == 1 ? ".Length" : ".Length" + dimension), new { kind = "integer", value = array.GetLength(dimension).ToString(CultureInfo.InvariantCulture) });
+            }
+            if (array.Rank == 1) {
+              for (var index = 0; index < array.Length; index++) {
+                var elementName = name + "[" + index.ToString(CultureInfo.InvariantCulture) + "]";
+                var element = array.GetValue(index);
+                values.Add(elementName, Encode(element));
+                AddRuntimeFields(elementName, element, values, visiting);
+              }
+            }
+          } finally {
+            visiting.Remove(value);
+          }
+          return;
+        }
+        if (value == null || !heapShapes.EnumerateArray().Any(item => item.GetProperty("runtimeType").GetString() == value.GetType().FullName)) { return; }
+        if (!visiting.Add(value)) { return; }
+        try {
+          var shape = HeapShape(value);
+          foreach (var field in shape.GetProperty("fields").EnumerateArray()) {
+            var member = value.GetType().GetProperty(field.GetProperty("runtimeName").GetString());
+            if (member == null) { throw Unsupported("Missing concrete class runtime field."); }
+            var fieldName = name + "." + field.GetProperty("name").GetString();
+            var fieldValue = member.GetValue(value);
+            values.Add(fieldName, Encode(fieldValue, field.GetProperty("shape")));
+            AddRuntimeFields(fieldName, fieldValue, values, visiting);
+          }
+        } finally {
+          visiting.Remove(value);
+        }
+      }
+      public static Dafny.ISequence<Dafny.Rune> SerializeNamed<T>(Dafny.ISequence<Dafny.Rune> name, T value,
+          Dafny.ISequence<Dafny.Rune> shape) {
+        var values = new Dictionary<string, object>(StringComparer.Ordinal) { [name.ToVerbatimString(false)] = Encode(value, Shape(shape)) };
+        if (RUNTIME_REFERENCES) {
+          AddRuntimeFields(name.ToVerbatimString(false), value, values, new HashSet<object>(ReferenceEqualityComparer.Instance));
+        }
+        var json = JsonSerializer.Serialize(values);
+        return Dafny.Sequence<Dafny.Rune>.UnicodeFromString(json.Substring(1, json.Length - 2));
       }
       private static bool SameJson(JsonElement left, JsonElement right) {
         if (left.ValueKind != right.ValueKind) { return false; }
@@ -562,7 +620,8 @@ public static class ContractStubRuntime {
       }
     }
     }
-    """.Replace("OBSERVATION_PATH", JsonSerializer.Serialize(observationPath))
+    """.Replace("RUNTIME_REFERENCES", runtimeReferences ? "true" : "false")
+      .Replace("OBSERVATION_PATH", JsonSerializer.Serialize(observationPath))
       .Replace("CONCRETE_TYPES", JsonSerializer.Serialize(JsonSerializer.Serialize(concreteTypes)))
       .Replace("HEAP_SHAPES", JsonSerializer.Serialize(JsonSerializer.Serialize(heapShapes)))
       .Replace("DATATYPE_SHAPES", JsonSerializer.Serialize(JsonSerializer.Serialize(shapes)));
