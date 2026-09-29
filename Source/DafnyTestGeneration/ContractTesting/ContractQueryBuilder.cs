@@ -137,7 +137,7 @@ public static class ContractQueryBuilder {
     return value;
   }
 
-  private static string QualifiedType(Program program, ModuleDefinition scope, Type type) {
+  internal static string QualifiedType(Program program, ModuleDefinition scope, Type type) {
     type = type.NormalizeExpandKeepConstraints();
     if (type is UserDefinedType { ResolvedClass: { } declaration } applied) {
       // Captured types may come from a separate resolved snapshot of the same source.

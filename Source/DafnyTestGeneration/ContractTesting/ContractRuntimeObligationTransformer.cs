@@ -64,8 +64,9 @@ public sealed class ContractRuntimeObligationTransformer {
       .SelectMany(c => c.Descendants()).OfType<MemberSelectExpr>()
       .Select(select => select.Member).OfType<Field>().ToHashSet();
     foreach (var constructor in reachable.OfType<Constructor>().Where(c => this.diagnosticConstructors.Contains(c.FullDafnyName))) {
+      var supplied = ContractDiagnosticConstruction.SuppliedFieldNames(constructor);
       fields.UnionWith(((TopLevelDeclWithMembers)constructor.EnclosingClass).Members.OfType<Field>()
-        .Where(field => constructor.Ins.Any(formal => formal.Name == field.Name)));
+        .Where(field => supplied.Contains(field.Name)));
     }
     functions = reachable.OfType<Function>().Where(f => f.IsGhost && f.Body != null &&
       f is not TwoStateFunction && f.ByMethodBody == null && !this.rejected.ContainsKey(f.FullDafnyName)).ToHashSet();

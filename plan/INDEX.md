@@ -2,6 +2,7 @@
 
 | 계획 | 상태 | 목표 | 갱신일 |
 | --- | --- | --- | --- |
+| [2026-09-29-recursive-and-nested-heap-construction](2026-09-29-recursive-and-nested-heap-construction.md) | done | `object` 참조·순환 fixed-state 힙과 중첩 `pbt_heap_constructor` 경로/기본 할당; Core93·TestGen649·Driver251, 독립 검증 통과 | 2026-09-29 |
 | [2026-09-29-pbt-readability-refactor](2026-09-29-pbt-readability-refactor.md) | done | 커밋 전 PBT 코드 동작 보존 리팩토링; Core93·TestGen645·Driver244 기준선 동일, 독립 검증 1건 수정 | 2026-09-29 |
 | [2026-09-29-runtime-classification-deadline](2026-09-29-runtime-classification-deadline.md) | done | Independent23/23; h11 returns a result without late initial phases; h13 exact sentinel preserved | 2026-09-29 |
 | [2026-09-29-ordered-runtime-check-fragments](2026-09-29-ordered-runtime-check-fragments.md) | done | Independent22/22 and all6 paired byte-prefix audits pass; exact two-ordinal runtime limits retained | 2026-09-29 |

@@ -1,5 +1,7 @@
 # Implementation knowledge
 
+2026-09-29 heap construction: [recursive and nested heap construction](contract-testing.md#recursive-and-nested-heap-construction-2026-09-29) accepts `object`-typed representation sets and cyclic fixed-state heaps, and nested `pbt_heap_constructor` paths with default object allocation; M2 cat with a one-annotation generator matches the existing generator.
+
 2026-09-29 sequential stage4: [runtime classification deadline boundaries](contract-testing.md#runtime-classification-deadline-boundaries-2026-09-29) independently pass23 Driver controls, h11 deadline/result audit and exact h13 sentinel replay. h11 returns a result while expired initial states remain unchecked; goal coverage limits remain.
 
 2026-09-29 sequential stage3b: [ordered runtime check fragments](contract-testing.md#ordered-runtime-check-fragments-2026-09-29) independently pass22 controls and6 raw byte-prefix comparisons. Exact h11 runtime ordinals complete under5s; campaign/proof outcomes remain separate.

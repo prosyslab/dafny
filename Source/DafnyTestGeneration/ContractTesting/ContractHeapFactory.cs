@@ -190,8 +190,17 @@ public static class ContractHeapFactory {
   public static ContractHeapPlan Prepare(Program program, ContractTestRequest request) =>
     Prepare(program, request, ResolvedArrayTypes);
 
+  // Fixed-state queries bind every object as a parameter, so they need no allocation order
+  // and accept cyclic graphs such as a node whose representation set contains itself.
+  internal static ContractHeapPlan PrepareFixedState(Program program, ContractTestRequest request) =>
+    PrepareCore(program, request, ResolvedArrayTypes, requireAllocationOrder: false);
+
   internal static ContractHeapPlan Prepare(Program program, ContractTestRequest request,
-    Func<Program, IReadOnlyDictionary<string, DafnyType>> resolveArrayTypes) {
+    Func<Program, IReadOnlyDictionary<string, DafnyType>> resolveArrayTypes) =>
+    PrepareCore(program, request, resolveArrayTypes, requireAllocationOrder: true);
+
+  private static ContractHeapPlan PrepareCore(Program program, ContractTestRequest request,
+    Func<Program, IReadOnlyDictionary<string, DafnyType>> resolveArrayTypes, bool requireAllocationOrder) {
     ArgumentNullException.ThrowIfNull(program);
     ArgumentNullException.ThrowIfNull(request);
     ArgumentNullException.ThrowIfNull(resolveArrayTypes);
@@ -248,7 +257,7 @@ public static class ContractHeapFactory {
     ValidateOmittedGhostFields(program, OriginalCallable(entry), slots.Values);
     ValidateInputReferences(entry, request.Inputs, slots);
     ValidateFieldValues(slots);
-    var orderedSlots = TopologicalOrder(slots);
+    var orderedSlots = TopologicalOrder(slots, allowCycles: !requireAllocationOrder);
     var insertions = BuildConstructorInsertions(slots.Values);
     var allocations = orderedSlots.Select(slot => Allocation(slot, slots));
     var initialCaptures = CaptureStatements(orderedSlots, true);
@@ -340,18 +349,30 @@ public static class ContractHeapFactory {
   }
 
   internal static void ValidateClass(Program program, Method entry, ClassDecl classDecl) {
-    var scope = program.ModuleSigs[entry.EnclosingClass.EnclosingModuleDefinition].VisibilityScope;
-    if (classDecl.EnclosingModuleDefinition.ModuleKind != ModuleKindEnum.Concrete ||
-        classDecl.TypeArgs.Count != 0 || classDecl.Traits.Count != 0 || classDecl.HasExternAttribute ||
-        !classDecl.IsRevealedInScope(scope) || !classDecl.IsVisibleInScope(scope)) {
+    if (!IsConstructibleShape(program, entry, classDecl)) {
       throw new NotSupportedException(
         $"Heap type '{classDecl.FullDafnyName}' must be a visible concrete non-generic class without parents.");
     }
-    if (classDecl.Members.Any(member => member.Name == ConstructorName)) {
+    if (DeclaresReservedMember(classDecl)) {
       throw new ArgumentException(
         $"Heap type '{classDecl.FullDafnyName}' declares reserved member '{ConstructorName}'.");
     }
   }
+
+  /// <summary>Checks the same conditions as ValidateClass without reporting why construction is unavailable.</summary>
+  internal static bool IsDiagnosticConstructible(Program program, Method entry, ClassDecl classDecl) =>
+    IsConstructibleShape(program, entry, classDecl) && !DeclaresReservedMember(classDecl);
+
+  private static bool IsConstructibleShape(Program program, Method entry, ClassDecl classDecl) {
+    var scope = program.ModuleSigs[entry.EnclosingClass.EnclosingModuleDefinition].VisibilityScope;
+    return classDecl.EnclosingModuleDefinition.ModuleKind == ModuleKindEnum.Concrete &&
+      classDecl.TypeArgs.Count == 0 && classDecl.Traits.Count == 0 && !classDecl.HasExternAttribute &&
+      classDecl.IsRevealedInScope(scope) && classDecl.IsVisibleInScope(scope);
+  }
+
+  // Generated nested constructors use suffixed names, so the whole name family is reserved.
+  private static bool DeclaresReservedMember(ClassDecl classDecl) =>
+    classDecl.Members.Any(member => member.Name.StartsWith(ConstructorName, StringComparison.Ordinal));
 
   internal static (IReadOnlyList<Field> Supplied, IReadOnlyList<Field> OmittedGhost) ValidateFields(
     ClassDecl classDecl, ContractHeapObject item) {
@@ -551,7 +572,7 @@ public static class ContractHeapFactory {
     }
     foreach (var formal in entry.Ins) {
       var value = inputs[formal.Name];
-      if (!IsReferenceType(formal.Type, out var expectedClass, out var permitsNull)) {
+      if (!IsHeapReferenceType(formal.Type, out var permitsNull)) {
         if (value.Kind is ContractValueKind.Reference or ContractValueKind.Null ||
             !ValueMatchesType(value, formal.Type)) {
           throw new ArgumentException($"Input '{formal.Name}' has an incompatible concrete value.", nameof(inputs));
@@ -563,7 +584,7 @@ public static class ContractHeapFactory {
         continue;
       }
       if (value.Kind != ContractValueKind.Reference || value.Value == null ||
-          !slots.TryGetValue(value.Value, out var target) || !IsExactReferenceType(formal.Type, target, out _)) {
+          !slots.TryGetValue(value.Value, out var target) || !IsCompatibleReferenceType(formal.Type, target)) {
         throw new ArgumentException($"Input '{formal.Name}' does not name a compatible heap object.", nameof(inputs));
       }
     }
@@ -576,10 +597,10 @@ public static class ContractHeapFactory {
         var path = cell.Name.StartsWith("[", StringComparison.Ordinal)
           ? slot.Object.Id + cell.Name
           : slot.Object.Id + "." + cell.Name;
-        if (IsReferenceType(cell.Type, out _, out var permitsNull)) {
+        if (IsHeapReferenceType(cell.Type, out var permitsNull)) {
           if (value.Kind == ContractValueKind.Null && permitsNull) { continue; }
           if (value.Kind != ContractValueKind.Reference || value.Value == null ||
-              !slots.TryGetValue(value.Value, out var target) || !IsExactReferenceType(cell.Type, target, out _)) {
+              !slots.TryGetValue(value.Value, out var target) || !IsCompatibleReferenceType(cell.Type, target)) {
             throw new ArgumentException("Heap cell '" + path + "' does not name a compatible heap object.");
           }
         }
@@ -588,7 +609,7 @@ public static class ContractHeapFactory {
     }
   }
 
-  private static IReadOnlyList<HeapSlot> TopologicalOrder(IReadOnlyDictionary<string, HeapSlot> slots) {
+  private static IReadOnlyList<HeapSlot> TopologicalOrder(IReadOnlyDictionary<string, HeapSlot> slots, bool allowCycles) {
     var result = new List<HeapSlot>();
     var visiting = new HashSet<string>(StringComparer.Ordinal);
     var visited = new HashSet<string>(StringComparer.Ordinal);
@@ -597,6 +618,7 @@ public static class ContractHeapFactory {
         return;
       }
       if (!visiting.Add(slot.Object.Id)) {
+        if (allowCycles) { return; }
         throw new NotSupportedException("Cyclic synthetic heap graphs are not supported.");
       }
       foreach (var cell in slot.Cells) {
@@ -737,7 +759,7 @@ public static class ContractHeapFactory {
       if (value.Value == null || !slots.TryGetValue(value.Value, out var slot)) {
         throw ValueError(path, "Reference value does not name a heap object.");
       }
-      if (expectedType != null && !IsExactReferenceType(expectedType, slot, out _)) {
+      if (expectedType != null && !IsCompatibleReferenceType(expectedType, slot)) {
         throw ValueError(path, "Reference value has an incompatible heap type.");
       }
       return slot.VariableName;
@@ -815,9 +837,18 @@ public static class ContractHeapFactory {
     }
   }
 
-  private static bool IsExactReferenceType(DafnyType type, HeapSlot expected, out bool permitsNull) {
-    return IsReferenceType(type, out var actualClass, out permitsNull) && actualClass == expected.Class &&
-      (!expected.IsArray || type.NormalizeExpand().TypeArgs[0].Equals(expected.ElementType));
+  // Every heap object, including an array, is an `object`; otherwise the class must match exactly.
+  private static bool IsCompatibleReferenceType(DafnyType type, HeapSlot expected) =>
+    type.IsObjectQ || type.IsObject ||
+    IsReferenceType(type, out var actualClass, out _) && actualClass == expected.Class &&
+    (!expected.IsArray || type.NormalizeExpand().TypeArgs[0].Equals(expected.ElementType));
+
+  private static bool IsHeapReferenceType(DafnyType type, out bool permitsNull) {
+    if (type.IsObjectQ || type.IsObject) {
+      permitsNull = type.IsObjectQ;
+      return true;
+    }
+    return IsReferenceType(type, out _, out permitsNull);
   }
 
   private static bool IsReferenceType(DafnyType type, out ClassDecl classDecl, out bool permitsNull) {

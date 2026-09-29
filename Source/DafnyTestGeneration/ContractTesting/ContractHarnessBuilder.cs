@@ -137,7 +137,9 @@ public static class ContractHarnessBuilder {
     }
     ValidateSignature(method, mode);
     var source = ContractSourceSnapshot.Find(request.Sources, method.Origin.Uri);
-    var heap = request.Heap?.Count > 0 ? ContractHeapFactory.Prepare(program, request) : null;
+    var heap = request.Heap?.Count > 0
+      ? mode == PreparationMode.Execution ? ContractHeapFactory.Prepare(program, request) : ContractHeapFactory.PrepareFixedState(program, request)
+      : null;
     if (!method.IsStatic && (heap == null || request.Heap!.SingleOrDefault(item => item.Id == request.Entry.Receiver!.Value)?.Type != method.EnclosingClass.FullDafnyName)) {
       throw new ArgumentException("The receiver must name a heap object of the selected callable's concrete class.");
     }

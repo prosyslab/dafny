@@ -208,6 +208,8 @@ public static class ContractRuntimeHeapChecking {
       if (type.IsRefType) {
         if (value.Kind == ContractValueKind.Null) { return true; }
         if (!objects.TryGetValue(value.Value!, out var target)) { return false; }
+        // Every captured object, including an array, inhabits the built-in object trait.
+        if (type.IsObjectQ) { return true; }
         if (type.IsArrayType) { return target.Type == ContractHeapFactory.ArrayTypeName(type); }
         // Concrete observations originate from compiled typed fields; reject mismatched declared classes.
         var expected = (type.NormalizeExpand() as UserDefinedType)?.ResolvedClass;

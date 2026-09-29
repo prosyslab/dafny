@@ -586,6 +586,8 @@ detached campaign sources. It neither replaces an original constructor nor chang
 preconditions. A class-only annotation is allowed only when every omitted field is an
 irrelevant ghost field. The existing fixed-heap validation and transitive omission
 audit run against original contracts and the resolved draft/generator graph.
+(2026-09-29: nested paths and default allocation of non-null object fields extend
+this; see [recursive and nested heap construction](#recursive-and-nested-heap-construction-2026-09-29).)
 
 `ContractDiagnosticResolver` defers a fixed set of ghost-context errors only for
 dependency discovery. `ContractRuntimeObligationTransformer` then makes supported
@@ -1433,3 +1435,40 @@ and correct result return; they do not establish h11 goal validity.
 Evidence: `pbt-sequential-20260929-v6/classification/` and
 `independent-classification/`. Final packaging preserves this source byte for
 byte, with no formatting changes and transport4/4 passing.
+
+## Recursive and nested heap construction (2026-09-29)
+
+Plan: [recursive and nested heap construction](../plan/2026-09-29-recursive-and-nested-heap-construction.md).
+
+- `object` references: heap values, cells and inputs typed `object`/`object?` accept any
+  captured heap object (class instance or array); other reference types still need the
+  exact class. Initial validity decides such references by captured-object existence.
+  This admits the standard recursive `ghost var repr: set<object>` / `Valid()` idiom,
+  which previously failed every sample with `Reference value has an incompatible heap
+  type`.
+- Cycles: fixed-state preparation (initial and observed-heap queries) accepts cyclic
+  heaps such as a node whose representation set contains itself, because query objects
+  are parameters. Executable unit-mode allocation still rejects cycles.
+- Nested construction: `pbt_heap_constructor` arguments may be paths `C.f.g...`. The
+  field `f` is allocated inside the generated constructor with an engine-generated
+  constructor of `f`'s class taking the remaining segments; the root constructor takes
+  the leaf values in annotation order (parameters named by path, for example
+  `fsRegion_value`). A field cannot be both a parameter and a nested allocation.
+- Defaults: every unmentioned non-null field whose class is diagnostically
+  constructible (by the same class rules) and does not recurse is allocated with a
+  default object; otherwise a ghost field keeps the omitted witness and a runtime field
+  is rejected, as before. This also applies to class-only annotations.
+- Names: the annotated class keeps `ContractDiagnosticCreate`; other shapes of a class
+  get `ContractDiagnosticCreate_<n>` (the whole prefix is reserved). Each generated
+  constructor lists its supplied fields in `{:pbt_supplied_fields ...}`; the
+  transformer and resolved omission audit read that list instead of parameter names.
+- Evidence: M2 `m2-drop-stdin` with the existing 17-annotation, 106-line generator and
+  with a one-annotation, 53-line nested generator (4 samples each) both give
+  `violation_found`, 4/4 valid, 3 reported violations (scratchpad `heapexp/`).
+- Validation: build 0 errors; Core 93/93, TestGeneration 649/649, Driver 251/251 (7 new
+  Driver cases, 4 new preparation cases); Cosyn goal-PBT integration 4 passed; fresh
+  independent review found requirements met.
+- Limits: one allocation per node remains inherent for variable-length structures
+  (generator loops); trait-typed references other than `object`, generic or trait
+  classes, and recursive default allocation are unsupported. Unit-mode hybrid testing,
+  including model heap realization/replay, still rejects cyclic heaps.

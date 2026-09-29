@@ -105,7 +105,7 @@ public static class ContractRuntimeSourcePreparation {
       AddHelper(declaration, generator, module, program, source, names, edits);
     }
     return Apply(sources, edits) with {
-      DiagnosticConstructors = constructors.Select(constructor => constructor.Class.FullDafnyName + "." + ContractHeapFactory.ConstructorName).ToHashSet()
+      DiagnosticConstructors = constructors.Select(constructor => constructor.Class.FullDafnyName + "." + constructor.Name).ToHashSet()
     };
   }
 

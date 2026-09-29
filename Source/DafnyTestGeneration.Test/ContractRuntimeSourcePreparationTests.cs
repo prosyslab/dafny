@@ -114,7 +114,8 @@ public class ContractRuntimeSourcePreparationTests {
     var prepared = await Prepare(source, null, generator);
     await Resolve(prepared);
     Assert.Contains("constructor Init() requires false", prepared.Sources[0].Content);
-    Assert.Contains("constructor ContractDiagnosticCreate(ghost right: int, ghost left: int)", prepared.Sources[0].Content);
+    Assert.Contains("constructor {:pbt_supplied_fields \"right\", \"left\"} ContractDiagnosticCreate(ghost right: int, ghost left: int)",
+      prepared.Sources[0].Content);
     Assert.Contains("M.Box.ContractDiagnosticCreate", prepared.DiagnosticConstructors!);
   }
 
@@ -141,10 +142,36 @@ public class ContractRuntimeSourcePreparationTests {
   [InlineData("\"M.Box\", \"M.Box.value\", \"M.Box.value\"")]
   [InlineData("\"M.Box\", \"M.Other.value\"")]
   [InlineData("\"M.Box\", 1")]
+  [InlineData("\"M.Box\", \"M.Box.value.inner\"")]
+  [InlineData("\"M.Box\", \"M.Box.\"")]
   public async Task RejectsInvalidConstructorAnnotation(string arguments) {
     const string source = "module M { class Box { ghost var value: int } method Goal(box: Box) {} }";
     var generator = "method {:pbt_generator \"M.Goal\"} {:pbt_heap_constructor " + arguments + "} Generate(r: PbtRandom.Source) returns (box: Box) { box := new Box.ContractDiagnosticCreate(7); }";
     await Assert.ThrowsAsync<NotSupportedException>(() => Prepare(source, null, generator));
+  }
+
+  // Leaf paths and default allocations give each distinct inner shape its own generated constructor.
+  [Fact]
+  public async Task NestedPathsGenerateOneConstructorPerInnerShape() {
+    const string source = "module M { class Box { ghost var value: int constructor Init() requires false {} } " +
+      "class Pair { ghost const left: Box ghost const right: Box constructor Init() requires false {} } method Goal(pair: Pair) {} }";
+    const string generator = "method {:pbt_generator \"M.Goal\"} {:pbt_heap_constructor \"M.Pair\", \"M.Pair.left.value\"} " +
+      "Generate(r: PbtRandom.Source) returns (pair: Pair) { pair := new Pair.ContractDiagnosticCreate(3); }";
+    var prepared = await Prepare(source, null, generator);
+    await Resolve(prepared);
+    Assert.Equal(new[] { "M.Box.ContractDiagnosticCreate_1", "M.Box.ContractDiagnosticCreate_2", "M.Pair.ContractDiagnosticCreate" },
+      prepared.DiagnosticConstructors!.Order(StringComparer.Ordinal));
+  }
+
+  // One field cannot be both a constructor parameter and a nested allocation.
+  [Fact]
+  public async Task RejectsParameterAndNestedPathForOneField() {
+    const string source = "module M { class Box { ghost var value: int constructor Init() requires false {} } " +
+      "class Pair { ghost const left: Box constructor Init() requires false {} } method Goal(pair: Pair) {} }";
+    const string generator = "method {:pbt_generator \"M.Goal\"} {:pbt_heap_constructor \"M.Pair\", \"M.Pair.left\", \"M.Pair.left.value\"} " +
+      "Generate(r: PbtRandom.Source) returns (pair: Pair) { pair := new Pair.ContractDiagnosticCreate(null, 3); }";
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => Prepare(source, null, generator));
+    Assert.Contains("both a parameter and a nested allocation", error.Message);
   }
 
   private static async Task<ContractRuntimePreparedSources> Prepare(string source, string? draft,
