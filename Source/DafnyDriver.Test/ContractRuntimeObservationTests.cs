@@ -10,6 +10,60 @@ using Xunit;
 namespace DafnyDriver.Test;
 
 public class ContractRuntimeObservationTests {
+  // Generic result values retain nested sequence data across a checked callee return.
+  [Fact]
+  public async Task CapturesGenericCalleeResult() {
+    const string source = """
+      module M {
+        datatype Result<T> = Ok(value: T) | Error
+        method Read() returns (result: Result<seq<char>>)
+          ensures result == Ok(['f'])
+        { result := Ok(['f']); }
+        method Goal(x: int) returns (result: Result<seq<char>>)
+          ensures result == Error
+        { result := Read(); }
+      }
+      """;
+    const string generator = "method {:pbt_generator \"M.Goal\"} Generate(r: PbtRandom.Source) returns (x: int) { x := 0; }";
+    var result = await Run(source, generator);
+    Assert.True(result.Status == ContractRuntimeStatus.ViolationFound, result.Reason + "\n" + result.Diagnostics);
+    Assert.Equal(1, result.Population.Valid);
+    var violation = Assert.Single(result.Violations);
+    var observed = violation.Values["result"];
+    Assert.Equal("M.Result.Ok", observed.Constructor);
+    Assert.Equal("f", Assert.Single(observed.Fields!["value"].Items!).Value);
+  }
+
+  // Nested generic records preserve Dafny bit widths that share the same CLR byte representation.
+  [Fact]
+  public async Task CapturesNestedGenericBitvectorShapes() {
+    const string source = """
+      module M {
+        datatype Result<T> = Ok(value: T) | Error
+        datatype Envelope<T> = Envelope(data: map<int, seq<Result<T>>>)
+        method Goal(left: Envelope<bv7>, right: Envelope<bv8>) ensures false {}
+      }
+      """;
+    const string generator = """
+      method {:pbt_generator "M.Goal"} Generate(r: PbtRandom.Source)
+        returns (left: Envelope<bv7>, right: Envelope<bv8>) {
+        left := Envelope(map[1 := [Ok(7 as bv7)]]);
+        right := Envelope(map[1 := [Ok(7 as bv8)]]);
+      }
+      """;
+    var result = await Run(source, generator);
+    Assert.True(result.Status == ContractRuntimeStatus.ViolationFound, result.Reason + "\n" + result.Diagnostics);
+    var inputs = Assert.Single(result.Violations).Inputs;
+    foreach (var (name, width) in new[] { ("left", 7), ("right", 8) }) {
+      var mapping = inputs[name].Fields!["data"];
+      var item = Assert.Single(Assert.Single(mapping.Entries!).Value.Items!);
+      var value = item.Fields!["value"];
+      Assert.Equal(ContractValueKind.Bitvector, value.Kind);
+      Assert.Equal(width, value.Width);
+      Assert.Equal("7", value.Value);
+    }
+  }
+
   // Entry and postcondition snapshots retain a mutated field without losing reference identity.
   [Fact]
   public async Task CapturesReferenceFieldValues() {

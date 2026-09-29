@@ -8,17 +8,19 @@ public static class ContractRuntimeInstrumentation {
   public const string DafnySource = """
     module {:extern "DafnyPbtBridgeRuntime"} PbtRuntime {
       class {:extern "DafnyPbtBridgeRuntime", "Bridge"} PbtBridge {
-        static function {:extern} Check(id: string, iteration: int, passed: bool, values: string): bool
+        static function {:extern} Check(id: string, iteration: int, passed: bool, values: seq<string>): bool
         static function {:extern} Require(passed: bool): bool
         static function {:extern} RequireInSpec(passed: bool): bool
         static function {:extern} EnterContract<T>(id: string, values: T): bool
         static function {:extern} ExitContract<T>(id: string, values: T): bool
-        static function {:extern} Checkpoint(id: string, iteration: int, values: string): bool
+        static function {:extern} Checkpoint(id: string, iteration: int, values: seq<string>): bool
         static function {:extern "DafnyContractRuntime.ContractDiagnosticBridge", "Serialize"} Serialize<T>(value: T, shape: string): string
         static function {:extern "DafnyContractRuntime.ContractDiagnosticBridge", "SerializeNamed"} SerializeNamed<T>(name: string, value: T, shape: string): string
+        static function {:extern "DafnyContractRuntime.ContractDiagnosticBridge", "InstantiateShape"} InstantiateShape(shape: string, arguments: seq<string>): string
         static function {:extern} Location(location: string): bool
         static method {:extern} Input(name: string, value: string)
         static method {:extern} InputValues(values: string)
+        static method {:extern} CaptureHeap(phase: string, outputs: string)
         static method {:extern} Generated()
         static method {:extern} Executed()
         static method {:extern} Complete()
@@ -87,6 +89,12 @@ public static class ContractRuntimeInstrumentation {
       public static class Bridge {
         private static string currentLocation;
         private static readonly System.Collections.Generic.HashSet<(string, object)> PendingContracts = new();
+        private static readonly object OutputLock = new();
+        private static readonly System.Lazy<string> OutputPath = new(() => {
+          var args = System.Environment.GetCommandLineArgs();
+          return args[System.Array.IndexOf(args, "--pbt-out") + 1];
+        });
+        private static System.IO.StreamWriter output;
         public static bool EnterContract<T>(Dafny.ISequence<Dafny.Rune> id, T values) {
           return PendingContracts.Add((Text(id), values));
         }
@@ -98,14 +106,26 @@ public static class ContractRuntimeInstrumentation {
             var message = args.ExceptionObject is System.Exception exception ? exception.Message : args.ExceptionObject.ToString();
             Write(new { kind = "runtime_error", message, location = currentLocation });
           };
+          System.AppDomain.CurrentDomain.ProcessExit += (_, _) => {
+            lock (OutputLock) {
+              output?.Dispose();
+            }
+          };
         }
-        private static string Text(Dafny.ISequence<Dafny.Rune> value) { return value.ToVerbatimString(false); }
-        private static string Path {
-          get { var args = System.Environment.GetCommandLineArgs(); return args[System.Array.IndexOf(args, "--pbt-out") + 1]; }
+        private static string Text(Dafny.ISequence<Dafny.Rune> value) { return DafnyContractRuntime.ContractDiagnosticBridge.Text(value); }
+        private static void Write(object value) {
+          var json = System.Text.Json.JsonSerializer.Serialize(value);
+          lock (OutputLock) {
+            output ??= new System.IO.StreamWriter(OutputPath.Value, append: true);
+            output.Write(json + "\n");
+            // Completed records remain visible even when the parent kills this sample.
+            output.Flush();
+          }
         }
-        private static void Write(object value) { System.IO.File.AppendAllText(Path, System.Text.Json.JsonSerializer.Serialize(value) + "\n"); }
-        public static bool Check(Dafny.ISequence<Dafny.Rune> id, System.Numerics.BigInteger iteration, bool passed, Dafny.ISequence<Dafny.Rune> values) {
-          Write(new { kind = "check", id = Text(id), iteration = (int)iteration, passed, values = System.Text.Json.JsonDocument.Parse(Text(values)).RootElement });
+        public static bool Check(Dafny.ISequence<Dafny.Rune> id, System.Numerics.BigInteger iteration, bool passed,
+            Dafny.ISequence<Dafny.ISequence<Dafny.Rune>> fragments) {
+          var values = DafnyContractRuntime.ContractDiagnosticBridge.PrepareValues(fragments);
+          Write(new { kind = "check", id = Text(id), iteration = (int)iteration, passed, values });
           if (!passed && Text(id).StartsWith("call_precondition:", System.StringComparison.Ordinal)) {
             Complete(); System.Environment.Exit(0);
           }
@@ -119,8 +139,10 @@ public static class ContractRuntimeInstrumentation {
           if (!passed) { throw new System.InvalidOperationException("obligation evaluation called a function outside its precondition"); }
           return true;
         }
-        public static bool Checkpoint(Dafny.ISequence<Dafny.Rune> id, System.Numerics.BigInteger iteration, Dafny.ISequence<Dafny.Rune> values) {
-          Write(new { kind = "checkpoint", id = Text(id), iteration = (int)iteration, values = System.Text.Json.JsonDocument.Parse(Text(values)).RootElement }); return true;
+        public static bool Checkpoint(Dafny.ISequence<Dafny.Rune> id, System.Numerics.BigInteger iteration,
+            Dafny.ISequence<Dafny.ISequence<Dafny.Rune>> fragments) {
+          var values = DafnyContractRuntime.ContractDiagnosticBridge.PrepareValues(fragments);
+          Write(new { kind = "checkpoint", id = Text(id), iteration = (int)iteration, values }); return true;
         }
         public static void Input(Dafny.ISequence<Dafny.Rune> name, Dafny.ISequence<Dafny.Rune> value) {
           Write(new { kind = "input", name = Text(name), value = System.Text.Json.JsonDocument.Parse(Text(value)).RootElement });
@@ -129,6 +151,11 @@ public static class ContractRuntimeInstrumentation {
           foreach (var value in System.Text.Json.JsonDocument.Parse(Text(values)).RootElement.EnumerateObject()) {
             Write(new { kind = "input", name = value.Name, value = value.Value });
           }
+        }
+        public static void CaptureHeap(Dafny.ISequence<Dafny.Rune> phase, Dafny.ISequence<Dafny.Rune> outputs) {
+          Write(new { kind = "heap_capture", phase = Text(phase),
+            outputs = System.Text.Json.JsonDocument.Parse(Text(outputs)).RootElement,
+            heap = System.Text.Json.JsonDocument.Parse(DafnyContractRuntime.ContractDiagnosticBridge.RuntimeHeap()).RootElement });
         }
         public static void Generated() { Write(new { kind = "generated" }); }
         public static void Executed() { Write(new { kind = "executed" }); }

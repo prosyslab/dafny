@@ -11,7 +11,9 @@ public static class ContractQueryBuilder {
 
   public static string Build(ContractPreparedProgram prepared, ContractTestRequest request,
     ContractQueryKind kind, IReadOnlyDictionary<string, ContractValue>? outputs = null, bool negate = false,
-    IReadOnlyDictionary<string, ContractValue>? observations = null, IReadOnlyList<string>? choiceConstraints = null) {
+    IReadOnlyDictionary<string, ContractValue>? observations = null, IReadOnlyList<string>? choiceConstraints = null,
+    Expression? postconditionClause = null) {
+    if (kind == ContractQueryKind.PremiseConsistency) { RequireInitializerDefinitions(prepared); }
     var method = prepared.Method;
     var formals = method.Ins.Concat(outputs == null ? [] : method.Outs).ToList();
     var parameterParts = formals.Select(formal => formal.Name + ": " + formal.Type).ToList();
@@ -35,7 +37,8 @@ public static class ContractQueryBuilder {
           : ContractModelCodec.ToDafny(outputs[formal.Name], method.EnclosingClass.EnclosingModuleDefinition.FullDafnyName))));
     }
     var precondition = Conjunction(method.Req.Select(clause => RenderExpression(prepared, clause.E)));
-    var postcondition = Conjunction(method.Ens.Select(clause => RenderExpression(prepared, clause.E)));
+    var postcondition = postconditionClause == null ? Conjunction(method.Ens.Select(clause => RenderExpression(prepared, clause.E))) :
+      RenderExpression(prepared, postconditionClause);
     var assertion = kind switch {
       ContractQueryKind.PremiseConsistency => "false",
       ContractQueryKind.EntryPrecondition or ContractQueryKind.CallPrecondition => precondition,
@@ -47,38 +50,174 @@ public static class ContractQueryBuilder {
     // The property under test occurs only in the assertion. In particular, no call to the
     // selected method introduces its ensures as an assumption into this diagnostic query.
     var assignments = observations != null ? prepared.Heap?.QueryAssignments(observations) : "";
+    IEnumerable<Expression> expressions = kind == ContractQueryKind.PremiseConsistency ?
+      outputs == null ? [] : method.Req.Select(clause => clause.E) :
+      kind is ContractQueryKind.EntryPrecondition or ContractQueryKind.CallPrecondition ? method.Req.Select(clause => clause.E) :
+      postconditionClause == null ? method.Ens.Select(clause => clause.E) : [postconditionClause];
+    var types = formals.Select(formal => formal.Type).Concat(prepared.Heap?.Slots.SelectMany(slot =>
+      slot.Fields.Concat(slot.OmittedGhostFields).Select(field => field.Type)) ?? []);
+    var reveals = RevealDefinitions(prepared.Program, method.EnclosingClass.EnclosingModuleDefinition, expressions, types,
+      requireDefinitions: kind == ContractQueryKind.PremiseConsistency);
     return ContractHarnessBuilder.Insert(prepared, $"\nmethod {Name(prepared)}({parameters})\n" +
       string.Join("\n", bindings.Select(binding => "requires " + binding)) + "\n" +
-      (outputs != null ? "requires " + precondition + "\n" : "") + prepared.Heap?.QueryModifies + "\n" +
-      $"{{ {assignments}\nassert {{:error \"{TargetMarker}\"}} {assertion}; }}\n");
+      (outputs != null ? "requires " + precondition + "\n" : "") +
+      (observations != null ? prepared.Heap?.QueryModifies : "") + "\n" +
+      $"{{ {reveals}\n{assignments}\nassert {{:error \"{TargetMarker}\"}} {assertion}; }}\n");
   }
 
   public static string BuildClosedClause(ContractPreparedProgram prepared, ContractRuntimeClause clause,
     IReadOnlyDictionary<string, ContractValue> values, bool negate = false) {
-    var module = clause.Owner.EnclosingClass.EnclosingModuleDefinition.FullDafnyName;
-    var parameters = string.Join(", ", clause.Variables.Select(v => v.Name + ": " + v.Type));
-    var bindings = string.Join("\n", clause.Variables.Select(v => "requires " + v.Name + " == " + ContractModelCodec.ToDafny(values[v.Name], module)));
+    var scope = clause.Owner.EnclosingClass.EnclosingModuleDefinition;
+    var module = scope.FullDafnyName;
+    var parameters = string.Join(", ", clause.Variables.Select(v => v.Name + ": " +
+      QualifiedType(prepared.Program, scope, v.Type)));
+    var bindings = string.Join("\n", clause.Variables.Select(v => "requires " + v.Name + " == " + ContractModelCodec.ToDafny(
+      QualifyValue(prepared.Program, scope, values[v.Name], v.Type), module)));
+    var expression = Printer.ExprToString(prepared.Program.Options, QualifyExpression(prepared.Program, scope, clause.Expression));
+    var reveals = RevealDefinitions(prepared.Program, scope, [clause.Expression], clause.Variables.Select(variable => variable.Type));
     var declaration = "\nmethod " + Name(prepared) + "(" + parameters + ")\n" + bindings +
-      "\n{ assert {:error \"" + TargetMarker + "\"} " + (negate ? "!(" : "") + Printer.ExprToString(prepared.Program.Options, clause.Expression) + (negate ? ")" : "") + "; }\n";
+      "\n{ " + reveals + "\nassert {:error \"" + TargetMarker + "\"} " + (negate ? "!(" : "") + expression + (negate ? ")" : "") + "; }\n";
     var source = ContractSourceSnapshot.Find(prepared.SourceSnapshots, clause.Owner.Origin.Uri);
     var insertion = clause.Owner.EnclosingClass is DefaultClassDecl ? clause.Owner.StartToken.pos : clause.Owner.EnclosingClass.StartToken.pos;
     var index = System.Text.Encoding.UTF8.GetCharCount(System.Text.Encoding.UTF8.GetBytes(source.Content), 0, insertion);
     return source.Content.Insert(index, declaration);
   }
 
-  public static string RenderExpression(ContractPreparedProgram prepared, Expression expression) {
+  public static string RenderExpression(ContractPreparedProgram prepared, Expression expression, ModuleDefinition? queryScope = null) {
     var method = prepared.Method;
     Expression? receiver = method.IsStatic ? null : new IdentifierExpr(method.Origin, prepared.ReceiverName) {
       Type = UserDefinedType.FromTopLevelDecl(method.Origin, method.EnclosingClass)
     };
     return Printer.ExprToString(prepared.Program.Options,
-      new QuerySubstituter(receiver).Substitute(expression));
+      new QuerySubstituter(prepared.Program, queryScope ?? method.EnclosingClass.EnclosingModuleDefinition, receiver).Substitute(expression));
   }
 
-  private sealed class QuerySubstituter(Expression? receiver) : Substituter(receiver!, [], []) {
+  /// <summary>Qualifies resolved declarations for an expression inserted into the supplied source module.</summary>
+  public static Expression QualifyExpression(Program program, ModuleDefinition scope, Expression expression) =>
+    new QuerySubstituter(program, scope, null).Substitute(expression);
+
+  internal static string BuildInitialTypeProof(ContractPreparedProgram prepared,
+    IReadOnlyList<(ContractValue Value, Type Type)> values) {
+    var scope = prepared.Method.EnclosingClass.EnclosingModuleDefinition;
+    var declarations = values.Select((item, index) => {
+      var typeName = QualifiedType(prepared.Program, scope, item.Type);
+      var value = ContractModelCodec.ToDafny(QualifyValue(prepared.Program, scope, item.Value, item.Type), scope.FullDafnyName);
+      if (item.Type.NormalizeExpandKeepConstraints() is UserDefinedType { ResolvedClass: NewtypeDecl }) {
+        value = "(" + value + " as " + typeName + ")";
+      }
+      return "ghost var contractInitialValue" + index + ": " + typeName + " := " + value + ";";
+    });
+    var reveals = RevealDefinitions(prepared.Program, scope, [], values.Select(item => item.Type), requireDefinitions: true);
+    // No parameters or requires can assume the membership being proved. Native
+    // assignment WD checks the complete declared type and every nested constructor.
+    return ContractHarnessBuilder.Insert(prepared, "\nghost method " + Name(prepared) + "()\n{\n" +
+      reveals + "\n" + string.Join("\n", declarations) + "\nassert {:error \"" + TargetMarker + "\"} true;\n}\n");
+  }
+
+  private static ContractValue QualifyValue(Program program, ModuleDefinition scope, ContractValue value, Type type) {
+    type = type.NormalizeExpand();
+    if (value.Kind == ContractValueKind.Datatype && type.AsDatatype is { } datatype) {
+      var constructor = datatype.Ctors.Single(candidate => ContractHeapFactory.NamesConstructor(value.Constructor, datatype, candidate));
+      var substitution = TypeParameter.SubstitutionMap(datatype.TypeArgs, type.TypeArgs);
+      return value with {
+        Constructor = ContractHeapFactory.SourceTypeName(program, scope, datatype) + "." + constructor.Name,
+        Fields = constructor.Formals.ToDictionary(formal => formal.Name,
+          formal => QualifyValue(program, scope, value.Fields![formal.Name], formal.Type.Subst(substitution)))
+      };
+    }
+    if (value.Items != null && type.AsCollectionType is { } collection) {
+      return value with { Items = value.Items.Select(item => QualifyValue(program, scope, item, collection.Arg)).ToList() };
+    }
+    if (value.Entries != null && type.AsMapType is { } map) {
+      return value with {
+        Entries = value.Entries.Select(entry => new ContractMapEntry(
+        QualifyValue(program, scope, entry.Key, map.Domain), QualifyValue(program, scope, entry.Value, map.Range))).ToList()
+      };
+    }
+    return value;
+  }
+
+  private static string QualifiedType(Program program, ModuleDefinition scope, Type type) {
+    type = type.NormalizeExpandKeepConstraints();
+    if (type is UserDefinedType { ResolvedClass: { } declaration } applied) {
+      // Captured types may come from a separate resolved snapshot of the same source.
+      var natural = program.SystemModuleManager.NatDecl;
+      if (declaration is SubsetTypeDecl && declaration.FullDafnyName == natural.FullDafnyName &&
+          declaration.EnclosingModuleDefinition.FullDafnyName == natural.EnclosingModuleDefinition.FullDafnyName) {
+        return "nat";
+      }
+      var arguments = applied.TypeArgs.Select(argument => QualifiedType(program, scope, argument)).ToList();
+      if (declaration is TupleTypeDecl) { return "(" + string.Join(", ", arguments) + ")"; }
+      return ContractHeapFactory.SourceTypeName(program, scope, declaration) +
+        (arguments.Count == 0 ? "" : "<" + string.Join(", ", arguments) + ">");
+    }
+    return type switch {
+      SeqType sequence => "seq<" + QualifiedType(program, scope, sequence.Arg) + ">",
+      SetType set => (set.Finite ? "set<" : "iset<") + QualifiedType(program, scope, set.Arg) + ">",
+      MultiSetType multiset => "multiset<" + QualifiedType(program, scope, multiset.Arg) + ">",
+      MapType map => (map.Finite ? "map<" : "imap<") + QualifiedType(program, scope, map.Domain) + ", " + QualifiedType(program, scope, map.Range) + ">",
+      _ => type.ToString()
+    };
+  }
+
+  private static string RevealDefinitions(Program program, ModuleDefinition scope, IEnumerable<Expression> expressions,
+    IEnumerable<Type> types, bool requireDefinitions = false) {
+    var roots = expressions.SelectMany(ContractRuntimeObligationTransformer.FunctionReferences).Distinct().ToList();
+    var functions = ContractRuntimeObligationTransformer.ExecutionReachable(program, roots, types).OfType<Function>()
+      .Where(function => function.IsOpaque || Attributes.Contains(function.Attributes, "opaque") || function.IsMadeImplicitlyOpaque(program.Options))
+      .OrderBy(function => function.FullDafnyName, System.StringComparer.Ordinal).ToList();
+    if (requireDefinitions && functions.Any(function => !AutoRevealFunctionDependencies.IsRevealable(scope.AccessibleMembers, function))) {
+      throw new System.NotSupportedException("Original opaque definitions required for premise consistency are unavailable in the diagnostic import view.");
+    }
+    functions = functions.Where(function => AutoRevealFunctionDependencies.IsRevealable(scope.AccessibleMembers, function)).ToList();
+    return string.Join("\n", functions.Select(function => AutoRevealFunctionDependencies.BuildRevealStmt(function, function.Origin, scope))
+      .Where(statement => statement != null).Select(statement => Printer.StatementToString(program.Options, statement)));
+  }
+
+  private static void RequireInitializerDefinitions(ContractPreparedProgram prepared) {
+    var roots = (prepared.Heap?.Slots ?? []).SelectMany(slot => slot.Fields.Concat(slot.OmittedGhostFields))
+      .OfType<ConstantField>().Where(field => field.Rhs != null).ToHashSet();
+    if (roots.Count == 0) { return; }
+    var dependencies = new HashSet<Declaration>();
+    ContractRuntimeObligationTransformer.ExecutionReachable(prepared.Program, [], declarationDependencies: dependencies, constantRoots: roots);
+    var scope = prepared.Method.EnclosingClass.EnclosingModuleDefinition;
+    var hidden = dependencies.Where(declaration => declaration is Function { Body: not null } ||
+        declaration is ConstantField { Rhs: not null } constant && !roots.Contains(constant))
+      .Where(declaration => !AutoRevealFunctionDependencies.IsRevealable(scope.AccessibleMembers, declaration))
+      .OrderBy(declaration => declaration.Name, System.StringComparer.Ordinal).FirstOrDefault();
+    if (hidden != null) {
+      // The diagnostic export reveals captured readonly fields themselves. It does
+      // not reveal private/provided-only initializer dependencies. A model of that
+      // weaker view cannot establish consistency with their original definitions.
+      throw new System.NotSupportedException("Original initializer definition unavailable in diagnostic import view: " +
+        (hidden is MemberDecl member ? member.FullDafnyName : hidden.Name));
+    }
+  }
+
+  private sealed class QuerySubstituter(Program program, ModuleDefinition scope, Expression? receiver) : Substituter(receiver!, [], []) {
     public override Expression Substitute(Expression expression) {
       if (expression is StaticReceiverExpr staticReceiver) {
-        return new StaticReceiverExpr(expression.Origin, expression.Type, false) { Type = staticReceiver.Type };
+        var type = staticReceiver.Type;
+        var isImplicit = false;
+        if (type.AsTopLevelTypeWithMembers is { } declaration) {
+          var name = declaration is DefaultClassDecl ?
+            ContractHeapFactory.SourceModuleName(program, scope, declaration.EnclosingModuleDefinition) :
+            ContractHeapFactory.SourceTypeName(program, scope, declaration);
+          isImplicit = name.Length == 0;
+          type = new UserDefinedType(expression.Origin, isImplicit ? declaration.Name : name, declaration, type.TypeArgs);
+        }
+        return new StaticReceiverExpr(expression.Origin, type, isImplicit) { Type = type };
+      }
+      if (expression is DatatypeValue { Ctor.EnclosingDatatype: { } datatype } value &&
+          !value.MemberName.StartsWith(SystemModuleManager.TupleTypeCtorNamePrefix)) {
+        var substituted = (DatatypeValue)base.Substitute(value);
+        return new DatatypeValue(value.Origin, ContractHeapFactory.SourceTypeName(program, scope, datatype),
+          value.MemberName, substituted.Arguments) {
+          Ctor = value.Ctor,
+          InferredTypeArgs = substituted.InferredTypeArgs,
+          IsCoCall = value.IsCoCall,
+          Type = substituted.Type
+        };
       }
       return base.Substitute(expression);
     }

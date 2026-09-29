@@ -12,6 +12,128 @@ using Xunit;
 namespace DafnyDriver.Test;
 
 public class ContractRuntimeCheckTests {
+  // Existing compiled recursive membership can admit exact captured carriers without an empty native proof query.
+  [Theory]
+  [InlineData(1, false, true)]
+  [InlineData(0, false, false)]
+  [InlineData(1, true, false)]
+  public async Task ReusesCompiledRecursiveTypeCheckForCapturedHeap(int childId, bool invalidCalleeContract, bool valid) {
+    var source = """
+      module M {
+        function contractResult():int { 0 }
+        datatype Tree = Node(id:int, children:map<int,Tree>)
+        function Ids(tree:Tree):set<int> decreases tree {
+          {tree.id} + set name:int, id:int | name in tree.children && id in Ids(tree.children[name]) :: id
+        }
+        function Paths(tree:Tree, id:int):set<seq<int>> decreases tree {
+          (if tree.id == id then {[]} else {}) +
+          set name:int, suffix:seq<int> | name in tree.children && suffix in Paths(tree.children[name], id) :: [name] + suffix
+        }
+        predicate Unique(tree:Tree) { forall id :: id in Ids(tree) ==> |Paths(tree,id)| == 1 }
+        type UniqueTree = tree:Tree | Unique(tree) witness Node(0,map[])
+        class Cell { var value:UniqueTree constructor(value:Tree) { this.value := value; } }
+        function Read(cell:Cell):UniqueTree reads cell { cell.value }
+        method Goal(cell:Cell) ensures false { var value := Read(cell); }
+      }
+      """;
+    if (invalidCalleeContract) { source = source.Replace("reads cell { cell.value }", "reads cell ensures false { cell.value }"); }
+    var generator = "method {:pbt_generator \"M.Goal\"} Generate(r:PbtRandom.Source) returns(cell:Cell) " +
+      "{ cell := new Cell(Node(0,map[1 := Node(" + childId + ",map[])])); }";
+    var directory = Path.Combine("/workspace/tmp", "contract-runtime-membership-" + Guid.NewGuid().ToString("N"));
+    var result = await Run(source, generator, maxClosedQueries: 1, sampleCount: 1, artifactDirectory: directory);
+    Assert.True(result.Status == (valid ? ContractRuntimeStatus.ViolationFound : ContractRuntimeStatus.Inconclusive),
+      System.Text.Json.JsonSerializer.Serialize(result, ContractJson.Options));
+    Assert.Equal(valid ? 1 : 0, result.Population.Valid);
+    if (valid) {
+      var certificate = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(
+        Assert.Single(Directory.GetFiles(directory, "initial-type-certificate-*.json")))).RootElement;
+      Assert.True(certificate.GetProperty("passed").GetBoolean());
+      Assert.False(certificate.GetProperty("requiresNativeProof").GetBoolean());
+      var reused = certificate.GetProperty("runtimeChecks").EnumerateArray().Select(item => item.GetString()).ToList();
+      Assert.NotEmpty(reused);
+      Assert.Contains(result.Obligations, obligation => reused.Contains(obligation.Id) &&
+        obligation.Callee == "M.Read" && obligation.Clause.Contains("contractResult"));
+      Assert.Empty(Directory.GetFiles(directory, "initial-type-query-*.dfy"));
+    }
+  }
+
+  // Cross-module specification wrappers keep their imported qualification and validate the callee at runtime.
+  [Fact]
+  public async Task ImportedSpecificationWrapperKeepsCompiledCheck() {
+    const string source = """
+      module Numbers {
+        function Width(x: int): nat { if x < 0 then 0 else 1 }
+      }
+      module Encoding {
+        import N = Numbers
+        function Encode(x: int): seq<int>
+          ensures |Encode(x)| == N.Width(x)
+        { if x < 0 then [] else [x] }
+      }
+      module M {
+        import E = Encoding
+        method Goal(x: int) returns (result: int)
+          ensures result == 2
+        { result := |E.Encode(x)|; }
+      }
+      """;
+    var result = await Run(source, ConstantGenerator);
+    Assert.True(result.Status == ContractRuntimeStatus.ViolationFound,
+      System.Text.Json.JsonSerializer.Serialize(result, ContractJson.Options));
+    Assert.Equal(2, result.Population.Valid);
+    Assert.Equal(0, result.Population.CalleeContractUnchecked);
+    Assert.Equal(0, result.Population.CalleeContractViolations);
+    Assert.Equal(0, result.Obligations.Sum(obligation => obligation.Evaluations.ClosedSmt));
+  }
+
+  private const string ImportedDefinitionSource = """
+    module Data { datatype Item = Item(value: int) }
+    module Operations {
+      import D = Data
+      function Encode(values: seq<int>): seq<D.Item>
+        decreases |values|
+      { if values == [] then [] else [D.Item(values[0])] + Encode(values[1..]) }
+      by method {
+        return if values == [] then [] else [D.Item(values[0])] + Encode(values[1..]);
+      }
+    }
+    module M {
+      import O = Operations
+      method Goal(values: seq<int>) returns (result: int)
+        ensures result == |values| + 1
+      { result := |O.Encode(values)|; }
+    }
+    """;
+  private const string ImportedDefinitionGenerator = """
+    method {:pbt_generator "M.Goal"} Generate(r: PbtRandom.Source) returns (values: seq<int>) {
+      values := [1, 2];
+    }
+    """;
+
+  // Recursive by-method definition equality evaluates imported constructors in the declaring module.
+  [Fact]
+  public async Task ImportedRecursiveDefinitionKeepsCompiledCheck() {
+    var result = await Run(ImportedDefinitionSource, ImportedDefinitionGenerator);
+    Assert.True(result.Status == ContractRuntimeStatus.ViolationFound,
+      System.Text.Json.JsonSerializer.Serialize(result, ContractJson.Options));
+    Assert.Equal(2, result.Population.Valid);
+    Assert.Equal(0, result.Population.CalleeContractUnchecked);
+    Assert.Equal(0, result.Obligations.Sum(obligation => obligation.Evaluations.ClosedSmt));
+  }
+
+  // Fixing recursive definition rendering must still exclude an implementation whose returned datatype sequence is wrong.
+  [Fact]
+  public async Task ImportedRecursiveDefinitionRejectsInvalidImplementation() {
+    var source = ImportedDefinitionSource.Replace(
+      "return if values == [] then [] else [D.Item(values[0])] + Encode(values[1..]);", "return [];");
+    var result = await Run(source, ImportedDefinitionGenerator);
+    Assert.Equal(ContractRuntimeStatus.Inconclusive, result.Status);
+    Assert.Equal(0, result.Population.Valid);
+    Assert.Equal(2, result.Population.CalleeContractViolations);
+    Assert.Equal(0, result.Population.CalleeContractUnchecked);
+    Assert.Empty(result.Violations);
+  }
+
   // A concrete postcondition defect is reported from a compiled diagnostic execution.
   [Fact]
   public async Task ReportsPostconditionViolation() {
@@ -819,18 +941,18 @@ public class ContractRuntimeCheckTests {
     Assert.Empty(result.Violations);
   }
 
-  // Unsupported recursive datatype membership is explicitly unchecked for both valid and invalid nested values.
+  // Finite recursive datatype membership validates nested constraints without a depth cutoff.
   [Theory]
   [InlineData(-1)]
   [InlineData(1)]
-  public async Task ExcludesRecursiveStructuralTypeConstraint(int value) {
+  public async Task ChecksRecursiveStructuralTypeConstraint(int value) {
     const string source = "module M { datatype List = Nil | Cons(n: nat, tail: List) method Goal(x: List) ensures false {} }";
-    var generator = "method {:pbt_generator \"M.Goal\"} Generate(r: PbtRandom.Source) returns (x: List) { x := Cons(" + value + ", Nil); }";
+    var generator = "method {:pbt_generator \"M.Goal\"} Generate(r: PbtRandom.Source) returns (x: List) { x := Cons(0, Cons(" + value + ", Nil)); }";
     var result = await Run(source, generator);
-    Assert.True(result.Status == ContractRuntimeStatus.Inconclusive, System.Text.Json.JsonSerializer.Serialize(result, ContractJson.Options));
-    Assert.Equal(2, result.Population.PreconditionUnchecked);
-    Assert.Equal(0, result.Population.Valid);
-    Assert.Empty(result.Violations);
+    Assert.True(result.Status == (value >= 0 ? ContractRuntimeStatus.ViolationFound : ContractRuntimeStatus.Inconclusive), System.Text.Json.JsonSerializer.Serialize(result, ContractJson.Options));
+    Assert.Equal(value >= 0 ? 0 : 2, result.Population.PreconditionRejected);
+    Assert.Equal(value >= 0 ? 2 : 0, result.Population.Valid);
+    Assert.Equal(value >= 0 ? 2 : 0, result.Violations.Count);
   }
 
   // A draft result outside its declared subset type is a callee contract violation, not goal evidence.
@@ -875,14 +997,32 @@ public class ContractRuntimeCheckTests {
     Assert.Equal(0, result.Population.RuntimeErrors);
   }
 
-  // Capturing an object reads its constant initializer, so the initializer's function stays executable.
-  [Fact]
-  public async Task CapturesObjectWithConstantInitializer() {
+  // Capturing keeps the original initializer executable; accepting its readonly equation needs native validation.
+  [Theory]
+  [InlineData(0, false)]
+  [InlineData(6, true)]
+  public async Task CapturesObjectWithConstantInitializer(int queries, bool valid) {
     const string generator = "method {:pbt_generator \"M.Goal\"} Generate(r: PbtRandom.Source) returns (b: Box) { b := new Box(1); }";
-    var result = await Run("module M { function Seed(): int { 7 } class Box { var v: int const tag: int := Seed() constructor(a: int) ensures v == a { v := a; } } method Goal(b: Box) returns (r: int) ensures r == b.v + 1 { r := b.v; } }", generator);
-    Assert.True(result.Status == ContractRuntimeStatus.ViolationFound, System.Text.Json.JsonSerializer.Serialize(result, ContractJson.Options));
+    var directory = Path.Combine("/workspace/tmp", "contract-runtime-initializer-" + Guid.NewGuid().ToString("N"));
+    var result = await Run("module M { function Seed(): int { 7 } class Box { var v: int const tag: int := Seed() constructor(a: int) ensures v == a { v := a; } } method Goal(b: Box) returns (r: int) ensures r == b.v + 1 { r := b.v; } }",
+      generator, maxClosedQueries: queries, artifactDirectory: directory);
+    Assert.True(result.Status == (valid ? ContractRuntimeStatus.ViolationFound : ContractRuntimeStatus.Inconclusive),
+      System.Text.Json.JsonSerializer.Serialize(result, ContractJson.Options));
+    Assert.Equal(2, result.Population.Executed);
+    Assert.Equal(valid ? 2 : 0, result.Population.Valid);
+    Assert.Equal(valid ? 0 : 2, result.Population.PreconditionUnchecked);
     Assert.Equal(0, result.Population.RuntimeErrors);
-    Assert.Equal("7", result.Violations.First().Values["b.tag"].Value);
+    var captured = false;
+    foreach (var line in File.ReadLines(Path.Combine(directory, "sample-0.jsonl"))) {
+      using var record = System.Text.Json.JsonDocument.Parse(line);
+      if (record.RootElement.GetProperty("kind").GetString() != "heap_capture" ||
+          record.RootElement.GetProperty("phase").GetString() != "entry") { continue; }
+      var box = record.RootElement.GetProperty("heap").EnumerateArray().Single(item => item.GetProperty("type").GetString() == "M.Box");
+      Assert.Equal("7", box.GetProperty("fields").GetProperty("tag").GetProperty("value").GetString());
+      captured = true;
+    }
+    Assert.True(captured);
+    if (valid) { Assert.Equal("7", result.Violations.First().Values["b.tag"].Value); } else { Assert.Empty(result.Violations); }
   }
 
   private const string TraitSource = "module M { trait Shape extends object { function Area(): int reads this method Scale(k: int) returns (a: int) ensures a == k * Area() } class Square extends Shape { var side: int constructor(s: int) ensures side == s { side := s; } function Area(): int reads this { side * side } method Scale(k: int) returns (a: int) ensures a == k * Area() { a := k * side * side; } } method Goal(s: Shape, k: int) returns (r: int) ensures r == k * s.Area() { r := s.Scale(k); if k > 2 { r := r + 1; } } }";
@@ -916,6 +1056,73 @@ public class ContractRuntimeCheckTests {
     var result = await Run("module M { function Head<T>(s: seq<T>): T requires |s| > 0 { s[0] } method Goal(s: seq<int>) returns (r: int) requires |s| > 0 ensures r == s[0] { r := Head(s); } }", generator);
     Assert.True(result.Status == ContractRuntimeStatus.NoViolationFound, System.Text.Json.JsonSerializer.Serialize(result, ContractJson.Options));
     Assert.Equal(ContractRuntimeDecisionMethod.Runtime, result.Obligations.Single(o => o.Kind == ContractRuntimeObligationKind.CallPrecondition).DecisionMethod);
+  }
+
+  // Generic functions and methods forward exact nested Dafny shapes even when CLR bitvector types coincide.
+  [Fact]
+  public async Task CapturesNestedGenericCallSiteBitvectorShapes() {
+    const string source = """
+      module M {
+        function Pick<T(==)>(a: T, b: T): (c: T) ensures c == a { a }
+        function Nested<U(==)>(s: seq<U>): seq<U> { Pick(s, s) }
+        method Relay<V(==)>(s: seq<V>) returns (t: seq<V>) ensures t == s { t := Nested(s); }
+        method Goal(left: bv7, right: bv8) returns (a: seq<bv7>, b: seq<bv8>) ensures false {
+          a := Relay([left]); b := Relay([right]);
+        }
+      }
+      """;
+    const string generator = "method {:pbt_generator \"M.Goal\"} Generate(r: PbtRandom.Source) returns (left: bv7, right: bv8) { left := 7; right := 7; }";
+    var directory = Path.Combine("/workspace/tmp", "contract-runtime-generic-shapes-" + Guid.NewGuid().ToString("N"));
+    var result = await Run(source, generator, sampleCount: 1, artifactDirectory: directory);
+    Assert.True(result.Status == ContractRuntimeStatus.ViolationFound, System.Text.Json.JsonSerializer.Serialize(result, ContractJson.Options));
+    Assert.Equal(1, result.Population.Valid);
+    var widths = new HashSet<int>();
+    foreach (var line in File.ReadLines(Path.Combine(directory, "sample-0.jsonl"))) {
+      using var record = System.Text.Json.JsonDocument.Parse(line);
+      var observation = record.RootElement;
+      if (observation.GetProperty("kind").GetString() != "check" ||
+          !observation.GetProperty("id").GetString()!.StartsWith("callee_postcondition:", StringComparison.Ordinal)) { continue; }
+      foreach (var value in observation.GetProperty("values").EnumerateObject()) {
+        var captured = System.Text.Json.JsonSerializer.Deserialize<ContractValue>(value.Value.GetRawText(), ContractJson.Options)!;
+        foreach (var item in captured.Items ?? []) {
+          if (item.Kind == ContractValueKind.Bitvector) { widths.Add(item.Width!.Value); }
+        }
+      }
+    }
+    Assert.Equal(new[] { 7, 8 }, widths.Order().ToArray());
+  }
+
+  // Nested generic specification wrappers preserve shape bindings while excluding the invalid inner callee.
+  [Fact]
+  public async Task SeparatesNestedGenericSpecFunctionViolation() {
+    const string source = """
+      module M {
+        function Inner<U(==)>(a: U, b: U): (c: U) ensures c == a { b }
+        function Outer<T(==)>(a: seq<T>, b: seq<T>): (c: seq<T>) ensures c == Inner(a, b) { a }
+        method Goal(x: int) ensures Outer([x], [0]) == [x] {}
+      }
+      """;
+    var result = await Run(source, ConstantGenerator);
+    Assert.True(result.Status == ContractRuntimeStatus.Inconclusive, System.Text.Json.JsonSerializer.Serialize(result, ContractJson.Options));
+    Assert.Equal(2, result.Population.CalleeContractViolations);
+    Assert.Equal(0, result.Population.RuntimeErrors);
+    Assert.Empty(result.Violations);
+  }
+
+  // First-class generic references remain explicit exclusions until they can carry shape arguments.
+  [Fact]
+  public async Task RejectsGenericHigherOrderShapeErasure() {
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() =>
+      Run("module M { function Id<T>(x: T): T { x } method Goal(x: int) ensures false { var f := Id<int>; var y := f(x); } }", ConstantGenerator));
+    Assert.Contains("Generic higher-order function references", error.Message);
+  }
+
+  // User formals cannot shadow the generated type-shape parameters.
+  [Fact]
+  public async Task RejectsGenericShapeFormalCollision() {
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() =>
+      Run("module M { function Id<T>(pbtTypeShape0: T): T { pbtTypeShape0 } method Goal(x: int) ensures false { var y := Id(x); } }", ConstantGenerator));
+    Assert.Contains("Reserved Pbt diagnostic name collision", error.Message);
   }
 
   // A compiled forall statement keeps its assignment-only body free of diagnostic markers.
@@ -955,13 +1162,14 @@ public class ContractRuntimeCheckTests {
   private const string ExternMemberSource = "module Lib { class Store { ghost var state: int constructor() ensures state == 0 { state := 0; } method {:extern} {:axiom} Read() returns (r: int) ensures r == state } } module M { import Lib method Goal(s: Lib.Store) returns (r: int) ensures r == s.state + 1 { r := s.Read(); } }";
   private const string ExternMemberGenerator = "method {:pbt_generator \"M.Goal\"} Generate(r: PbtRandom.Source) returns (s: Lib.Store) { s := new Lib.Store(); }";
 
-  // A class-member draft whose body uses ghost state is reported at the draft instead of crashing goal lookup.
+  // A class-member draft can use ghost state after diagnostic preparation while retaining the original contract.
   [Fact]
-  public async Task ReportsGhostStateDraftForExternMember() {
+  public async Task ExecutesGhostStateDraftForExternMember() {
     const string draft = "method {:pbt_draft \"Lib.Store.Read\"} Read() returns (r: int) { r := state; }";
     var result = await Run(ExternMemberSource, ExternMemberGenerator, draft: new("Lib.Store.Read", "Read.dfy", draft, ContractHarnessBuilder.Hash(draft)));
-    Assert.Equal(ContractRuntimeStatus.Unsupported, result.Status);
-    Assert.Contains("Read.dfy:1:", result.Reason);
+    Assert.True(result.Status == ContractRuntimeStatus.ViolationFound, System.Text.Json.JsonSerializer.Serialize(result, ContractJson.Options));
+    Assert.Equal(2, result.Population.Valid);
+    Assert.Equal(0, result.Population.CalleeContractViolations);
   }
 
   // A compilable class-member draft for an extern method executes and is checked against the original contract.
@@ -976,8 +1184,8 @@ public class ContractRuntimeCheckTests {
   private const string ConstantGenerator = "method {:pbt_generator \"M.Goal\"} Generate(r: PbtRandom.Source) returns (x: int) { x := 1; }";
 
   private static async Task<ContractRuntimeCampaignResult> Run(string source, string? generator, int maxClosedQueries = 0, ContractRuntimeDraft? draft = null, int sampleTimeout = 5000, int? replay = null,
-    int sampleCount = 2, IReadOnlyList<ContractRuntimeDraft>? drafts = null) {
-    var directory = Path.Combine("/workspace/tmp", "contract-runtime-" + Guid.NewGuid().ToString("N"));
+    int sampleCount = 2, IReadOnlyList<ContractRuntimeDraft>? drafts = null, string? artifactDirectory = null) {
+    var directory = artifactDirectory ?? Path.Combine("/workspace/tmp", "contract-runtime-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(directory);
     var request = new ContractRuntimeCampaignRequest(1, [new("M.dfy", source, ContractHarnessBuilder.Hash(source))],
       new("M.Goal"), "17", Generator: generator == null ? null : new("G.dfy", generator, ContractHarnessBuilder.Hash(generator)),

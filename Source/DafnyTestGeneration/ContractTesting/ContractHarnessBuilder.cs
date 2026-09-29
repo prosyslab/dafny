@@ -12,7 +12,7 @@ public sealed record ContractPreparedProgram(Program Program, Method Method, Con
   Method? ReachableTarget = null, IReadOnlyList<ContractSource>? Sources = null) {
   public IReadOnlyList<ContractSource> SourceSnapshots => Sources ?? [Source];
   public IReadOnlyList<ContractSource> DiagnosticSourceSnapshots =>
-    ContractSourceSnapshot.ApplyEdits(SourceSnapshots, Heap?.SourceEdits ?? []);
+    ContractSourceSnapshot.ApplyEdits(SourceSnapshots, Heap?.QuerySourceEdits ?? []);
   public MethodOrFunction Callable => OriginalCallable ?? Method;
   public IReadOnlyList<Microsoft.Dafny.Type> ConcreteTypeArguments =>
     Method is ContractConcreteMethod concrete ? concrete.ConcreteTypeArguments : [];
@@ -23,6 +23,8 @@ public sealed record ContractPreparedProgram(Program Program, Method Method, Con
 }
 
 public static class ContractHarnessBuilder {
+  private enum PreparationMode { Execution, InitialState, ObservedHeap }
+
   public const string MainName = "ContractDiagnosticMain";
   public const string BridgeName = "ContractDiagnosticBridge";
   public static string Hash(string content) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
@@ -107,7 +109,16 @@ public static class ContractHarnessBuilder {
     }
   }
 
-  public static ContractPreparedProgram Prepare(Program program, ContractTestRequest request) {
+  public static ContractPreparedProgram Prepare(Program program, ContractTestRequest request) =>
+    Prepare(program, request, PreparationMode.Execution);
+
+  internal static ContractPreparedProgram PrepareInitial(Program program, ContractTestRequest request) =>
+    Prepare(program, request, PreparationMode.InitialState);
+
+  internal static ContractPreparedProgram PrepareObservedHeap(Program program, ContractTestRequest request) =>
+    Prepare(program, request, PreparationMode.ObservedHeap);
+
+  private static ContractPreparedProgram Prepare(Program program, ContractTestRequest request, PreparationMode mode) {
     if (request.Entry.InputMode == ContractInputMode.EntryReachable) {
       var target = ContractCallableSelector.SelectMethod(program,
         new ContractEntry(request.Entry.Symbol, request.Entry.TypeArguments), requireConcreteReceiver: false);
@@ -124,7 +135,7 @@ public static class ContractHarnessBuilder {
     if (!method.Ins.Select(input => input.Name).ToHashSet().SetEquals(request.Inputs.Keys)) {
       throw new ArgumentException("Input names must exactly match the selected declaration's formals.");
     }
-    ValidateSignature(method);
+    ValidateSignature(method, mode);
     var source = ContractSourceSnapshot.Find(request.Sources, method.Origin.Uri);
     var heap = request.Heap?.Count > 0 ? ContractHeapFactory.Prepare(program, request) : null;
     if (!method.IsStatic && (heap == null || request.Heap!.SingleOrDefault(item => item.Id == request.Entry.Receiver!.Value)?.Type != method.EnclosingClass.FullDafnyName)) {
@@ -141,9 +152,14 @@ public static class ContractHarnessBuilder {
       ? request with { Entry = new ContractEntry(request.Entry.ReachableFrom!, Receiver: request.Entry.ReachableReceiver) }
       : request;
 
-  private static void ValidateSignature(Method method) {
-    if (method.Ins.Concat(method.Outs).Any(formal => formal.IsGhost || !SupportedType(formal.Type) && !formal.Type.IsRefType) ||
-        method.FunctionFromWhichThisIsByMethodDecl == null && method.Reads.Expressions?.Count > 0) {
+  private static void ValidateSignature(Method method, PreparationMode mode = PreparationMode.Execution) {
+    var inputUnsupported = method.Ins.Any(formal =>
+      mode == PreparationMode.Execution && formal.IsGhost ||
+      !SupportedType(formal.Type) && !formal.Type.IsRefType);
+    var outputUnsupported = mode != PreparationMode.InitialState && method.Outs.Any(formal =>
+      formal.IsGhost || !SupportedType(formal.Type) && !formal.Type.IsRefType);
+    if (inputUnsupported || outputUnsupported ||
+        mode != PreparationMode.InitialState && method.FunctionFromWhichThisIsByMethodDecl == null && method.Reads.Expressions?.Count > 0) {
       throw new NotSupportedException("Unsupported ghost, type or heap-dependent entry signature.");
     }
   }
@@ -513,7 +529,7 @@ public static class ContractHarnessBuilder {
   }
 
   public static string Insert(ContractPreparedProgram prepared, string declaration) {
-    var edits = (prepared.Heap?.SourceEdits ?? []).Append(new ContractSourceEdit(
+    var edits = (prepared.Heap?.QuerySourceEdits ?? []).Append(new ContractSourceEdit(
       ContractSourceSnapshot.UriFor(prepared.Source.Path), InsertionPosition(prepared), declaration)).ToList();
     return ContractSourceSnapshot.Find(ContractSourceSnapshot.ApplyEdits(prepared.SourceSnapshots, edits),
       ContractSourceSnapshot.UriFor(prepared.Source.Path)).Content;

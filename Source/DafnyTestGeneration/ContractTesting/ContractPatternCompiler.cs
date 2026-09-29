@@ -248,9 +248,7 @@ internal static class ContractPatternCompiler {
     IDictionary<string, DafnyType> bindings, IList<(string Name, DafnyType Type)> pendingReuses,
     ContractGenerationBounds bounds) {
     var datatype = expected.AsDatatype ?? throw Mismatch(expected, pattern.Kind);
-    var constructor = datatype.Ctors.SingleOrDefault(candidate => pattern.Constructor == candidate.FullName ||
-      pattern.Constructor == datatype.Name + "." + candidate.Name ||
-      pattern.Constructor == datatype.FullDafnyName + "." + candidate.Name || pattern.Constructor == candidate.Name);
+    var constructor = datatype.Ctors.SingleOrDefault(candidate => ContractHeapFactory.NamesConstructor(pattern.Constructor, datatype, candidate));
     if (constructor == null || !constructor.Formals.Select(formal => formal.Name)
           .ToHashSet(StringComparer.Ordinal).SetEquals(pattern.Fields!.Keys)) {
       throw new ArgumentException("Datatype pattern constructor and fields do not match resolved type '" + expected + "'.");

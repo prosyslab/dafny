@@ -121,8 +121,8 @@ public static class ContractCallableSelector {
   public static string FunctionResultName(Program program, Function function) =>
     function.Result?.Name ?? ContractBodyNames.Family(program, "contractResult");
 
-  internal static Method DescribeFunction(Program program, Function function) {
-    var resultName = FunctionResultName(program, function);
+  internal static Method DescribeFunction(Program program, Function function, string? resultFamily = null) {
+    var resultName = function.Result?.Name ?? resultFamily ?? FunctionResultName(program, function);
     var result = function.Result ?? new Formal(function.Origin, resultName, function.ResultType, false, false, null);
     var contractCloner = new FunctionDescriptorCloner(function, result, true);
     var bodyCloner = new FunctionDescriptorCloner(function, result, false);

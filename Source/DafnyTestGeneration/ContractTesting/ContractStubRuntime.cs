@@ -37,15 +37,17 @@ public static class ContractStubRuntime {
           .Select(field => new { name = field.Name, mutable = field.IsMutable }).ToList()
       }).ToList();
     var shapes = program.RawModules().SelectMany(module => module.TopLevelDecls).OfType<DatatypeDecl>()
-      .Where(datatype => datatype.TypeArgs.Count == 0)
+      .Where(datatype => datatype.TypeArgs.Count == 0 || runtimeReferences && datatype is not CoDatatypeDecl)
       .SelectMany(datatype => datatype.Ctors.Where(constructor => !constructor.IsGhost && constructor.Formals.All(formal => !formal.IsGhost))
         .Select(constructor => new {
-          runtimeType = (RuntimeTypeName(datatype) + (datatype.IsRecordType ? "" : "_" + constructor.GetCompileName(program.Options))).Replace("@", ""),
+          runtimeType = (RuntimeTypeName(datatype) + (datatype.IsRecordType ? "" : "_" + constructor.GetCompileName(program.Options)) +
+            (datatype.TypeArgs.Count == 0 ? "" : "`" + datatype.TypeArgs.Count)).Replace("@", ""),
           constructor = datatype.FullDafnyName + "." + constructor.Name,
+          typeArguments = datatype.TypeArgs.Count,
           fields = constructor.Formals.Select((formal, index) => new {
             name = formal.Name,
             runtimeName = "_" + (formal.HasName ? formal.CompileName : "a" + index),
-            shape = TypeShape(formal.Type)
+            shape = TypeShape(formal.Type, datatype.TypeArgs)
           }).ToList()
         })).ToList();
     return """
@@ -62,6 +64,7 @@ public static class ContractStubRuntime {
       private static string currentCall = "";
       private static readonly Dictionary<string, object> currentInputs = new();
       private static readonly Dictionary<string, JsonElement> pureChoices = new();
+      private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, JsonElement> shapeCache = new(StringComparer.Ordinal);
       private static readonly Dictionary<object, string> references = new(ReferenceEqualityComparer.Instance);
       private static readonly Dictionary<string, string> referenceTypes = new(StringComparer.Ordinal);
       private static readonly Dictionary<string, Dictionary<string, JsonElement>> logicalFields = new(StringComparer.Ordinal);
@@ -74,16 +77,128 @@ public static class ContractStubRuntime {
       private static int targetInvocation;
       private static readonly JsonElement shapes = JsonDocument.Parse(DATATYPE_SHAPES).RootElement.Clone();
       private static readonly JsonElement heapShapes = JsonDocument.Parse(HEAP_SHAPES).RootElement.Clone();
+      // Reflection metadata is independent of the values supplied to an observation.
+      private static readonly Dictionary<string, JsonElement> datatypeShapes = shapes.EnumerateArray()
+        .GroupBy(shape => shape.GetProperty("runtimeType").GetString(), StringComparer.Ordinal)
+        .ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+      private static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, Type[]> runtimeInterfaces = new();
+      private static readonly System.Collections.Concurrent.ConcurrentDictionary<(Type Type, string Name), System.Reflection.FieldInfo> datatypeFields = new();
+      private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, System.Collections.Concurrent.ConcurrentDictionary<string, JsonElement>> immutableEncodings = new();
+      private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, object> immutableValues = new();
+      private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, System.Collections.Concurrent.ConcurrentDictionary<(string Name, string Shape), Dafny.ISequence<Dafny.Rune>>> immutableNamedEncodings = new();
+      private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, NamedFragment> namedFragments = new();
       private static readonly Dictionary<string, string[]> concreteTypes = JsonSerializer.Deserialize<Dictionary<string, string[]>>(CONCRETE_TYPES);
+      private sealed class NamedFragment {
+        public JsonElement Values { get; }
+        public NamedFragment(JsonElement values) { Values = values; }
+      }
+      [System.Text.Json.Serialization.JsonConverter(typeof(OrderedValuesConverter))]
+      public sealed class OrderedValues {
+        internal IReadOnlyList<JsonElement> Fragments { get; }
+        internal OrderedValues(IReadOnlyList<JsonElement> fragments) { Fragments = fragments; }
+      }
+      public sealed class OrderedValuesConverter : System.Text.Json.Serialization.JsonConverter<OrderedValues> {
+        public override OrderedValues Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) {
+          throw new NotSupportedException("Runtime observation values are write-only.");
+        }
+        public override void Write(Utf8JsonWriter writer, OrderedValues value, JsonSerializerOptions options) {
+          writer.WriteStartObject();
+          foreach (var fragment in value.Fragments) {
+            foreach (var property in fragment.EnumerateObject()) { property.WriteTo(writer); }
+          }
+          writer.WriteEndObject();
+        }
+      }
       private static Exception Unsupported(string reason) {
         File.AppendAllText(OBSERVATION_PATH, JsonSerializer.Serialize(new {
           name = "$unsupported/" + reason, value = new { kind = "boolean", value = "false" }
         }) + "\n");
         return new NotSupportedException(reason);
       }
+      /// <summary>Decodes concrete Dafny strings without allocating one string per BMP scalar.</summary>
+      public static string Text(Dafny.ISequence<Dafny.Rune> value) {
+        var type = value.GetType();
+        if (!IsRuntimeSequence(type.IsGenericType ? type.GetGenericTypeDefinition() : type)) {
+          return value.ToVerbatimString(false);
+        }
+        var result = new System.Text.StringBuilder();
+        foreach (var rune in value) {
+          var scalar = rune.Value;
+          if ((uint)scalar <= 0xffff && (scalar < 0xd800 || scalar > 0xdfff)) {
+            result.Append((char)scalar);
+          } else {
+            result.Append(char.ConvertFromUtf32(scalar));
+          }
+        }
+        return result.ToString();
+      }
+      private static bool IsRuntimeSequence(Type definition) =>
+        definition.Assembly == typeof(Dafny.Sequence<>).Assembly &&
+        definition.FullName is "Dafny.ArraySequence`1" or "Dafny.ConcatSequence`1";
+      // Interface lists are cached per runtime type; no observed value is cached here.
+      private static Type[] Interfaces(Type type) => runtimeInterfaces.GetOrAdd(type, item => item.GetInterfaces());
+      private static Type GenericInterface(Type[] interfaces, params Type[] definitions) =>
+        interfaces.FirstOrDefault(candidate => candidate.IsGenericType && definitions.Contains(candidate.GetGenericTypeDefinition()));
+      private static Type RequireGenericInterface(Type type, params Type[] definitions) =>
+        Interfaces(type).First(candidate => candidate.IsGenericType && definitions.Contains(candidate.GetGenericTypeDefinition()));
       private static object Encode(object value, JsonElement? shape = null) {
+        if (value != null && references.TryGetValue(value, out var reference)) { return new { kind = "reference", value = reference }; }
+        if (value == null || value.GetType().IsValueType) { return EncodeValue(value, shape); }
+        var key = shape?.GetRawText() ?? "";
+        if (immutableEncodings.TryGetValue(value, out var encodings) && encodings.TryGetValue(key, out var existing)) {
+          return existing;
+        }
+        var encoded = EncodeValue(value, shape);
+        if (!ImmutableValue(value, new HashSet<object>(ReferenceEqualityComparer.Instance))) { return encoded; }
+        // Store detached JSON only after encoding and recursively establishing immutable structure.
+        var serialized = JsonSerializer.SerializeToElement(encoded);
+        immutableEncodings.GetOrCreateValue(value).TryAdd(key, serialized);
+        return serialized;
+      }
+      // Interface implementations and heap references do not establish immutability.
+      private static bool ImmutableValue(object value, HashSet<object> visiting) {
+        if (value == null || value is BigInteger or bool or char or Dafny.Rune or byte or sbyte or short or ushort or int or uint or long or ulong) { return true; }
+        if (references.ContainsKey(value)) { return false; }
+        if (immutableValues.TryGetValue(value, out _)) { return true; }
+        if (!visiting.Add(value)) { return false; }
+        try {
+          var type = value.GetType();
+          var definition = type.IsGenericType ? type.GetGenericTypeDefinition() : type;
+          if (definition == typeof(Dafny.Map<,>)) {
+            var map = RequireGenericInterface(type, typeof(Dafny.IMap<,>));
+            foreach (var item in (IEnumerable)map.GetProperty("ItemEnumerable").GetValue(value)) {
+              var pair = RequireGenericInterface(item.GetType(), typeof(Dafny.IPair<,>));
+              if (!ImmutableValue(pair.GetProperty("Car").GetValue(item), visiting) ||
+                  !ImmutableValue(pair.GetProperty("Cdr").GetValue(item), visiting)) { return false; }
+            }
+          } else if (definition == typeof(Dafny.Set<>) || definition == typeof(Dafny.MultiSet<>)) {
+            var collection = RequireGenericInterface(type, typeof(Dafny.ISet<>), typeof(Dafny.IMultiSet<>));
+            foreach (var item in (IEnumerable)collection.GetProperty("Elements").GetValue(value)) {
+              if (!ImmutableValue(item, visiting)) { return false; }
+            }
+          } else if (IsRuntimeSequence(definition)) {
+            foreach (var item in (IEnumerable)value) {
+              if (!ImmutableValue(item, visiting)) { return false; }
+            }
+          } else if (datatypeShapes.TryGetValue(definition.FullName, out var datatype)) {
+            foreach (var field in datatype.GetProperty("fields").EnumerateArray()) {
+              var member = datatypeFields.GetOrAdd((type, field.GetProperty("runtimeName").GetString()), key =>
+                key.Type.GetField(key.Name) ?? throw Unsupported("Missing datatype runtime field metadata."));
+              if (!member.IsInitOnly || !ImmutableValue(member.GetValue(value), visiting)) { return false; }
+            }
+          } else { return false; }
+          immutableValues.GetValue(value, _ => new object());
+          return true;
+        } finally {
+          visiting.Remove(value);
+        }
+      }
+      private static object EncodeValue(object value, JsonElement? shape) {
         if (value == null) { return new { kind = "null" }; }
         if (references.TryGetValue(value, out var id)) { return new { kind = "reference", value = id }; }
+        if (shape?.GetProperty("kind").GetString() == "parameter") {
+          throw Unsupported("Runtime observation has an unresolved Dafny type parameter.");
+        }
         if (shape?.GetProperty("kind").GetString() == "integer") {
           var integerValue = value switch {
             byte item => new BigInteger(item), sbyte item => new BigInteger(item),
@@ -112,8 +227,9 @@ public static class ContractStubRuntime {
         if (value is char || value is Dafny.Rune) {
           return new { kind = "character", value = value.ToString() };
         }
-        var setInterface = value.GetType().GetInterfaces().FirstOrDefault(candidate =>
-          candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(Dafny.ISet<>));
+        var runtimeType = value.GetType();
+        var interfaces = Interfaces(runtimeType);
+        var setInterface = GenericInterface(interfaces, typeof(Dafny.ISet<>));
         if (setInterface != null) {
           var encodedItems = new List<(string SortKey, object Item)>();
           var enumerable = (IEnumerable)setInterface.GetProperty("Elements").GetValue(value);
@@ -124,8 +240,7 @@ public static class ContractStubRuntime {
           return new { kind = "set", items = encodedItems.OrderBy(item => item.SortKey, StringComparer.Ordinal)
             .Select(item => item.Item).ToList() };
         }
-        var multisetInterface = value.GetType().GetInterfaces().FirstOrDefault(candidate =>
-          candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(Dafny.IMultiSet<>));
+        var multisetInterface = GenericInterface(interfaces, typeof(Dafny.IMultiSet<>));
         if (multisetInterface != null) {
           var encodedItems = new List<(string SortKey, object Item)>();
           var enumerable = (IEnumerable)multisetInterface.GetProperty("Elements").GetValue(value);
@@ -136,14 +251,12 @@ public static class ContractStubRuntime {
           return new { kind = "multiset", items = encodedItems.OrderBy(item => item.SortKey, StringComparer.Ordinal)
             .Select(item => item.Item).ToList() };
         }
-        var mapInterface = value.GetType().GetInterfaces().FirstOrDefault(candidate =>
-          candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(Dafny.IMap<,>));
+        var mapInterface = GenericInterface(interfaces, typeof(Dafny.IMap<,>));
         if (mapInterface != null) {
           var encodedEntries = new List<(string SortKey, object Entry)>();
           var enumerable = (IEnumerable)mapInterface.GetProperty("ItemEnumerable").GetValue(value);
           foreach (var item in enumerable) {
-            var pairInterface = item.GetType().GetInterfaces().First(candidate =>
-              candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(Dafny.IPair<,>));
+            var pairInterface = RequireGenericInterface(item.GetType(), typeof(Dafny.IPair<,>));
             var key = Encode(pairInterface.GetProperty("Car").GetValue(item), shape?.GetProperty("key"));
             var mapped = Encode(pairInterface.GetProperty("Cdr").GetValue(item), shape?.GetProperty("value"));
             encodedEntries.Add((JsonSerializer.Serialize(key), new { key, value = mapped }));
@@ -155,6 +268,9 @@ public static class ContractStubRuntime {
           // A Dafny array is a heap reference; its length and elements are captured as flat named values.
           var reference = "pbt-reference-" + references.Count;
           references.Add(value, reference);
+          if (shape is { } arrayShape && arrayShape.TryGetProperty("type", out var arrayType)) {
+            referenceTypes.Add(reference, arrayType.GetString());
+          }
           return new { kind = "reference", value = reference };
         }
         if (value is IEnumerable sequence) {
@@ -162,22 +278,57 @@ public static class ContractStubRuntime {
           foreach (var item in sequence) { items.Add(Encode(item, shape?.GetProperty("element"))); }
           return new { kind = "sequence", items };
         }
-        foreach (var datatypeShape in shapes.EnumerateArray()) {
-          if (datatypeShape.GetProperty("runtimeType").GetString() != value.GetType().FullName) { continue; }
+        var definition = runtimeType.IsGenericType ? runtimeType.GetGenericTypeDefinition() : runtimeType;
+        if (datatypeShapes.TryGetValue(definition.FullName, out var datatypeShape)) {
+          JsonElement? arguments = shape is { } concrete && concrete.TryGetProperty("arguments", out var concreteArguments)
+            ? concreteArguments : null;
+          var arity = datatypeShape.GetProperty("typeArguments").GetInt32();
+          if (arity > 0 && (arguments == null || arguments.Value.GetArrayLength() != arity)) {
+            throw Unsupported("Generic datatype observation requires concrete Dafny type arguments.");
+          }
           var fields = new Dictionary<string, object>();
           foreach (var field in datatypeShape.GetProperty("fields").EnumerateArray()) {
-            var member = value.GetType().GetField(field.GetProperty("runtimeName").GetString());
-            if (member == null) { throw Unsupported("Missing datatype runtime field metadata."); }
-            fields.Add(field.GetProperty("name").GetString(), Encode(member.GetValue(value), field.GetProperty("shape")));
+            var member = datatypeFields.GetOrAdd((runtimeType, field.GetProperty("runtimeName").GetString()), key =>
+              key.Type.GetField(key.Name) ?? throw Unsupported("Missing datatype runtime field metadata."));
+            var fieldShape = field.GetProperty("shape");
+            fields.Add(field.GetProperty("name").GetString(), Encode(member.GetValue(value),
+              arity == 0 ? fieldShape : ResolveShape(fieldShape, arguments)));
           }
           return new { kind = "datatype", constructor = datatypeShape.GetProperty("constructor").GetString(), fields };
         }
         if (RUNTIME_REFERENCES && heapShapes.EnumerateArray().Any(item => item.GetProperty("runtimeType").GetString() == value.GetType().FullName)) {
           var reference = "pbt-reference-" + references.Count;
           references.Add(value, reference);
+          referenceTypes.Add(reference, HeapShape(value).GetProperty("type").GetString());
+          logicalFields.Add(reference, new Dictionary<string, JsonElement>(StringComparer.Ordinal));
           return new { kind = "reference", value = reference };
         }
         throw Unsupported("Unsupported runtime observation type: " + value.GetType());
+      }
+      private static JsonElement ResolveShape(JsonElement shape, JsonElement? arguments) {
+        if (shape.GetProperty("kind").GetString() == "parameter") {
+          var index = shape.GetProperty("index").GetInt32();
+          if (arguments == null || index < 0 || index >= arguments.Value.GetArrayLength()) {
+            throw Unsupported("Datatype field has an unresolved Dafny type parameter.");
+          }
+          return arguments.Value[index];
+        }
+        var resolved = new Dictionary<string, object>();
+        foreach (var property in shape.EnumerateObject()) {
+          resolved.Add(property.Name, property.Value.ValueKind switch {
+            JsonValueKind.Object => ResolveShape(property.Value, arguments),
+            JsonValueKind.Array => property.Value.EnumerateArray().Select(item => ResolveShape(item, arguments)).ToArray(),
+            _ => (object)property.Value
+          });
+        }
+        return JsonSerializer.SerializeToElement(resolved);
+      }
+      public static Dafny.ISequence<Dafny.Rune> InstantiateShape(Dafny.ISequence<Dafny.Rune> shape,
+          Dafny.ISequence<Dafny.ISequence<Dafny.Rune>> arguments) {
+        var concrete = new List<JsonElement>();
+        foreach (var argument in arguments.Elements) { concrete.Add(Shape(argument)); }
+        var resolved = ResolveShape(Shape(shape), JsonSerializer.SerializeToElement(concrete));
+        return Dafny.Sequence<Dafny.Rune>.UnicodeFromString(Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(resolved.GetRawText())));
       }
       private static void AddRuntimeFields(string name, object value, Dictionary<string, object> values, HashSet<object> visiting) {
         if (value is Array array) {
@@ -217,12 +368,38 @@ public static class ContractStubRuntime {
       }
       public static Dafny.ISequence<Dafny.Rune> SerializeNamed<T>(Dafny.ISequence<Dafny.Rune> name, T value,
           Dafny.ISequence<Dafny.Rune> shape) {
-        var values = new Dictionary<string, object>(StringComparer.Ordinal) { [name.ToVerbatimString(false)] = Encode(value, Shape(shape)) };
-        if (RUNTIME_REFERENCES) {
-          AddRuntimeFields(name.ToVerbatimString(false), value, values, new HashSet<object>(ReferenceEqualityComparer.Instance));
+        var nameText = Text(name);
+        var concreteShape = Shape(shape);
+        var key = (nameText, concreteShape.GetRawText());
+        if (value != null && !references.ContainsKey(value) &&
+            immutableNamedEncodings.TryGetValue(value, out var named) && named.TryGetValue(key, out var existing)) {
+          return existing;
         }
-        var json = JsonSerializer.Serialize(values);
-        return Dafny.Sequence<Dafny.Rune>.UnicodeFromString(json.Substring(1, json.Length - 2));
+        var values = new Dictionary<string, object>(StringComparer.Ordinal) { [nameText] = Encode(value, concreteShape) };
+        if (RUNTIME_REFERENCES) {
+          AddRuntimeFields(nameText, value, values, new HashSet<object>(ReferenceEqualityComparer.Instance));
+        }
+        var encodedValues = JsonSerializer.SerializeToElement(values);
+        var json = encodedValues.GetRawText();
+        var result = Dafny.Sequence<Dafny.Rune>.UnicodeFromString(json.Substring(1, json.Length - 2));
+        namedFragments.Add(result, new NamedFragment(encodedValues));
+        if (value != null && !references.ContainsKey(value) && immutableValues.TryGetValue(value, out _)) {
+          immutableNamedEncodings.GetOrCreateValue(value).TryAdd(key, result);
+        }
+        return result;
+      }
+      public static OrderedValues PrepareValues(Dafny.ISequence<Dafny.ISequence<Dafny.Rune>> fragments) {
+        var associated = new JsonElement[fragments.Count];
+        var index = 0;
+        foreach (var fragment in fragments) {
+          if (!namedFragments.TryGetValue(fragment, out var encoded)) {
+            var text = "{" + string.Join(",", fragments.Select(Text)) + "}";
+            using var parsed = JsonDocument.Parse(text);
+            return new OrderedValues(new[] { parsed.RootElement.Clone() });
+          }
+          associated[index++] = encoded.Values;
+        }
+        return new OrderedValues(associated);
       }
       private static bool SameJson(JsonElement left, JsonElement right) {
         if (left.ValueKind != right.ValueKind) { return false; }
@@ -249,12 +426,17 @@ public static class ContractStubRuntime {
       }
       public static void Register<T>(Dafny.ISequence<Dafny.Rune> name, Dafny.ISequence<Dafny.Rune> typeName,
           T value, Dafny.ISequence<Dafny.Rune> logicalBase64) {
-        var id = name.ToVerbatimString(false);
+        var id = Text(name);
         references.Add(value, id);
-        referenceTypes.Add(id, typeName.ToVerbatimString(false));
+        // Registration changes the encoding identity, even if a caller catches a later metadata error.
+        immutableEncodings.Clear();
+        immutableValues.Clear();
+        immutableNamedEncodings.Clear();
+        namedFragments.Clear();
+        referenceTypes.Add(id, Text(typeName));
         var shape = HeapShape(value);
         var supplied = JsonDocument.Parse(System.Text.Encoding.UTF8.GetString(
-          Convert.FromBase64String(logicalBase64.ToVerbatimString(false)))).RootElement;
+          Convert.FromBase64String(Text(logicalBase64)))).RootElement;
         var state = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
         foreach (var field in shape.GetProperty("logicalFields").EnumerateArray()) {
           var fieldName = field.GetProperty("name").GetString();
@@ -276,12 +458,17 @@ public static class ContractStubRuntime {
       }
       private static object SnapshotHeap() {
         var heap = new List<object>();
-        foreach (var reference in references) {
+        // Reading a field may discover another object. Grow the closure without invalidating enumeration.
+        for (var referenceIndex = 0; referenceIndex < references.Count; referenceIndex++) {
+          var reference = references.ElementAt(referenceIndex);
           if (reference.Key is Array array) {
             if (array.Rank != 1) { throw Unsupported("Only one-dimensional array observations are implemented."); }
             var elements = new List<object>();
             foreach (var element in array) { elements.Add(Encode(element)); }
-            heap.Add(new { id = reference.Value, type = referenceTypes[reference.Value], fields = new Dictionary<string, object>(),
+            if (!referenceTypes.TryGetValue(reference.Value, out var arrayType)) {
+              throw Unsupported("Array heap observation has no resolved element type.");
+            }
+            heap.Add(new { id = reference.Value, type = arrayType, fields = new Dictionary<string, object>(),
               dimensions = new[] { array.Length }, elements });
             continue;
           }
@@ -297,6 +484,7 @@ public static class ContractStubRuntime {
         }
         return heap;
       }
+      public static string RuntimeHeap() => JsonSerializer.Serialize(SnapshotHeap());
       private static void ApplyHeap(JsonElement heap) {
         if (heap.ValueKind == JsonValueKind.Null) { return; }
         var updates = new List<(object Receiver, Action Store, string Name)>();
@@ -371,16 +559,18 @@ public static class ContractStubRuntime {
           update.Store();
         }
       }
-      private static JsonElement Shape(Dafny.ISequence<Dafny.Rune> encoded) => JsonDocument.Parse(
-        System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(encoded.ToVerbatimString(false)))).RootElement.Clone();
+      private static JsonElement Shape(Dafny.ISequence<Dafny.Rune> encoded) => shapeCache.GetOrAdd(Text(encoded), key => {
+        using var document = JsonDocument.Parse(System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(key)));
+        return document.RootElement.Clone();
+      });
       public static void Capture<T>(Dafny.ISequence<Dafny.Rune> name, T value,
           Dafny.ISequence<Dafny.Rune> shape) {
         File.AppendAllText(OBSERVATION_PATH,
-          JsonSerializer.Serialize(new { name = name.ToVerbatimString(false),
+          JsonSerializer.Serialize(new { name = Text(name),
             value = Encode(value, Shape(shape)) }) + "\n");
       }
       public static void Snapshot(Dafny.ISequence<Dafny.Rune> phase) {
-        var prefix = "$" + phase.ToVerbatimString(false) + "/";
+        var prefix = "$" + Text(phase) + "/";
         var snapshot = JsonDocument.Parse(JsonSerializer.Serialize(SnapshotHeap())).RootElement;
         foreach (var item in snapshot.EnumerateArray()) {
           var id = item.GetProperty("id").GetString();
@@ -403,23 +593,23 @@ public static class ContractStubRuntime {
         }
       }
       public static void Begin(Dafny.ISequence<Dafny.Rune> name) {
-        currentCall = name.ToVerbatimString(false);
+        currentCall = Text(name);
         currentInputs.Clear();
       }
       public static void Input<T>(Dafny.ISequence<Dafny.Rune> name, T value,
           Dafny.ISequence<Dafny.Rune> shape) {
-        currentInputs.Add(name.ToVerbatimString(false), Encode(value, Shape(shape)));
+        currentInputs.Add(Text(name), Encode(value, Shape(shape)));
       }
       public static void End() {
         Request(currentCall, JsonSerializer.Serialize(currentInputs), "precondition");
       }
       public static bool CheckPrecondition(Dafny.ISequence<Dafny.Rune> name, Dafny.ISequence<Dafny.Rune> arguments) {
-        Request(name.ToVerbatimString(false), arguments.ToVerbatimString(false), "precondition");
+        Request(Text(name), Text(arguments), "precondition");
         return true;
       }
       public static bool Trace(Dafny.ISequence<Dafny.Rune> symbol, BigInteger position, BigInteger line, BigInteger column, bool value) {
         File.AppendAllText(OBSERVATION_PATH, JsonSerializer.Serialize(new {
-          name = "$branch/" + branchCount++ + "/" + symbol.ToVerbatimString(false) + "/" + position + "/" + line + "/" + column,
+          name = "$branch/" + branchCount++ + "/" + Text(symbol) + "/" + position + "/" + line + "/" + column,
           value = new { kind = "boolean", value = value ? "true" : "false" }
         }) + "\n");
         return value;
@@ -434,13 +624,13 @@ public static class ContractStubRuntime {
       }
       public static void EnterFrame(Dafny.ISequence<Dafny.Rune> name, Dafny.ISequence<Dafny.Rune> modifies) {
         var allowed = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var value in JsonDocument.Parse(modifies.ToVerbatimString(false)).RootElement.EnumerateArray()) {
+        foreach (var value in JsonDocument.Parse(Text(modifies)).RootElement.EnumerateArray()) {
           if (value.GetProperty("kind").GetString() != "reference") {
             throw Unsupported("Unsupported runtime modifies value.");
           }
           allowed.Add(value.GetProperty("value").GetString());
         }
-        frames.Push((name.ToVerbatimString(false), allowed));
+        frames.Push((Text(name), allowed));
       }
       public static void ExitFrame() {
         frames.Pop();
@@ -449,7 +639,7 @@ public static class ContractStubRuntime {
         if (receiver == null || !references.TryGetValue(receiver, out var id)) {
           throw Unsupported("Field write receiver is outside the finite observed heap.");
         }
-        var fieldName = field.ToVerbatimString(false);
+        var fieldName = Text(field);
         File.AppendAllText(OBSERVATION_PATH, JsonSerializer.Serialize(new {
           name = "$write/" + writeCount++ + "/" + fieldName, value = new { kind = "reference", value = id }
         }) + "\n");
@@ -487,28 +677,28 @@ public static class ContractStubRuntime {
       public static BigInteger StartTarget(Dafny.ISequence<Dafny.Rune> symbol, Dafny.ISequence<Dafny.Rune> arguments, BigInteger invocation) {
         var current = targetCallCount++;
         if (current != invocation) { return BigInteger.Zero; }
-        targetSymbol = symbol.ToVerbatimString(false);
+        targetSymbol = Text(symbol);
         targetInvocation = checked((int)current);
-        Request(targetSymbol, arguments.ToVerbatimString(false), "entry_start", targetInvocation);
+        Request(targetSymbol, Text(arguments), "entry_start", targetInvocation);
         return current + BigInteger.One;
       }
       public static void EndTarget(BigInteger token, Dafny.ISequence<Dafny.Rune> outputs) {
         if (token.IsZero) { return; }
         if (token != new BigInteger(targetInvocation) + BigInteger.One) { throw new InvalidOperationException("Mismatched target invocation."); }
-        Request(targetSymbol, "{}", "entry_end", targetInvocation, outputs.ToVerbatimString(false));
+        Request(targetSymbol, "{}", "entry_end", targetInvocation, Text(outputs));
         Environment.Exit(0);
       }
       public static T EndTargetValue<T>(BigInteger token, Dafny.ISequence<Dafny.Rune> outputName, T value,
           Dafny.ISequence<Dafny.Rune> shape) {
         EndTarget(token, Dafny.Sequence<Dafny.Rune>.UnicodeFromString(JsonSerializer.Serialize(
-          new Dictionary<string, object> { [outputName.ToVerbatimString(false)] =
+          new Dictionary<string, object> { [Text(outputName)] =
             Encode(value, Shape(shape)) })));
         return value;
       }
       public static Dafny.ISequence<Dafny.Rune> Realize(Dafny.ISequence<Dafny.Rune> name,
           Dafny.ISequence<Dafny.Rune> arguments, bool pure) {
-        var symbol = name.ToVerbatimString(false);
-        var inputs = arguments.ToVerbatimString(false);
+        var symbol = Text(name);
+        var inputs = Text(arguments);
         var key = symbol + ":" + inputs + ":" + JsonSerializer.Serialize(SnapshotHeap());
         JsonElement response;
         if (!pure || !pureChoices.TryGetValue(key, out response)) {
@@ -522,7 +712,7 @@ public static class ContractStubRuntime {
         return Output<T>(Realize(name, arguments, pure), outputName);
       }
       public static T Output<T>(Dafny.ISequence<Dafny.Rune> realization, Dafny.ISequence<Dafny.Rune> outputName) {
-        var observation = JsonDocument.Parse(realization.ToVerbatimString(false)).RootElement.GetProperty("outputs").GetProperty(outputName.ToVerbatimString(false));
+        var observation = JsonDocument.Parse(Text(realization)).RootElement.GetProperty("outputs").GetProperty(Text(outputName));
         return (T)Decode(observation, typeof(T));
       }
       private static object Decode(JsonElement observation, Type target) {
@@ -627,11 +817,23 @@ public static class ContractStubRuntime {
       .Replace("DATATYPE_SHAPES", JsonSerializer.Serialize(JsonSerializer.Serialize(shapes)));
   }
 
-  internal static string TypeShapeToken(Microsoft.Dafny.Type type) => Convert.ToBase64String(
-    System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(TypeShape(type))));
+  internal static string TypeShapeToken(Microsoft.Dafny.Type type, IReadOnlyList<TypeParameter>? parameters = null) => Convert.ToBase64String(
+    System.Text.Encoding.UTF8.GetBytes(JsonSerializer.Serialize(TypeShape(type, parameters))));
 
-  private static object TypeShape(Microsoft.Dafny.Type type) {
+  private static object TypeShape(Microsoft.Dafny.Type type, IReadOnlyList<TypeParameter>? parameters = null) {
+    if (type.IsArrayType) {
+      return new Dictionary<string, object> { ["kind"] = "reference", ["type"] = ContractHeapFactory.ArrayTypeName(type) };
+    }
     type = type.NormalizeToAncestorType();
+    if (type.AsTypeParameter is { } parameter) {
+      return new Dictionary<string, object> { ["kind"] = "parameter", ["index"] = parameters?.ToList().IndexOf(parameter) ?? -1 };
+    }
+    if (type.AsDatatype != null) {
+      return new Dictionary<string, object> {
+        ["kind"] = "datatype",
+        ["arguments"] = type.TypeArgs.Select(argument => TypeShape(argument, parameters)).ToList()
+      };
+    }
     if (type.AsBitVectorType is { } bitvector) {
       return new Dictionary<string, object> { ["kind"] = "bitvector", ["width"] = bitvector.Width };
     }
@@ -639,19 +841,19 @@ public static class ContractStubRuntime {
       return new Dictionary<string, object> { ["kind"] = "integer" };
     }
     if (type.AsSeqType is { } sequence) {
-      return new Dictionary<string, object> { ["kind"] = "sequence", ["element"] = TypeShape(sequence.Arg) };
+      return new Dictionary<string, object> { ["kind"] = "sequence", ["element"] = TypeShape(sequence.Arg, parameters) };
     }
     if (type.AsSetType is { } set) {
-      return new Dictionary<string, object> { ["kind"] = "set", ["element"] = TypeShape(set.Arg) };
+      return new Dictionary<string, object> { ["kind"] = "set", ["element"] = TypeShape(set.Arg, parameters) };
     }
     if (type.AsMultiSetType is { } multiset) {
-      return new Dictionary<string, object> { ["kind"] = "multiset", ["element"] = TypeShape(multiset.Arg) };
+      return new Dictionary<string, object> { ["kind"] = "multiset", ["element"] = TypeShape(multiset.Arg, parameters) };
     }
     if (type.AsMapType is { } map) {
       return new Dictionary<string, object> {
         ["kind"] = "map",
-        ["key"] = TypeShape(map.Domain),
-        ["value"] = TypeShape(map.Range)
+        ["key"] = TypeShape(map.Domain, parameters),
+        ["value"] = TypeShape(map.Range, parameters)
       };
     }
     return new Dictionary<string, object> { ["kind"] = "other" };

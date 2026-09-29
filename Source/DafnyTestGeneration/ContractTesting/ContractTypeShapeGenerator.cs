@@ -9,7 +9,7 @@ using DafnyType = Microsoft.Dafny.Type;
 namespace DafnyTestGeneration.ContractTesting;
 
 // Token.pos is a UTF-8 byte offset; ContractInputGenerator maps it to a UTF-16 index before insertion.
-internal sealed record ContractRefinementQuerySite(string SourcePath, string SourceSha256, int BytePosition);
+internal sealed record ContractRefinementQuerySite(string SourcePath, string SourceSha256, int BytePosition, string ModuleName);
 internal sealed record ContractRefinementObligation(string Value, string TypeName, string ConstraintSha256,
   ContractRefinementQuerySite? QuerySite, ContractReductionResult? Reduction) {
   public string Canonical => TypeName + "\n" + Value + "\n" + ConstraintSha256;
@@ -482,7 +482,7 @@ internal sealed record ContractInputShape(IReadOnlyDictionary<string, ContractSh
     }
     var source = matchingSources[0];
     querySite = new ContractRefinementQuerySite(source.Path, source.Sha256,
-      BytePosition: declaration.StartToken.pos);
+      BytePosition: declaration.StartToken.pos, ModuleName: declaration.Module.FullDafnyName);
     return true;
   }
 
@@ -695,9 +695,7 @@ public sealed class ContractTypeShapeGenerator(ContractGenerationBounds bounds) 
         (ConcreteValue(entry.Key, map.Domain, objects), ConcreteValue(entry.Value, map.Range, objects))).ToList());
     }
     if (expected.AsDatatype is { } datatype && value.Kind == ContractValueKind.Datatype) {
-      var constructor = datatype.Ctors.SingleOrDefault(candidate => value.Constructor == candidate.FullName ||
-        value.Constructor == datatype.Name + "." + candidate.Name ||
-        value.Constructor == datatype.FullDafnyName + "." + candidate.Name || value.Constructor == candidate.Name);
+      var constructor = datatype.Ctors.SingleOrDefault(candidate => ContractHeapFactory.NamesConstructor(value.Constructor, datatype, candidate));
       if (constructor == null || !constructor.Formals.Select(formal => formal.Name)
             .ToHashSet(StringComparer.Ordinal).SetEquals(value.Fields!.Keys)) {
         throw new ArgumentException("Concrete pattern datatype does not match its resolved constructor.");

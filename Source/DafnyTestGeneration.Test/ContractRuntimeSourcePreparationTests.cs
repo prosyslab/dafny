@@ -106,6 +106,47 @@ public class ContractRuntimeSourcePreparationTests {
     await Resolve(prepared);
   }
 
+  // Explicit constructor parameters preserve annotation order and retain the original inaccessible constructor.
+  [Fact]
+  public async Task AddsOrderedDiagnosticConstructorWithoutChangingOriginal() {
+    const string source = "module M { class Box { ghost var left: int ghost var right: int constructor Init() requires false {} } method Goal(box: Box) {} }";
+    const string generator = "method {:pbt_generator \"M.Goal\"} {:pbt_heap_constructor \"M.Box\", \"M.Box.right\", \"M.Box.left\"} Generate(r: PbtRandom.Source) returns (box: Box) { box := new Box.ContractDiagnosticCreate(2, 1); }";
+    var prepared = await Prepare(source, null, generator);
+    await Resolve(prepared);
+    Assert.Contains("constructor Init() requires false", prepared.Sources[0].Content);
+    Assert.Contains("constructor ContractDiagnosticCreate(ghost right: int, ghost left: int)", prepared.Sources[0].Content);
+    Assert.Contains("M.Box.ContractDiagnosticCreate", prepared.DiagnosticConstructors!);
+  }
+
+  // A diagnostic constructor cannot omit a runtime field even if the selected goal does not read it.
+  [Fact]
+  public async Task RejectsOmittedRuntimeConstructorField() {
+    const string source = "module M { class Box { var value: int } method Goal(box: Box) {} }";
+    const string generator = "method {:pbt_generator \"M.Goal\"} {:pbt_heap_constructor \"M.Box\"} Generate(r: PbtRandom.Source) returns (box: Box) { box := new Box.ContractDiagnosticCreate(); }";
+    var error = await Assert.ThrowsAsync<ArgumentException>(() => Prepare(source, null, generator));
+    Assert.Contains("omits required non-ghost field", error.Message);
+  }
+
+  // An omitted ghost field used by the original postcondition remains required supplied state.
+  [Fact]
+  public async Task RejectsRelevantOmittedConstructorField() {
+    const string source = "module M { class Box { ghost var value: int } method Goal(box: Box) ensures box.value == 7 {} }";
+    const string generator = "method {:pbt_generator \"M.Goal\"} {:pbt_heap_constructor \"M.Box\"} Generate(r: PbtRandom.Source) returns (box: Box) { box := new Box.ContractDiagnosticCreate(); }";
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => Prepare(source, null, generator));
+    Assert.Contains("is omitted", error.Message);
+  }
+
+  // Malformed or ambiguous field declarations do not create a diagnostic constructor.
+  [Theory]
+  [InlineData("\"M.Box\", \"M.Box.value\", \"M.Box.value\"")]
+  [InlineData("\"M.Box\", \"M.Other.value\"")]
+  [InlineData("\"M.Box\", 1")]
+  public async Task RejectsInvalidConstructorAnnotation(string arguments) {
+    const string source = "module M { class Box { ghost var value: int } method Goal(box: Box) {} }";
+    var generator = "method {:pbt_generator \"M.Goal\"} {:pbt_heap_constructor " + arguments + "} Generate(r: PbtRandom.Source) returns (box: Box) { box := new Box.ContractDiagnosticCreate(7); }";
+    await Assert.ThrowsAsync<NotSupportedException>(() => Prepare(source, null, generator));
+  }
+
   private static async Task<ContractRuntimePreparedSources> Prepare(string source, string? draft,
     string generator = Generator, string draftSymbol = "M.Helper") {
     var options = new DafnyOptions(DafnyOptions.Default);

@@ -68,7 +68,9 @@ public static class ContractModelCodec {
       ContractValueKind.Boolean when value.Value is "true" or "false" => value.Value,
       ContractValueKind.Character when value.Value != null &&
         Rune.DecodeFromUtf16(value.Value.AsSpan(), out var rune, out var consumed) == OperationStatus.Done && consumed == value.Value.Length =>
-        "'" + (rune.IsBmp ? EscapeCharacter((char)rune.Value) : "\\U{" + rune.Value.ToString("X", CultureInfo.InvariantCulture) + "}") + "'",
+        rune.IsBmp && char.IsControl((char)rune.Value)
+          ? "(" + rune.Value.ToString(CultureInfo.InvariantCulture) + " as char)"
+          : "'" + (rune.IsBmp ? EscapeCharacter((char)rune.Value) : "\\U{" + rune.Value.ToString("X", CultureInfo.InvariantCulture) + "}") + "'",
       ContractValueKind.Sequence when value.Items != null => "[" + string.Join(", ", value.Items.Select(item => ToDafny(item, moduleName))) + "]",
       ContractValueKind.Set when value.Items != null => "{" + string.Join(", ", value.Items.Select(item => ToDafny(item, moduleName))) + "}",
       ContractValueKind.Multiset when value.Items != null => "multiset{" + string.Join(", ", value.Items.Select(item => ToDafny(item, moduleName))) + "}",
@@ -156,7 +158,6 @@ public static class ContractModelCodec {
       '\n' => "\\n",
       '\r' => "\\r",
       '\t' => "\\t",
-      _ when char.IsControl(value) || char.IsSurrogate(value) => "\\u" + ((int)value).ToString("X4"),
       _ => value.ToString()
     };
   }

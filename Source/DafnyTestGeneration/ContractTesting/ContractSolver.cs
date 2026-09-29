@@ -13,14 +13,23 @@ public static class ContractSolver {
   public static async Task<ContractQueryResult> CheckAsync(string source, ContractQueryKind kind,
     DafnyOptions baseOptions, CancellationToken cancellationToken, bool captureModel = false,
     string queryName = ContractQueryBuilder.QueryName,
-    IReadOnlyList<ContractSource>? sourceSnapshots = null, string? sourcePath = null) {
+    IReadOnlyList<ContractSource>? sourceSnapshots = null, string? sourcePath = null,
+    Action<string, string>? phaseObserver = null, long? deadlineTimestamp = null) {
+    ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
     var log = new StringWriter();
+    var proofOnly = !captureModel && kind is ContractQueryKind.ClosedClause or ContractQueryKind.ObservedPostcondition;
     var options = new DafnyOptions(baseOptions, useNullWriters: true) {
       Compile = false,
       RunningBoogieFromCommandLine = true,
       DisallowIncludes = sourceSnapshots == null,
-      ProcsToCheck = ["*" + queryName + "*"]
+      ProcsToCheck = ["*" + queryName + "*"],
+      ProcsToIgnore = [],
+      // Removing unused axioms weakens the premise, so a native UNSAT proof remains
+      // sound. State/model queries must retain every axiom; pruned target failures
+      // are only nonproofs and never establish a realizable state or violation.
+      Prune = proofOnly
     };
+    if (proofOnly) { log.GetStringBuilder().AppendLine("Native proof-only pruning: target counterexamples are not state or model certificates."); }
     // The library option default is NullPrinter; the counterexample and its model
     // must go to this query's writer even when the outer command uses JSON output.
     options.Printer = new DafnyConsolePrinter(options);
@@ -41,19 +50,23 @@ public static class ContractSolver {
           "Snapshot-backed queries require the exact replaced source path.");
       }
       programSource = await ContractSourceSnapshot.ParseAsync(reporter,
-        ContractSourceSnapshot.Replace(sourceSnapshots, sourcePath, source), cancellationToken);
+        ContractSourceSnapshot.Replace(sourceSnapshots, sourcePath, source), cancellationToken,
+        phaseObserver: phaseObserver);
     } else {
-      programSource = await Utils.Parse(reporter, source, resolve: false,
-        uri: new Uri(Path.Combine(Path.GetTempPath(), "contract-query-" + Guid.NewGuid().ToString("N") + ".dfy")),
-        cancellationToken: cancellationToken);
+      programSource = await ContractPhaseRecorder.MeasureAsync(phaseObserver, "parse", cancellationToken,
+        () => Utils.Parse(reporter, source, resolve: false,
+          uri: new Uri(Path.Combine(Path.GetTempPath(), "contract-query-" + Guid.NewGuid().ToString("N") + ".dfy")),
+          cancellationToken: cancellationToken));
       if (programSource.DefaultModuleDef.Includes.Count > 0) {
         return new ContractQueryResult(kind, ContractQueryOutcome.Error,
           "Diagnostic includes require supplied immutable source snapshots.");
       }
       if (reporter.ErrorCount == 0) {
-        await new ProgramResolver(programSource).Resolve(cancellationToken);
+        await ContractPhaseRecorder.MeasureAsync(phaseObserver, "resolve", cancellationToken,
+          () => new ProgramResolver(programSource).Resolve(cancellationToken));
       }
     }
+    ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
     if (reporter.ErrorCount != 0) {
       return new ContractQueryResult(kind, ContractQueryOutcome.Error,
         string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
@@ -89,7 +102,10 @@ public static class ContractSolver {
       options.ProverOptions.Add("O:smt.mbqi=true");
     }
     if (!captureModel && kind != ContractQueryKind.PremiseConsistency) {
-      ReduceConcreteAssertion(programSource, log, queryName);
+      ContractPhaseRecorder.Measure(phaseObserver, "reduction", cancellationToken, () => {
+        ReduceConcreteAssertion(programSource, log, queryName);
+        return true;
+      });
     }
     options.ProcessSolverOptions(reporter, Microsoft.Dafny.Token.NoToken);
     if (reporter.ErrorCount != 0) {
@@ -101,11 +117,41 @@ public static class ContractSolver {
     var errors = 0;
     var selectedModules = new System.Collections.Generic.List<string>();
     // Translation keeps thread-static type-scope state, so it finishes on this thread before any awaited verification.
-    foreach (var (module, program) in BoogieGenerator.Translate(programSource, reporter).ToList()) {
+    var translated = ContractPhaseRecorder.Measure(phaseObserver, "translation", cancellationToken, () => {
+      // Every native module translation includes its complete visible declaration/import closure.
+      // Only modules owning the selected diagnostic can contribute a verified target assertion;
+      // translating the other modules duplicates that closure before ProcsToCheck is applied.
+      var queryModules = BoogieGenerator.VerifiableModules(programSource)
+        .Where(module => QueryMethods(module, queryName).Any());
+      Microsoft.Dafny.Type.ResetScopes();
+      return queryModules.Select(module => Tuple.Create(module.SanitizedName,
+        new BoogieGenerator(reporter, programSource.ProofDependencyManager).DoTranslation(programSource, module))).ToList();
+    });
+    ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
+    foreach (var (module, program) in translated) {
+      if (proofOnly) {
+        log.GetStringBuilder().AppendLine(ContractGlobalAssumptions.RemoveAbstractConstantAxioms(programSource, program));
+      }
+      var diagnosticMethods = programSource.RawModules().Where(owner => owner.SanitizedName == module)
+        .SelectMany(owner => QueryMethods(owner, queryName)).ToList();
+      var diagnosticNames = diagnosticMethods.SelectMany(method => new[] { method.FullDafnyName + " (well-formedness)", method.FullDafnyName + " (correctness)",
+          method.FullDafnyName + " (override check)" }).ToHashSet(StringComparer.Ordinal);
+      // The native routine filter runs after CFG preprocessing. Avoid preprocessing
+      // unrelated implementations while retaining every original procedure and axiom.
+      program.RemoveTopLevelDeclarations(declaration => declaration is Implementation implementation &&
+        !diagnosticNames.Contains(implementation.VerboseName));
+      var expectedImplementations = program.Implementations.Count();
+      if (diagnosticMethods.Count != 1 || program.Implementations.Count(implementation =>
+            implementation.VerboseName == diagnosticMethods[0].FullDafnyName + " (correctness)") != 1) {
+        return new ContractQueryResult(kind, ContractQueryOutcome.Error, "Native diagnostic correctness coverage is missing or ambiguous.");
+      }
       selectedModules.Add(module + "[" + string.Join(", ", program.Implementations.Select(implementation => implementation.Name)) + "]");
-      cancellationToken.ThrowIfCancellationRequested();
-      var (outcome, stats) = await DafnyMain.BoogieOnce(reporter, options, log, engine,
-        "contract-query", module, program, null);
+      ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
+      var logStart = log.GetStringBuilder().Length;
+      var (outcome, stats) = await ContractPhaseRecorder.MeasureAsync(phaseObserver, "boogie:" + module,
+        cancellationToken, () => DafnyMain.BoogieOnce(reporter, options, log, engine,
+          "contract-query", module, program, null, cancellationToken));
+      ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
       if (stats.TimeoutCount > 0) {
         return new ContractQueryResult(kind, ContractQueryOutcome.Timeout, log.ToString());
       }
@@ -115,15 +161,25 @@ public static class ContractSolver {
       if (stats.SolverExceptionCount > 0 || outcome is not (PipelineOutcome.Done or PipelineOutcome.VerificationCompleted)) {
         return new ContractQueryResult(kind, ContractQueryOutcome.Error, log.ToString());
       }
+      var moduleDiagnostics = log.GetStringBuilder().ToString(logStart, log.GetStringBuilder().Length - logStart);
+      var moduleTargetErrors = CountTargetErrors(moduleDiagnostics);
+      // Counterexamples may contain several target errors in one correctness body.
+      // Every other selected implementation must have verified, including all WD checks.
+      var complete = stats.ErrorCount == 0 ? stats.VerifiedCount == expectedImplementations :
+        moduleTargetErrors == stats.ErrorCount && stats.VerifiedCount == expectedImplementations - 1;
+      if (!complete) {
+        return new ContractQueryResult(kind, ContractQueryOutcome.Error, "Native diagnostic verification coverage is incomplete: " + log);
+      }
       verified += stats.VerifiedCount;
       errors += stats.ErrorCount;
     }
+    ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
     var diagnostics = log.ToString();
     // Dafny can split one original conjunction into several assertion obligations.
     // Every failure must be from the diagnostic property, including its reduction;
     // a separate well-definedness or call error must never masquerade as SAT.
-    var targetErrors = diagnostics.Split('\n').Count(line => line.TrimEnd('\r').EndsWith(
-      ": Error: " + ContractQueryBuilder.TargetMarker, StringComparison.Ordinal));
+    var targetErrors = CountTargetErrors(diagnostics);
+    ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
     if (errors > 0 && targetErrors == errors) {
       return new ContractQueryResult(kind, ContractQueryOutcome.Sat, diagnostics);
     }
@@ -135,10 +191,18 @@ public static class ContractSolver {
       ", modules=" + string.Join("; ", selectedModules) + "): " + diagnostics);
   }
 
+  private static IEnumerable<Method> QueryMethods(ModuleDefinition module, string queryName) =>
+    module.TopLevelDecls.OfType<TopLevelDeclWithMembers>().SelectMany(type => type.Members).OfType<Method>()
+      .Where(method => method.Name == queryName && method.Body != null);
+
+  private static int CountTargetErrors(string diagnostics) => diagnostics.Split('\n').Count(line =>
+    line.TrimEnd('\r').EndsWith(": Error: " + ContractQueryBuilder.TargetMarker, StringComparison.Ordinal));
+
   private static void ReduceConcreteAssertion(Microsoft.Dafny.Program program, TextWriter log, string queryName) {
     foreach (var method in program.RawModules().SelectMany(module => module.TopLevelDecls)
                .OfType<TopLevelDeclWithMembers>().SelectMany(type => type.Members).OfType<Method>()
                .Where(method => method.Name == queryName)) {
+      if (ContractQueryHeapReduction.TryApply(program, method, log)) { continue; }
       // Substituting initial bindings after an executable assignment would be wrong.
       // Path and heap-transition queries retain their original translation here.
       if (method.Body?.Body.Count != 1 || method.Body.Body[0] is not AssertStmt assertion) {
@@ -147,27 +211,39 @@ public static class ContractSolver {
       var bindings = new Dictionary<IVariable, Expression>();
       foreach (var clause in method.Req) {
         if (clause.E.Resolved is BinaryExpr { Op: BinaryExpr.Opcode.Eq } equality &&
-            equality.E0.Resolved is Microsoft.Dafny.IdentifierExpr identifier && IsConcreteValue(equality.E1)) {
+            equality.E0.Resolved is Microsoft.Dafny.IdentifierExpr identifier && ContractExpressionReducer.IsConcreteValue(equality.E1)) {
           bindings.TryAdd(identifier.Var, equality.E1);
         }
       }
+      var owner = method.EnclosingClass.EnclosingModuleDefinition;
       var reducer = new ContractExpressionReducer(program.Options,
-        method.EnclosingClass.EnclosingModuleDefinition, program.SystemModuleManager);
-      var reduction = reducer.Reduce(assertion.Expr, bindings);
+        owner, program.SystemModuleManager, program.ModuleSigs[owner].VisibilityScope);
+      var reduction = reducer.ReduceForNativeProofComposition(assertion.Expr, bindings);
+      foreach (var obligation in reduction.ProofObligations) {
+        var markerName = obligation.Kind switch {
+          ContractReductionProofKind.Witness => "contract_reduction_witness",
+          ContractReductionProofKind.Prerequisite => "contract_reduction_prerequisite",
+          ContractReductionProofKind.Predicate => "contract_reduction_predicate",
+          _ => throw new ArgumentOutOfRangeException()
+        };
+        var marker = new StringLiteralExpr(assertion.Origin, markerName, false) {
+          Type = new SeqType(Microsoft.Dafny.Type.Char)
+        };
+        method.Body.Body.Insert(method.Body.Body.Count - 1,
+          new AssertStmt(assertion.Origin, obligation.Expression, null, new Attributes("error", [marker], null)));
+      }
       // Keep the complete original assertion as a conjunct. Reduction supplies
       // concrete instances to the same solver obligation; it never supplies an
       // assumption or independently establishes a verdict on the original contract.
       assertion.Expr = Expression.CreateAnd(assertion.Expr, reduction.ReducedExpression, allowSimplification: false);
       log.WriteLine("Contract reduction: decision=" + reduction.Decision + ", residual=" + reduction.ResidualKind +
         ", quantifierInstances=" + reduction.QuantifierInstancesUsed + "/" + reduction.QuantifierInstanceLimit +
-        ", exhaustion=" + string.Join(",", reduction.ExhaustionReasons) + "; original assertion retained.");
+        ", exhaustion=" + string.Join(",", reduction.ExhaustionReasons) +
+        ", checkedWitnesses=" + reduction.ProofWitnesses.Count +
+        ", proofSteps=" + reduction.ProofObligations.Count +
+        ", proofNodes=" + reduction.ProofCompositionNodesAdmitted + "/" +
+        reduction.ProofCompositionNodesConsidered + "; original assertion retained.");
     }
   }
 
-  private static bool IsConcreteValue(Expression expression) => expression.Resolved switch {
-    Microsoft.Dafny.LiteralExpr => true,
-    SeqDisplayExpr sequence => sequence.Elements.TrueForAll(IsConcreteValue),
-    DatatypeValue datatype => datatype.Arguments.TrueForAll(IsConcreteValue),
-    _ => false
-  };
 }

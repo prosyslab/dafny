@@ -231,7 +231,7 @@ public static class ContractSymbolicChecker {
       : new VerificationRun(ContractSymbolicStatus.Error, "No implementation verification obligations were produced.");
   }
 
-  private static IReadOnlyList<ContractSymbolicDependency> TrustDependencies(
+  internal static IReadOnlyList<ContractSymbolicDependency> TrustDependencies(
     IEnumerable<MethodOrFunction> callables) {
     var result = new List<ContractSymbolicDependency>();
     foreach (var callable in callables) {
@@ -261,7 +261,7 @@ public static class ContractSymbolicChecker {
       .ThenBy(item => item.Kind, StringComparer.Ordinal).ToList();
   }
 
-  private static string? TrustKind(AssumptionDescription description) {
+  internal static string? TrustKind(AssumptionDescription description) {
     if (description == AssumptionDescription.MayNotTerminate) {
       return "nontermination";
     }

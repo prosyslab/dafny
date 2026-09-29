@@ -1,0 +1,337 @@
+#nullable enable
+
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Boogie;
+using Microsoft.Dafny;
+using Declaration = Microsoft.Dafny.Declaration;
+using Function = Microsoft.Dafny.Function;
+using Program = Microsoft.Dafny.Program;
+using Type = Microsoft.Dafny.Type;
+
+namespace DafnyTestGeneration.ContractTesting;
+
+/// <summary>Distinguishes logical proof from evidence usable for execution and construction.</summary>
+public enum ContractSpecificationRole { Execution, Logical }
+
+internal enum ContractNativeProofRole { WellFormedness, Correctness, Override }
+internal sealed record ContractSpecificationCheck(Declaration Declaration, ContractNativeProofRole Role) {
+  internal string VerboseName => ContractSpecificationChecker.Name(Declaration) + " (" + (Role switch {
+    ContractNativeProofRole.WellFormedness => "well-formedness",
+    ContractNativeProofRole.Correctness => "correctness",
+    _ => "override check"
+  }) + ")";
+}
+
+/// <summary>A closed set of original declarations whose contracts need native validation.</summary>
+public sealed class ContractSpecificationScope {
+  internal HashSet<Declaration> Declarations { get; }
+  internal ContractSpecificationChecker Owner { get; }
+  internal HashSet<ContractSpecificationCheck> Checks { get; }
+  public ContractSpecificationRole Role { get; }
+  public string CacheIdentity { get; }
+  public IReadOnlyList<string> RequiredNativeChecks => Checks.Select(check => check.VerboseName).Distinct()
+    .OrderBy(name => name, StringComparer.Ordinal).ToList();
+  public string? Failure { get; }
+  public IReadOnlyList<string> Symbols => Declarations.Select(declaration => declaration.GetType().Name + ":" +
+    ContractSpecificationChecker.Name(declaration)).OrderBy(name => name, StringComparer.Ordinal).ToList();
+  internal ContractSpecificationScope(ContractSpecificationChecker owner, string context, ContractSpecificationRole role,
+    HashSet<Declaration> declarations, HashSet<ContractSpecificationCheck> checks, string? failure) {
+    Owner = owner;
+    Role = role;
+    Declarations = declarations;
+    Checks = checks;
+    Failure = failure;
+    CacheIdentity = context + "\n" + role + "\n" + string.Join("\n", Symbols.Concat(RequiredNativeChecks));
+  }
+}
+
+/// <summary>Internal native proof evidence; this is not part of the public campaign JSON schema.</summary>
+public sealed record ContractSpecificationResult(bool Verified, string Diagnostics,
+  IReadOnlyList<string> Implementations, IReadOnlyList<string> AssertionFreeDeclarations,
+  int VerifiedCount = 0, int ErrorCount = 0) {
+  public string? SourceSetHash { get; init; }
+  public ContractSequenceRefinementResult? SequenceRefinement { get; init; }
+  public ContractSpecificationRole? Role { get; init; }
+}
+
+/// <summary>Source-bound independent global inhabitance evidence, separate from any captured state.</summary>
+public sealed record ContractGlobalInhabitationCertificate(string SourceSetHash,
+  IReadOnlyList<string> Symbols, string ProofContext);
+
+/// <summary>Certifies complete original specification closures, with separately budgeted native module checks.</summary>
+public sealed class ContractSpecificationChecker {
+  private readonly Program original;
+  private readonly IReadOnlyList<ContractSource> sources;
+  private readonly DafnyOptions options;
+  private readonly HashSet<ContractSpecificationCheck> checkedChecks = [];
+  private readonly HashSet<Declaration> acceptedDeclarations = [];
+  private readonly HashSet<ModuleDefinition> originalModules;
+  private Program? verificationProgram;
+  private BatchErrorReporter? reporter;
+  private readonly string sourceSetHash;
+  private ContractGlobalInhabitationCertificate? independentGlobals;
+
+  // Every scope is certified against the original sources with abstract-global axioms removed.
+  private string ScopeContext => sourceSetHash + "/original-native-with-abstract-global-axioms-removed";
+
+  /// <summary>Creates a campaign-local checker bound to one immutable original source program.</summary>
+  public ContractSpecificationChecker(Program original, IReadOnlyList<ContractSource> sources, DafnyOptions options) {
+    this.original = original;
+    originalModules = original.RawModules().ToHashSet();
+    this.sources = sources;
+    sourceSetHash = ContractRuntimeTypeEvidence.SourceSetHash(sources);
+    this.options = new DafnyOptions(options, useNullWriters: true) {
+      Compile = false,
+      RunningBoogieFromCommandLine = true,
+      ProcsToCheck = ["*"],
+      ProcsToIgnore = [],
+      VerifyAllModules = true
+    };
+    this.options.Printer = new DafnyConsolePrinter(this.options);
+  }
+
+  /// <summary>Discovers original bodies, proof callees, type constraints and witnesses, rejecting unproved trust.</summary>
+  public ContractSpecificationScope Scope(IEnumerable<MethodOrFunction> roots, IEnumerable<Type>? types = null,
+    IEnumerable<ConstantField>? constants = null) => CreateScope(ContractSpecificationRole.Execution, roots, types, constants);
+
+  /// <summary>Collects logical definitions and invoked proof methods without claiming compiled by-method correctness.</summary>
+  public ContractSpecificationScope LogicalScope(IEnumerable<MethodOrFunction> roots, IEnumerable<Type>? types = null,
+    IEnumerable<ConstantField>? constants = null) => CreateScope(ContractSpecificationRole.Logical, roots, types, constants);
+
+  internal ContractSpecificationScope UnsupportedScope(string reason) => new(this,
+    ScopeContext, ContractSpecificationRole.Execution, [], [], reason);
+
+  private ContractSpecificationScope CreateScope(ContractSpecificationRole role, IEnumerable<MethodOrFunction> roots,
+    IEnumerable<Type>? types, IEnumerable<ConstantField>? constants) {
+    var declarations = new HashSet<Declaration>();
+    if (role == ContractSpecificationRole.Execution) {
+      ContractRuntimeObligationTransformer.ExecutionReachable(original, roots, types, declarations, constants);
+    } else {
+      ContractRuntimeObligationTransformer.LogicalReachable(original, roots, types, declarations, constants);
+    }
+    declarations.RemoveWhere(declaration => Module(declaration) == original.SystemModuleManager.SystemModule ||
+      declaration is not (MethodOrFunction or ConstantField or SubsetTypeDecl or NewtypeDecl) || declaration is NonNullTypeDecl ||
+      declaration is ConstantField { Rhs: null, IsStatic: false });
+    // A source skip is not a certificate. Re-enable it in the detached proof program below;
+    // every actual trust dependency and every emitted native obligation still applies.
+    var trust = ContractSymbolicChecker.TrustDependencies(declarations.OfType<MethodOrFunction>()
+        .Where(callable => role != ContractSpecificationRole.Logical || callable is not Function))
+      .Where(dependency => dependency.Kind != "verify_false").ToList();
+    var failure = trust.Count == 0 ? null : string.Join(", ", trust.Select(item => item.Symbol + ":" + item.Kind));
+    foreach (var declaration in declarations) {
+      if (!Owns(declaration)) { failure ??= "Declaration is not from the original resolved program: " + Name(declaration); }
+      if (role == ContractSpecificationRole.Logical && declaration is Function function) {
+        if (function.Body == null) { failure ??= "bodyless logical function: " + Name(function); }
+        if (Attributes.Contains(function.Attributes, "only")) { failure ??= "verify_only: " + Name(function); }
+        foreach (var assumption in ContractRuntimeObligationTransformer.LogicalNodes(function).OfType<Node>()
+                   .SelectMany(node => node.Assumptions(function))) {
+          if (ContractSymbolicChecker.TrustKind(assumption.desc) is { } kind) { failure ??= Name(function) + ":" + kind; }
+        }
+      }
+      var ancestors = new List<Declaration> { declaration };
+      if (declaration is MemberDecl member) { ancestors.Add(member.EnclosingClass); }
+      if (ancestors.Any(item => item.HasAxiomAttribute || item.HasExternAttribute) ||
+          !declaration.ShouldVerify(original.Compilation) || Module(declaration).IsFacade) {
+        failure ??= "unverified declaration or owner: " + Name(declaration);
+      }
+      for (var owner = Module(declaration); owner != null; owner = owner.EnclosingModule) {
+        if (Attributes.Contains(owner.Attributes, "axiom") || Attributes.Contains(owner.Attributes, "extern")) {
+          failure ??= "unverified module: " + owner.FullDafnyName;
+        }
+      }
+      if (declaration is not MethodOrFunction) {
+        foreach (var assumption in declaration.Descendants().Prepend((INode)declaration).OfType<Node>().SelectMany(node => node.Assumptions(declaration))) {
+          if (ContractSymbolicChecker.TrustKind(assumption.desc) is { } kind) {
+            failure ??= Name(declaration) + ":" + kind;
+          }
+        }
+      }
+      if (declaration is ConstantField { Rhs: null }) { failure ??= "bodyless constant: " + Name(declaration); }
+    }
+    return new(this, ScopeContext, role,
+      declarations, declarations.SelectMany(NativeChecks).ToHashSet(), failure);
+  }
+
+  /// <summary>Collects the original function and type dependencies of a resolved contract expression.</summary>
+  public ContractSpecificationScope Scope(Expression expression) => Scope(
+    ContractRuntimeObligationTransformer.FunctionReferences(expression),
+    expression.DescendantsAndSelf.OfType<Expression>().Where(node => node.Type != null).Select(node => node.Type));
+
+  /// <summary>Collects logical dependencies, including proof statements and constants directly in a contract.</summary>
+  public ContractSpecificationScope LogicalScope(Expression expression) {
+    var nodes = ContractRuntimeObligationTransformer.LogicalNodes(expression).Prepend(expression).ToList();
+    var roots = nodes.OfType<Expression>().Select(node => ContractRuntimeObligationTransformer.FunctionReference(node.Resolved))
+      .OfType<MethodOrFunction>().Concat(nodes.OfType<CallStmt>().Select(call => call.Method)).Distinct().ToList();
+    var scope = LogicalScope(roots, nodes.OfType<Expression>().Where(node => node.Type != null).Select(node => node.Type),
+      nodes.OfType<MemberSelectExpr>().Select(select => select.Member).OfType<ConstantField>());
+    // This declaration supplies diagnostic ownership only; direct proof-statement assumptions
+    // must be audited even when the expression contains no callable or constant references.
+    var diagnosticOwner = (Declaration?)roots.FirstOrDefault() ?? original.DefaultModuleDef.TopLevelDecls.First();
+    var failure = nodes.OfType<Node>().SelectMany(node => node.Assumptions(diagnosticOwner))
+      .Select(assumption => ContractSymbolicChecker.TrustKind(assumption.desc)).FirstOrDefault(kind => kind != null);
+    return failure == null ? scope : new(this, ScopeContext,
+      ContractSpecificationRole.Logical, scope.Declarations, scope.Checks, scope.Failure ?? "contract expression:" + failure);
+  }
+
+  /// <summary>Returns owner modules that still contain unchecked declarations in this exact scope.</summary>
+  public IReadOnlyList<string> PendingModules(ContractSpecificationScope scope) => !BoundScope(scope) ? [] : scope.Checks
+    .Where(check => !checkedChecks.Contains(check)).Select(check => Module(check.Declaration).FullDafnyName)
+    .Distinct().OrderBy(name => name, StringComparer.Ordinal).ToList();
+
+  /// <summary>Publishes a certificate only after every declaration in the dependency closure has been checked.</summary>
+  public bool Accept(ContractSpecificationScope scope) {
+    if (!BoundScope(scope) || scope.Failure != null || !scope.Checks.IsSubsetOf(checkedChecks)) { return false; }
+    if (scope.Role == ContractSpecificationRole.Execution) { acceptedDeclarations.UnionWith(scope.Declarations); }
+    return true;
+  }
+
+  /// <summary>Checks certificate identity against the original resolved declaration, not its spelling alone.</summary>
+  public bool IsValidated(Declaration declaration) => acceptedDeclarations.Contains(declaration);
+
+  internal bool IsBoundTo(Program program, IReadOnlyList<ContractSource> snapshots) =>
+    ReferenceEquals(original, program) && sourceSetHash == ContractRuntimeTypeEvidence.SourceSetHash(snapshots);
+
+  internal ContractGlobalInhabitationCertificate? IndependentGlobals(Program program,
+    IReadOnlyList<ContractSource> snapshots) {
+    if (!IsBoundTo(program, snapshots)) { return null; }
+    if (independentGlobals != null) { return independentGlobals; }
+    var scope = ContractInitialTypeProof.RequiredGlobalScope(program, this);
+    if (!Accept(scope) || !ContractRuntimeHeapChecking.IndependentCertifiedGlobalsInhabited(program, this)) { return null; }
+    return independentGlobals = new(sourceSetHash, scope.Symbols,
+      "original-native-wd-with-abstract-global-axioms-removed; independent-finite-inhabitants");
+  }
+
+  /// <summary>Verifies every emitted native obligation for the selected declarations in one owner module.</summary>
+  public async Task<ContractSpecificationResult> CheckModuleAsync(ContractSpecificationScope scope, string moduleName,
+    CancellationToken cancellationToken, Action<string, string>? phaseObserver = null, long? deadlineTimestamp = null) {
+    ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
+    if (!BoundScope(scope)) { return new(false, "Specification scope is not bound to this original checker/source context.", [], []); }
+    if (scope.Failure != null) { return new(false, scope.Failure, [], []); }
+    var selected = scope.Checks.Where(check => Module(check.Declaration).FullDafnyName == moduleName &&
+      !checkedChecks.Contains(check)).ToList();
+    if (selected.Count == 0) { return new(true, "No remaining declarations in this module.", [], []); }
+    if (verificationProgram == null) {
+      reporter = new BatchErrorReporter(options);
+      var parsed = await ContractSourceSnapshot.ParseAsync(reporter, sources, cancellationToken, phaseObserver: phaseObserver);
+      if (reporter.ErrorCount != 0) {
+        return new(false, string.Join("\n", reporter.AllMessages.Select(message => message.Message)), [], []);
+      }
+      ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
+      // Only this private parse is changed. A skipped body must pass the same native
+      // well-formedness/correctness checks as a normally verified source declaration.
+      foreach (var owner in parsed.RawModules()) {
+        owner.Attributes = EnableVerification(owner.Attributes);
+        foreach (var declaration in owner.Descendants().OfType<Declaration>()) {
+          declaration.Attributes = EnableVerification(declaration.Attributes);
+        }
+      }
+      verificationProgram = parsed;
+      options.ProcessSolverOptions(reporter, Microsoft.Dafny.Token.NoToken);
+      if (reporter.ErrorCount != 0) {
+        verificationProgram = null;
+        return new(false, string.Join("\n", reporter.AllMessages.Select(message => message.Message)), [], []);
+      }
+    }
+    var module = BoogieGenerator.VerifiableModules(verificationProgram).SingleOrDefault(candidate => candidate.FullDafnyName == moduleName);
+    if (module == null) { return new(false, "Native verification owner unavailable: " + moduleName, [], []); }
+    var verboseNames = selected.Select(check => check.VerboseName).ToHashSet(StringComparer.Ordinal);
+    var translated = ContractPhaseRecorder.Measure(phaseObserver, "translation:" + moduleName, cancellationToken, () => {
+      Type.ResetScopes();
+      return new BoogieGenerator(reporter!, verificationProgram.ProofDependencyManager).DoTranslation(verificationProgram, module);
+    });
+    ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
+    var globalContext = ContractGlobalAssumptions.RemoveAbstractConstantAxioms(verificationProgram, translated);
+    var selectedImplementations = translated.Implementations.Where(implementation => verboseNames.Contains(implementation.VerboseName)).ToList();
+    var procedures = translated.TopLevelDeclarations.OfType<Procedure>().Select(procedure => procedure.VerboseName).ToHashSet();
+    // Native function/type/constant checks always emit a procedure, even when there are no assertions.
+    // By-method declarations instead emit their correctness procedure and are also covered here.
+    var missing = selected.Where(check => !procedures.Contains(check.VerboseName)).ToList();
+    if (missing.Count != 0) {
+      return new(false, "Missing native declaration coverage: " + string.Join(", ", missing.Select(check => check.VerboseName)),
+        selectedImplementations.Select(implementation => implementation.Name).ToList(), []);
+    }
+    var assertionFree = selected.Where(check => !selectedImplementations.Any(implementation =>
+      implementation.VerboseName == check.VerboseName)).Select(check => Name(check.Declaration)).Distinct().ToList();
+    // Restrict verification bodies only: retain all original procedures, definitions, axioms and imported declarations.
+    // This avoids Boogie's user-facing wildcard routine filter and its source-name matching ambiguities.
+    translated.RemoveTopLevelDeclarations(declaration => declaration is Implementation implementation && !selectedImplementations.Contains(implementation));
+    var implementationNames = selectedImplementations.Select(implementation => implementation.Name).ToList();
+    var sequenceProof = ContractPhaseRecorder.Measure(phaseObserver, "sequence_refinement:" + moduleName, cancellationToken,
+      () => ContractSequenceRefinementProof.Apply(translated, selectedImplementations, cancellationToken, deadlineTimestamp));
+    ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
+    if (!sequenceProof.Preserved) {
+      return Evidence(new(false, sequenceProof.Failure ?? "Original native assertion preservation failed.", implementationNames, []));
+    }
+    if (selectedImplementations.Count == 0) {
+      ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
+      checkedChecks.UnionWith(selected);
+      return Evidence(new(true, globalContext + "\nNative declarations contain no assertions.", [], assertionFree));
+    }
+    using var engine = ExecutionEngine.CreateWithoutSharedCache(options);
+    var log = new StringWriter();
+    var (outcome, stats) = await ContractPhaseRecorder.MeasureAsync(phaseObserver, "boogie:" + moduleName,
+      cancellationToken, () => DafnyMain.BoogieOnce(reporter!, options, log, engine,
+        "contract-specification", module.SanitizedName, translated, null, cancellationToken));
+    ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
+    var success = outcome is PipelineOutcome.Done or PipelineOutcome.VerificationCompleted &&
+      stats.ErrorCount + stats.TimeoutCount + stats.InconclusiveCount + stats.OutOfResourceCount + stats.OutOfMemoryCount + stats.SolverExceptionCount == 0 &&
+      stats.VerifiedCount == selectedImplementations.Count;
+    ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
+    if (success) { checkedChecks.UnionWith(selected); }
+    return Evidence(new(success, globalContext + "\n" + log, implementationNames, assertionFree, stats.VerifiedCount, stats.ErrorCount));
+
+    ContractSpecificationResult Evidence(ContractSpecificationResult result) => result with {
+      SourceSetHash = sourceSetHash,
+      SequenceRefinement = sequenceProof,
+      Role = scope.Role
+    };
+  }
+
+  private bool BoundScope(ContractSpecificationScope scope) => ReferenceEquals(scope.Owner, this) &&
+    sourceSetHash == ContractRuntimeTypeEvidence.SourceSetHash(sources);
+
+  private bool Owns(Declaration declaration) => originalModules.Contains(Module(declaration)) && (declaration switch {
+    Method { FunctionFromWhichThisIsByMethodDecl: { } function } method =>
+      ReferenceEquals(function.ByMethodDecl, method) && function.EnclosingClass is TopLevelDeclWithMembers owner && owner.Members.Contains(function),
+    MemberDecl member => member.EnclosingClass is TopLevelDeclWithMembers owner && owner.Members.Contains(member),
+    TopLevelDecl type => type.EnclosingModuleDefinition.TopLevelDecls.Contains(type),
+    _ => false
+  });
+
+  private static IEnumerable<ContractSpecificationCheck> NativeChecks(Declaration declaration) {
+    if (declaration is not Method { FunctionFromWhichThisIsByMethodDecl: not null }) {
+      yield return new(declaration, ContractNativeProofRole.WellFormedness);
+    }
+    if (declaration is Method) { yield return new(declaration, ContractNativeProofRole.Correctness); }
+    if (declaration is Function { OverriddenFunction: not null } or Method { OverriddenMethod: not null }) {
+      yield return new(declaration, ContractNativeProofRole.Override);
+    }
+  }
+
+  private static Attributes? EnableVerification(Attributes? attributes) {
+    if (attributes == null) { return null; }
+    var previous = EnableVerification(attributes.Prev);
+    if (attributes.Name == "verify" && attributes.Args.Count == 1 && Microsoft.Dafny.LiteralExpr.IsFalse(attributes.Args[0])) {
+      return previous;
+    }
+    attributes.Prev = previous;
+    return attributes;
+  }
+
+  private static ModuleDefinition Module(Declaration declaration) => declaration switch {
+    MemberDecl member => member.EnclosingClass.EnclosingModuleDefinition,
+    TopLevelDecl topLevel => topLevel.EnclosingModuleDefinition,
+    _ => throw new ArgumentException("Unexpected specification declaration.", nameof(declaration))
+  };
+
+  internal static string Name(Declaration declaration) => declaration switch {
+    MemberDecl member => member.FullDafnyName,
+    TopLevelDecl topLevel => topLevel.FullDafnyName,
+    _ => throw new ArgumentException("Unexpected specification declaration.", nameof(declaration))
+  };
+}

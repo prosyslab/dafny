@@ -51,7 +51,8 @@ public static class ContractSourceSnapshot {
   // As with the native parser, errors leave a parsed AST; callers must check the
   // reporter before accessing resolver-populated members such as RawModules().
   public static async Task<Program> ParseAsync(ErrorReporter reporter, IReadOnlyList<ContractSource> sources,
-    CancellationToken cancellationToken, bool resolve = true) {
+    CancellationToken cancellationToken, bool resolve = true, ICollection<DafnyDiagnostic>? deferredGhostDiagnostics = null,
+    Action<string, string>? phaseObserver = null) {
     Validate(sources);
     var files = sources.ToDictionary(source => UriFor(source.Path), source => source.Content);
     var fileSystem = new SnapshotFileSystem(files);
@@ -60,10 +61,14 @@ public static class ContractSourceSnapshot {
     reporter.Options.DisallowIncludes = false;
     var roots = sources.Select(source => DafnyFile.HandleDafnyFile(fileSystem, reporter, reporter.Options,
       UriFor(source.Path), Token.NoToken, false)).ToList();
-    var parsed = await new ProgramParser(NullLogger<ProgramParser>.Instance, fileSystem)
-      .ParseFiles(sources[0].Path, roots, reporter, cancellationToken);
+    var parsed = await ContractPhaseRecorder.MeasureAsync(phaseObserver, "parse", cancellationToken,
+      () => new ProgramParser(NullLogger<ProgramParser>.Instance, fileSystem)
+        .ParseFiles(sources[0].Path, roots, reporter, cancellationToken));
     if (resolve && reporter.ErrorCount == 0) {
-      await new ProgramResolver(parsed.Program).Resolve(cancellationToken);
+      var resolver = deferredGhostDiagnostics == null ? new ProgramResolver(parsed.Program) :
+        new ContractDiagnosticResolver(parsed.Program, deferredGhostDiagnostics);
+      await ContractPhaseRecorder.MeasureAsync(phaseObserver, "resolve", cancellationToken,
+        () => resolver.Resolve(cancellationToken));
     }
     return parsed.Program;
   }

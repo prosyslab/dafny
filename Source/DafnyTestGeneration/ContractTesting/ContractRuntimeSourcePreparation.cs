@@ -11,7 +11,7 @@ namespace DafnyTestGeneration.ContractTesting;
 
 /// <summary>Detached source snapshots with a mapping back to their supplied source locations.</summary>
 public sealed record ContractRuntimePreparedSources(IReadOnlyList<ContractSource> Sources,
-  ContractRuntimeSourceMap SourceMap);
+  ContractRuntimeSourceMap SourceMap, IReadOnlySet<string>? DiagnosticConstructors = null);
 
 /// <summary>Tracks UTF-8 token positions through draft replacements and generator insertions.</summary>
 public sealed class ContractRuntimeSourceMap {
@@ -96,10 +96,17 @@ public static class ContractRuntimeSourcePreparation {
       throw new NotSupportedException("A generator must contain exactly one matching pbt_generator method.");
     }
     ValidateGenerator(goal, generators[0]);
+    var constructors = ContractDiagnosticConstruction.Parse(program, goal, generators[0]);
+    foreach (var constructor in constructors) {
+      edits.Add(new(constructor.Class.Origin.Uri, constructor.Class.EndToken.pos, 0, constructor.Declaration,
+        generator, constructor.Origin.pos, true));
+    }
     foreach (var declaration in generatorDeclarations) {
       AddHelper(declaration, generator, module, program, source, names, edits);
     }
-    return Apply(sources, edits);
+    return Apply(sources, edits) with {
+      DiagnosticConstructors = constructors.Select(constructor => constructor.Class.FullDafnyName + "." + ContractHeapFactory.ConstructorName).ToHashSet()
+    };
   }
 
   private static async Task<Program> ParseDeclarations(ContractSource source, DafnyOptions options,

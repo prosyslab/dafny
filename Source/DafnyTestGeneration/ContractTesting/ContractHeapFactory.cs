@@ -16,6 +16,7 @@ public sealed record ContractSourceEdit(Uri SourceUri, int Position, string Text
 public sealed class ContractHeapPlan {
   public IReadOnlyList<(int Position, string Text)> SourceInsertions { get; }
   public IReadOnlyList<ContractSourceEdit> SourceEdits { get; }
+  internal IReadOnlyList<ContractSourceEdit> QuerySourceEdits { get; }
   public string AllocationStatements { get; }
   public string InitialCaptureStatements { get; }
   public string FinalCaptureStatements { get; }
@@ -27,6 +28,10 @@ public sealed class ContractHeapPlan {
   private readonly IReadOnlyDictionary<string, HeapSlot> slots;
   private readonly IReadOnlyList<HeapSlot> orderedSlots;
   internal IReadOnlyList<HeapSlot> Slots => orderedSlots;
+  internal ContractHeapPlan WithAdditionalSourceEdits(IEnumerable<ContractSourceEdit> edits) =>
+    new(SourceInsertions, AllocationStatements, InitialCaptureStatements, FinalCaptureStatements,
+      QueryParameters, InitialConstraints, QueryModifies, inputs, slots, orderedSlots,
+      SourceEdits.Concat(edits).ToList(), QuerySourceEdits.Concat(edits).ToList());
   internal IReadOnlySet<Field> TrackedGhostFields => orderedSlots.SelectMany(slot => slot.Fields)
     .Where(field => field.IsGhost).ToHashSet();
   internal string ValueExpression(ContractValue value, DafnyType? type) => ContractHeapFactory.ValueExpression(value, type, slots);
@@ -51,9 +56,11 @@ public sealed class ContractHeapPlan {
     string queryModifies,
     IReadOnlyDictionary<string, ContractValue> inputs,
     IReadOnlyDictionary<string, HeapSlot> slots,
-    IReadOnlyList<HeapSlot> orderedSlots, IReadOnlyList<ContractSourceEdit> sourceEdits) {
+    IReadOnlyList<HeapSlot> orderedSlots, IReadOnlyList<ContractSourceEdit> sourceEdits,
+    IReadOnlyList<ContractSourceEdit> querySourceEdits) {
     SourceInsertions = sourceInsertions;
     SourceEdits = sourceEdits;
+    QuerySourceEdits = querySourceEdits;
     AllocationStatements = allocationStatements;
     InitialCaptureStatements = initialCaptureStatements;
     FinalCaptureStatements = finalCaptureStatements;
@@ -129,21 +136,9 @@ public sealed class ContractHeapPlan {
     ArgumentNullException.ThrowIfNull(observations);
     var lengthError = ValidateLengths(observations, false);
     if (lengthError != null) { return lengthError; }
-    var allowedIds = new HashSet<string>(StringComparer.Ordinal);
-    foreach (var frameExpression in method.Mod?.Expressions ?? Enumerable.Empty<FrameExpression>()) {
-      var expression = frameExpression.E.Resolved ?? frameExpression.E;
-      var value = expression is ThisExpr ? receiver : expression is IdentifierExpr { Var: Formal formal } &&
-        actualInputs.TryGetValue(formal.Name, out var input) ? input : null;
-      if (frameExpression.FieldName != null || value == null ||
-          value.Kind != ContractValueKind.Reference || value.Value == null || !slots.ContainsKey(value.Value)) {
-        throw new NotSupportedException(
-          $"Only modifies clauses naming the receiver or reference formals are supported at '{method.FullDafnyName}'.");
-      }
-      allowedIds.Add(value.Value);
-    }
-
-    foreach (var slot in orderedSlots.Where(slot => !allowedIds.Contains(slot.Object.Id))) {
-      foreach (var cell in slot.Cells) {
+    var allowed = ContractModelRealizer.ModifiedFields(method, actualInputs, receiver, this);
+    foreach (var slot in orderedSlots) {
+      foreach (var cell in slot.Cells.Where(cell => !allowed.Contains((slot.Object.Id, cell.Name)))) {
         var key = FinalObservationKey(slot.Object.Id, cell.Name);
         if (!observations.TryGetValue(key, out var observed)) {
           return $"Missing final heap observation '{key}'.";
@@ -189,7 +184,7 @@ internal sealed record HeapSlot(ContractHeapObject Object, ClassDecl Class,
 /// Builds diagnostic source fragments for a finite, explicitly supplied unit-mode heap.
 /// </summary>
 public static class ContractHeapFactory {
-  private const string ConstructorName = "ContractDiagnosticCreate";
+  internal const string ConstructorName = "ContractDiagnosticCreate";
   private static readonly Regex IdPattern = new("^[A-Za-z_][A-Za-z0-9_-]*$", RegexOptions.CultureInvariant);
 
   public static ContractHeapPlan Prepare(Program program, ContractTestRequest request) =>
@@ -212,7 +207,7 @@ public static class ContractHeapFactory {
       throw new ArgumentException($"Duplicate heap object id '{duplicateId}'.", nameof(request));
     }
 
-    var classes = program.RawModules().SelectMany(module => module.TopLevelDecls).OfType<ClassDecl>().ToList();
+    var classes = ClassDeclarations(program);
     IReadOnlyDictionary<string, DafnyType>? arrayTypes = null;
     var slots = new Dictionary<string, HeapSlot>(StringComparer.Ordinal);
     var heapPrefix = ContractBodyNames.Family(program, "contractHeap");
@@ -266,31 +261,54 @@ public static class ContractHeapFactory {
 
     return new ContractHeapPlan(insertions.Where(edit => edit.SourceUri == entry.Origin.Uri).Select(edit => (edit.Position, edit.Text)).ToList(), string.Join("\n", allocations), initialCaptures,
       finalCaptures, parameters, constraints, modifies,
-      new Dictionary<string, ContractValue>(request.Inputs), slots, orderedSlots, insertions);
+      new Dictionary<string, ContractValue>(request.Inputs), slots, orderedSlots, insertions,
+      BuildConstructorInsertions(slots.Values, includeConstructors: false));
   }
 
-  internal static string SourceTypeName(Program program, Method entry, ClassDecl declaration) {
-    var visited = new HashSet<ModuleSignature>();
-    string? Find(ModuleSignature signature) {
-      if (!visited.Add(signature)) { return null; }
+  internal static string SourceTypeName(Program program, Method entry, TopLevelDecl declaration) =>
+    SourceTypeName(program, entry.EnclosingClass.EnclosingModuleDefinition, declaration);
+
+  internal static string SourceTypeName(Program program, ModuleDefinition scope, TopLevelDecl declaration) {
+    return FindSourceName(program, scope, signature => {
       foreach (var pair in signature.TopLevels) {
-        if (pair.Value == declaration || pair.Value is NonNullTypeDecl nonNull && nonNull.Class == declaration) {
+        var candidate = pair.Value is NonNullTypeDecl nonNull ? nonNull.Class : pair.Value;
+        if (candidate == declaration || candidate.FullDafnyName == declaration.FullDafnyName) {
           return pair.Key.TrimEnd('?');
         }
       }
+      return null;
+    }) ?? throw new NotSupportedException("No visible source-level type name is available for " + declaration.FullDafnyName + ".");
+  }
+
+  internal static string SourceModuleName(Program program, ModuleDefinition scope, ModuleDefinition declaration) =>
+    FindSourceName(program, scope, signature => signature.ModuleDef?.FullDafnyName == declaration.FullDafnyName ? "" : null) ??
+    throw new NotSupportedException("No visible source-level module name is available for " + declaration.FullDafnyName + ".");
+
+  private static string? FindSourceName(Program program, ModuleDefinition scope, Func<ModuleSignature, string?> localName) {
+    var visited = new HashSet<ModuleSignature>();
+    string? Find(ModuleSignature signature) {
+      if (!visited.Add(signature)) { return null; }
+      if (localName(signature) is { } name) { return name; }
       foreach (var pair in signature.TopLevels.Where(pair => pair.Value is ModuleDecl)) {
         var nested = Find(((ModuleDecl)pair.Value).AccessibleSignature());
-        if (nested != null) { return pair.Key + "." + nested; }
+        if (nested != null) { return pair.Key + (nested.Length == 0 ? "" : "." + nested); }
       }
       return null;
     }
-    return Find(program.ModuleSigs[entry.EnclosingClass.EnclosingModuleDefinition]) ??
-      throw new NotSupportedException("No visible source-level type name is available for " + declaration.FullDafnyName + ".");
+    return Find(program.ModuleSigs[scope]);
   }
+
+  /// <summary>Accepts a constructor by its full, datatype-qualified, fully qualified or bare name.</summary>
+  internal static bool NamesConstructor(string? name, DatatypeDecl datatype, DatatypeCtor constructor) =>
+    name == constructor.FullName || name == datatype.Name + "." + constructor.Name ||
+    name == datatype.FullDafnyName + "." + constructor.Name || name == constructor.Name;
+
+  internal static IReadOnlyList<ClassDecl> ClassDeclarations(Program program) =>
+    program.RawModules().SelectMany(module => module.TopLevelDecls).OfType<ClassDecl>().ToList();
 
   internal static string ArrayTypeName(DafnyType type) => "array<" + type.NormalizeExpand().TypeArgs[0] + ">";
 
-  private static IReadOnlyDictionary<string, DafnyType> ResolvedArrayTypes(Program program) {
+  internal static IReadOnlyDictionary<string, DafnyType> ResolvedArrayTypes(Program program) {
     var result = new Dictionary<string, DafnyType>(StringComparer.Ordinal);
     void Visit(DafnyType type) {
       if (type.AsArrayType is { Dims: 1 }) { result.TryAdd(ArrayTypeName(type), type); }
@@ -321,7 +339,7 @@ public static class ContractHeapFactory {
     return "var " + slot.VariableName + " := new " + slot.ElementType + "[" + values.Count + "]" + initializer + ";";
   }
 
-  private static void ValidateClass(Program program, Method entry, ClassDecl classDecl) {
+  internal static void ValidateClass(Program program, Method entry, ClassDecl classDecl) {
     var scope = program.ModuleSigs[entry.EnclosingClass.EnclosingModuleDefinition].VisibilityScope;
     if (classDecl.EnclosingModuleDefinition.ModuleKind != ModuleKindEnum.Concrete ||
         classDecl.TypeArgs.Count != 0 || classDecl.Traits.Count != 0 || classDecl.HasExternAttribute ||
@@ -335,7 +353,7 @@ public static class ContractHeapFactory {
     }
   }
 
-  private static (IReadOnlyList<Field> Supplied, IReadOnlyList<Field> OmittedGhost) ValidateFields(
+  internal static (IReadOnlyList<Field> Supplied, IReadOnlyList<Field> OmittedGhost) ValidateFields(
     ClassDecl classDecl, ContractHeapObject item) {
     var declaredFields = classDecl.Members.OfType<Field>()
       .Where(field => field.Origin.line > 0 && !field.IsStatic).ToList();
@@ -371,10 +389,16 @@ public static class ContractHeapFactory {
     IEnumerable<HeapSlot> slots) {
     var omitted = slots.Where(slot => !slot.IsArray).SelectMany(slot => slot.OmittedGhostFields)
       .ToHashSet();
-    if (omitted.Count == 0) {
-      return;
-    }
+    AuditOmittedFields(program, entry, omitted);
+  }
+
+  internal static void AuditOmittedFields(Program program, MethodOrFunction entry, IReadOnlySet<Field> omitted,
+    IReadOnlySet<ICallable>? generatedConstructors = null) {
+    if (omitted.Count == 0) { return; }
     foreach (var callable in RelevantReachableCallables(program, entry)) {
+      // These initializers are generated after validating a reserved-name collision. Their erased
+      // witnesses initialize precisely the fields being audited, without observing their values.
+      if (generatedConstructors?.Contains(callable) == true) { continue; }
       foreach (var member in RelevantNodes(callable).OfType<MemberSelectExpr>()) {
         if (member.Member is Field field && omitted.Contains(field)) {
           throw new NotSupportedException($"Heap field '{field.EnclosingClass.FullDafnyName}.{field.Name}' is omitted, " +
@@ -588,27 +612,29 @@ public static class ContractHeapFactory {
     return result;
   }
 
+  internal static string ConstructorDeclaration(IReadOnlyList<Field> fields, IReadOnlyList<Field> omitted) {
+    var parameters = string.Join(", ", fields.Select(field =>
+      (field.IsGhost ? "ghost " : "") + field.Name + ": " + field.Type));
+    var names = fields.Select(field => field.Name).ToHashSet(StringComparer.Ordinal);
+    var assignments = fields.Select(field => $"    this.{field.Name} := {field.Name};").ToList();
+    foreach (var (field, index) in omitted.Select((field, index) => (field, index))) {
+      var witness = "contractOmittedGhostWitness" + index;
+      while (!names.Add(witness)) { witness += "_"; }
+      assignments.Add($"    ghost var {witness}: {field.Type} :| true;");
+      assignments.Add($"    this.{field.Name} := {witness};");
+    }
+    var text = string.Join("\n", assignments);
+    return $"\n  constructor {ConstructorName}({parameters}) {{" +
+      (text.Length == 0 ? "" : "\n" + text + "\n  ") + "}\n";
+  }
+
   private static IReadOnlyList<ContractSourceEdit> BuildConstructorInsertions(
-    IEnumerable<HeapSlot> slots) {
+    IEnumerable<HeapSlot> slots, bool includeConstructors = true) {
     var classes = slots.Where(slot => !slot.IsArray).GroupBy(slot => slot.Class).Select(group => group.First()).ToList();
-    var edits = classes.Select(slot => {
-      var parameters = string.Join(", ", slot.Fields.Select(field =>
-        (field.IsGhost ? "ghost " : "") + field.Name + ": " + field.Type));
-      var names = slot.Fields.Select(field => field.Name).ToHashSet(StringComparer.Ordinal);
-      var assignments = slot.Fields.Select(field => $"    this.{field.Name} := {field.Name};").ToList();
-      foreach (var (field, index) in slot.OmittedGhostFields.Select((field, index) => (field, index))) {
-        var witness = "contractOmittedGhostWitness" + index;
-        while (!names.Add(witness)) {
-          witness += "_";
-        }
-        assignments.Add($"    ghost var {witness}: {field.Type} :| true;");
-        assignments.Add($"    this.{field.Name} := {witness};");
-      }
-      var assignmentsText = string.Join("\n", assignments);
-      var body = assignmentsText.Length == 0 ? "" : "\n" + assignmentsText + "\n  ";
-      var declaration = $"\n  constructor {ConstructorName}({parameters}) {{" + body + "}\n";
-      return new ContractSourceEdit(slot.Class.Origin.Uri, slot.Class.EndToken.pos, declaration);
-    }).ToList();
+    // Native queries bind existing references and their exact field values; they do not
+    // allocate objects. Keep allocation helpers solely in executable source edits.
+    var edits = includeConstructors ? classes.Select(slot => new ContractSourceEdit(slot.Class.Origin.Uri, slot.Class.EndToken.pos,
+      ConstructorDeclaration(slot.Fields, slot.OmittedGhostFields))).ToList() : [];
     foreach (var group in classes.GroupBy(slot => slot.Class.EnclosingModuleDefinition)) {
       if (group.All(slot => slot.SourceModuleName == group.Key.FullDafnyName)) {
         continue;
@@ -627,14 +653,20 @@ public static class ContractHeapFactory {
           $"'{unavailable.Class.FullDafnyName}' in module '{group.Key.FullDafnyName}'.");
       }
       foreach (var (export, exposedSlots) in slotsByExport.Where(pair => pair.Value.Count > 0)) {
+        var definitions = includeConstructors ? [] : exposedSlots.SelectMany(slot =>
+          slot.Fields.Concat(slot.OmittedGhostFields).OfType<ConstantField>()
+            .Where(field => field.Rhs != null && !field.IsRevealedInScope(export.Signature.VisibilityScope))
+            .Select(field => slot.Class.Name + "." + field.Name)).ToList();
         var members = exposedSlots.SelectMany(slot => slot.Fields
           .Where(field => !field.IsVisibleInScope(export.Signature.VisibilityScope))
-          .Select(field => slot.Class.Name + "." + field.Name)).ToList();
-        var constructors = export.ProvideAll || export.RevealAll
+          .Select(field => slot.Class.Name + "." + field.Name)).Except(definitions).ToList();
+        var constructors = !includeConstructors || export.ProvideAll || export.RevealAll
           ? []
           : exposedSlots.Select(slot => slot.Class.Name + "." + ConstructorName).ToList();
-        var text = " provides " + string.Join(", ", constructors.Concat(members)) + "\n";
-        if (constructors.Any() || members.Count > 0) {
+        var text = (constructors.Any() || members.Count > 0 ?
+          " provides " + string.Join(", ", constructors.Concat(members)) : "") +
+          (definitions.Count > 0 ? " reveals " + string.Join(", ", definitions) : "") + "\n";
+        if (constructors.Any() || members.Count > 0 || definitions.Count > 0) {
           edits.Add(new ContractSourceEdit(export.Origin.Uri,
             export.EndToken.pos + export.EndToken.val.Length, text));
         }
@@ -753,9 +785,7 @@ public static class ContractHeapFactory {
       if (expectedType != null) {
         var datatype = expectedType.AsDatatype ??
           throw ValueError(path, "Datatype value does not match the expected heap value type.");
-        var constructor = datatype.Ctors.SingleOrDefault(candidate => value.Constructor == candidate.FullName ||
-          value.Constructor == datatype.Name + "." + candidate.Name ||
-          value.Constructor == datatype.FullDafnyName + "." + candidate.Name || value.Constructor == candidate.Name);
+        var constructor = datatype.Ctors.SingleOrDefault(candidate => NamesConstructor(value.Constructor, datatype, candidate));
         if (constructor == null || !constructor.Formals.Select(formal => formal.Name).ToHashSet().SetEquals(value.Fields.Keys)) {
           throw ValueError(path, "Datatype constructor and fields do not match the expected heap value type.");
         }
@@ -809,7 +839,7 @@ public static class ContractHeapFactory {
     }
   }
 
-  private static bool ValueMatchesType(ContractValue value, DafnyType type) {
+  internal static bool ValueMatchesType(ContractValue value, DafnyType type) {
     if (type.NormalizeExpandKeepConstraints() is UserDefinedType { ResolvedClass: SubsetTypeDecl subset } subsetType) {
       return ValueMatchesType(value, subset.RhsWithArgument(subsetType.TypeArgs));
     }

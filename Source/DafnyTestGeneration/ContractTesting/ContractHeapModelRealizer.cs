@@ -193,7 +193,7 @@ public static partial class ContractModelRealizer {
   private static ContractValue CellValue(ContractHeapObject item, HeapCell cell) =>
     cell.Index is { } index ? item.Elements![index] : item.Fields[cell.Name];
 
-  private static HashSet<(string Object, string Field)> ModifiedFields(Method method,
+  internal static HashSet<(string Object, string Field)> ModifiedFields(Method method,
     IReadOnlyDictionary<string, ContractValue> inputs, ContractValue? receiver, ContractHeapPlan heap) {
     ContractValue Reference(Expression expression) => expression.Resolved switch {
       ThisExpr when receiver != null => receiver,

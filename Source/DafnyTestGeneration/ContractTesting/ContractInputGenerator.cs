@@ -531,10 +531,8 @@ public static class ContractInputGenerator {
               break;
             }
             if (obligation.Reduction.Decision == ContractReductionDecision.Residual) {
-              var membership = ContractQueryBuilder.RenderExpression(samplePrepared,
-                obligation.Reduction.SubstitutedExpression);
-              if (!TryRefinementQuerySource(samplePrepared.SourceSnapshots, obligation.QuerySite,
-                    queryName, membership, out var querySource)) {
+              if (!TryRefinementQuerySource(samplePrepared, obligation.QuerySite,
+                    queryName, obligation.Reduction.SubstitutedExpression, out var querySource)) {
                 failedRefinement = new(ContractQueryKind.ContractRealization, ContractQueryOutcome.Error,
                   "The refinement declaration query site does not identify exactly one original supplied source snapshot.");
                 break;
@@ -633,14 +631,14 @@ public static class ContractInputGenerator {
     return new(premise, check);
   }
 
-  private static bool TryRefinementQuerySource(IReadOnlyList<ContractSource> sources,
-    ContractRefinementQuerySite? querySite, string queryName, string membership,
+  private static bool TryRefinementQuerySource(ContractPreparedProgram prepared,
+    ContractRefinementQuerySite? querySite, string queryName, Expression membership,
     out RefinementQuerySource querySource) {
     querySource = null!;
     if (querySite == null) {
       return false;
     }
-    var matchingSources = sources.Where(source => source.Sha256 == querySite.SourceSha256 &&
+    var matchingSources = prepared.SourceSnapshots.Where(source => source.Sha256 == querySite.SourceSha256 &&
       ContractSourceSnapshot.UriFor(source.Path) == ContractSourceSnapshot.UriFor(querySite.SourcePath)).ToList();
     if (matchingSources.Count != 1) {
       return false;
@@ -649,8 +647,11 @@ public static class ContractInputGenerator {
           out var characterIndex)) {
       return false;
     }
+    var scope = prepared.Program.RawModules().SingleOrDefault(module => module.FullDafnyName == querySite.ModuleName);
+    if (scope == null) { return false; }
+    var renderedMembership = ContractQueryBuilder.RenderExpression(prepared, membership, scope);
     var declaration = "\nmethod " + queryName + "()\n{\n" +
-                      Target(membership) + "\n}\n";
+                      Target(renderedMembership) + "\n}\n";
     var source = matchingSources[0];
     querySource = new RefinementQuerySource(source.Content.Insert(characterIndex, declaration), source.Path);
     return true;
