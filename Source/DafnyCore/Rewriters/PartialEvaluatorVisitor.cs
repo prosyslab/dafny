@@ -9,24 +9,30 @@ namespace Microsoft.Dafny;
 internal sealed partial class PartialEvaluatorEngine {
   internal sealed class PartialEvalState {
     public int Depth { get; }
+    public bool OldHeap { get; }
     public HashSet<Function> InlineStack { get; }
     public HashSet<string> InlineCallStack { get; }
 
-    public PartialEvalState(int depth, HashSet<Function> inlineStack, HashSet<string> inlineCallStack) {
+    public PartialEvalState(int depth, HashSet<Function> inlineStack, HashSet<string> inlineCallStack, bool oldHeap = false) {
       Depth = depth;
+      OldHeap = oldHeap;
       InlineStack = inlineStack;
       InlineCallStack = inlineCallStack;
     }
 
+    public PartialEvalState WithOldHeap() => new(Depth, InlineStack, InlineCallStack, true);
+
     public PartialEvalState WithDepth(int depth) {
-      return new PartialEvalState(depth, InlineStack, InlineCallStack);
+      return new PartialEvalState(depth, InlineStack, InlineCallStack, OldHeap);
     }
   }
 
   private sealed class PartialEvaluatorVisitor : TopDownVisitor<PartialEvalState> {
     private const string PartialPeelMarkerAttributeName = "_partial_peel";
     private readonly PartialEvaluatorEngine engine;
-    private readonly Dictionary<Expression, Expression> replacements = new();
+    private readonly Dictionary<(Expression, bool), Expression> replacements = new();
+    private readonly Dictionary<IVariable, Expression> existentialWitnessValues = new();
+    private bool currentOldHeap;
     private List<Dictionary<IVariable, ConstValue>> constScopes = new() { new Dictionary<IVariable, ConstValue>() };
 
     public PartialEvaluatorVisitor(PartialEvaluatorEngine engine) {
@@ -52,23 +58,30 @@ internal sealed partial class PartialEvaluatorEngine {
         return resolvedResult;
       }
 
-      Visit(expr, state);
-      var result = GetReplacement(expr);
-      if (!ReferenceEquals(result, expr)) {
-        AssertHasResolvedType(result);
+      var previousHeap = currentOldHeap;
+      currentOldHeap = state.OldHeap;
+      try {
+        Visit(expr, state);
+        var result = GetReplacement(expr);
+        if (!ReferenceEquals(result, expr)) {
+          AssertHasResolvedType(result);
+        }
+        return result;
       }
-      return result;
+      finally {
+        currentOldHeap = previousHeap;
+      }
     }
 
     // ------------------- Replacement tracking -------------------
 
     private Expression GetReplacement(Expression expr) {
-      return replacements.TryGetValue(expr, out var replacement) ? replacement : expr;
+      return replacements.TryGetValue((expr, currentOldHeap), out var replacement) ? replacement : expr;
     }
 
     private void SetReplacement(Expression original, Expression replacement) {
       if (!ReferenceEquals(original, replacement)) {
-        replacements[original] = replacement;
+        replacements[(original, currentOldHeap)] = replacement;
       }
     }
 
@@ -484,6 +497,10 @@ internal sealed partial class PartialEvaluatorEngine {
     // ------------------- Expression rewriting -------------------
 
     protected override bool VisitOneExpr(Expression expr, ref PartialEvalState state) {
+      if (engine.heapReduction != null && expr is StmtExpr or ApplyExpr) {
+        engine.heapReduction.ResidualReasons.Add(expr is StmtExpr ? "proof_statement" : "higher_order_apply");
+        return false;
+      }
       switch (expr) {
         case ParensExpression parens:
           return SimplifyParensExpr(parens, state);
@@ -499,12 +516,22 @@ internal sealed partial class PartialEvaluatorEngine {
           return SimplifyBinaryExpr(binary, state);
         case ITEExpr ite:
           return SimplifyIteExpr(ite, state);
+        case MatchExpr match when engine.UsesContractConcreteProfile:
+          return SimplifyMatchExpr(match, state);
+        case NestedMatchExpr { Flattened: not null } nestedMatch when engine.UsesContractConcreteProfile:
+          if (engine.expressionExpansionBudget == null || engine.expressionExpansionBudget.TryReserve(nestedMatch.Flattened)) {
+            SetReplacement(nestedMatch, SimplifyExpression(
+              new Cloner(cloneResolvedFields: true).CloneExpr(nestedMatch.Flattened), state));
+          }
+          return false;
         case FunctionCallExpr callExpr:
           return SimplifyFunctionCallExpr(callExpr, state);
         case ApplyExpr applyExpr:
           return SimplifyApplyExpr(applyExpr, state);
         case MemberSelectExpr memberSelectExpr:
           return SimplifyMemberSelectExpr(memberSelectExpr, state);
+        case OldExpr oldExpr when engine.heapReduction != null:
+          return SimplifyOldExpr(oldExpr, state);
         case QuantifierExpr quantifierExpr:
           return SimplifyQuantifierExpr(quantifierExpr, state);
         case SetComprehension setComprehension:
@@ -565,7 +592,13 @@ internal sealed partial class PartialEvaluatorEngine {
     // ------------------- Expression rewriting: operators and conditionals -------------------
 
     private bool SimplifyUnaryExpr(UnaryOpExpr unary, PartialEvalState state) {
+      var proofArtifacts = MarkProofArtifacts();
       unary.E = SimplifyExpression(unary.E, state);
+      if (unary.ResolvedOp == UnaryOpExpr.ResolvedOpcode.BoolNot) {
+        // Composition proves positive predicate facts. Lifting them out of a
+        // negation cannot establish that negated goal and can add unrelated WD.
+        RollbackProofArtifacts(proofArtifacts);
+      }
       if (unary.ResolvedOp == UnaryOpExpr.ResolvedOpcode.BoolNot &&
           Expression.IsBoolLiteral(unary.E, out var boolValue)) {
         var result = Expression.CreateBoolLiteral(unary.Origin, !boolValue);
@@ -808,8 +841,29 @@ internal sealed partial class PartialEvaluatorEngine {
 
     private bool SimplifyBinaryExpr(BinaryExpr binary, PartialEvalState state) {
       binary.E0 = SimplifyExpression(binary.E0, state);
-      binary.E1 = SimplifyExpression(binary.E1, state);
+      var isAnd = binary.ResolvedOp == BinaryExpr.ResolvedOpcode.And;
+      var isOr = binary.ResolvedOp == BinaryExpr.ResolvedOpcode.Or;
+      var isImplication = binary.ResolvedOp == BinaryExpr.ResolvedOpcode.Imp;
+      var isShortCircuit = isAnd || isOr || isImplication;
+      var leftIsLiteral = Expression.IsBoolLiteral(binary.E0, out var leftValue);
+      var leftDecides = leftIsLiteral &&
+        (isAnd && !leftValue || isOr && leftValue || isImplication && !leftValue);
+      // Ordinary reduction historically visits both operands and reports any
+      // depth exhaustion incurred there. Only proof composition uses branch
+      // liveness to avoid collecting obligations from an unreachable operand.
+      if (!leftDecides || !engine.proofCompositionMode) {
+        var proofArtifacts = MarkProofArtifacts();
+        binary.E1 = SimplifyExpression(binary.E1, state);
+        // A symbolic guard does not justify lifting a branch-local proof as an
+        // unconditional native assertion. The simplification work stays charged.
+        if (isShortCircuit && !leftIsLiteral) {
+          RollbackProofArtifacts(proofArtifacts);
+        }
+      }
       var result = engine.SimplifyBinary(binary);
+      if (ReferenceEquals(result, binary) && engine.TrySimplifyContractConstructorEquality(binary, out var fields)) {
+        result = SimplifyExpression(fields, state);
+      }
       SetReplacement(binary, result);
       return false;
     }
@@ -821,8 +875,49 @@ internal sealed partial class PartialEvaluatorEngine {
         SetReplacement(ite, result);
         return false;
       }
+      var proofArtifacts = MarkProofArtifacts();
       ite.Thn = SimplifyExpression(ite.Thn, state);
+      RollbackProofArtifacts(proofArtifacts);
       ite.Els = SimplifyExpression(ite.Els, state);
+      RollbackProofArtifacts(proofArtifacts);
+      return false;
+    }
+
+    private readonly record struct ProofArtifactMark(int Witnesses, int Candidates);
+
+    private ProofArtifactMark MarkProofArtifacts() =>
+      new(engine.ProofWitnesses.Count, engine.ProofCompositionCandidates.Count);
+
+    // Discards proof artifacts collected after the mark; ordinary reduction keeps them.
+    private void RollbackProofArtifacts(ProofArtifactMark mark) {
+      if (!engine.proofCompositionMode) {
+        return;
+      }
+      engine.ProofWitnesses.RemoveRange(mark.Witnesses, engine.ProofWitnesses.Count - mark.Witnesses);
+      engine.ProofCompositionCandidates.RemoveRange(mark.Candidates,
+        engine.ProofCompositionCandidates.Count - mark.Candidates);
+    }
+
+    private bool SimplifyMatchExpr(MatchExpr match, PartialEvalState state) {
+      var source = SimplifyExpression(match.Source, state);
+      match.UpdateSource(source);
+      if (source is not DatatypeValue { Ctor: { } constructor } value) {
+        return false;
+      }
+      var branch = match.Cases.SingleOrDefault(candidate => ReferenceEquals(candidate.Ctor, constructor));
+      if (branch == null || branch.Arguments.Count != value.Arguments.Count) {
+        return false;
+      }
+      var substitutions = new Dictionary<IVariable, Expression>();
+      for (var index = 0; index < branch.Arguments.Count; index++) {
+        substitutions.Add(branch.Arguments[index], value.Arguments[index]);
+      }
+      if (!engine.TryReserveQuantifierInstanceExpansion(branch.Body, substitutions)) {
+        return false;
+      }
+      var substituter = new Substituter(null, substitutions, null, null, engine.systemModuleManager);
+      var body = substituter.Substitute(new Cloner(cloneResolvedFields: true).CloneExpr(branch.Body));
+      SetReplacement(match, SimplifyExpression(body, state));
       return false;
     }
 
@@ -841,7 +936,10 @@ internal sealed partial class PartialEvaluatorEngine {
         SetReplacement(callExpr, simplifiedElement);
         return false;
       }
-      if (engine.HelperInterpreter.TryInterpret(callExpr, SimplifyExpression, state, out var interpreted)) {
+      var collectPredicateCandidate = engine.collectProofCompositionCandidates &&
+        callExpr.Type?.NormalizeExpand().IsBoolType == true;
+      if (engine.heapReduction == null && !collectPredicateCandidate &&
+          engine.HelperInterpreter.TryInterpret(callExpr, SimplifyExpression, state, out var interpreted)) {
         SetReplacement(callExpr, interpreted);
         return false;
       }
@@ -884,8 +982,36 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
+    private bool SimplifyOldExpr(OldExpr oldExpr, PartialEvalState state) {
+      if (oldExpr.AtLabel != null) {
+        engine.heapReduction.ResidualReasons.Add("labeled_old");
+        return false;
+      }
+      // Clone at the epoch boundary: the same substituted expression must never
+      // acquire children rewritten under a different heap frame.
+      var child = new Cloner(cloneResolvedFields: true).CloneExpr(oldExpr.Expr);
+      oldExpr.Expr = SimplifyExpression(child, state.WithOldHeap());
+      if (ContractHeapReductionContext.IsHeapIndependent(oldExpr.Expr)) {
+        SetReplacement(oldExpr, oldExpr.Expr);
+      }
+      return false;
+    }
+
     private bool SimplifyMemberSelectExpr(MemberSelectExpr memberSelectExpr, PartialEvalState state) {
+      if (engine.heapReduction != null && memberSelectExpr.AtLabel != null) {
+        engine.heapReduction.ResidualReasons.Add("labeled_member");
+        return false;
+      }
       memberSelectExpr.Obj = SimplifyExpression(memberSelectExpr.Obj, state);
+      if (engine.heapReduction != null && memberSelectExpr.Member is Field and not DatatypeDestructor and not DatatypeDiscriminator) {
+        if (engine.heapReduction.Context.TryRead(memberSelectExpr, state.OldHeap, out var value)) {
+          if (engine.expressionExpansionBudget != null && !engine.expressionExpansionBudget.TryReserve(value)) { return false; }
+          if (state.OldHeap || !((Field)memberSelectExpr.Member).IsMutable) { engine.heapReduction.EntryReads++; } else { engine.heapReduction.CurrentReads++; }
+          SetReplacement(memberSelectExpr, new Cloner(cloneResolvedFields: true).CloneExpr(value));
+          return false;
+        }
+        engine.heapReduction.ResidualReasons.Add("unknown_heap_cell");
+      }
       if (engine.UsesContractConcreteProfile &&
           memberSelectExpr.Member is SpecialField { SpecialId: SpecialField.ID.Keys } &&
           memberSelectExpr.Obj is MapDisplayExpr mapDisplay &&
@@ -895,8 +1021,7 @@ internal sealed partial class PartialEvaluatorEngine {
         return false;
       }
       if (engine.UsesContractConcreteProfile &&
-          memberSelectExpr.Obj is DatatypeValue { Ctor: { } ctor } datatype &&
-          IsContractConcreteValue(datatype)) {
+          memberSelectExpr.Obj is DatatypeValue { Ctor: { } ctor } datatype) {
         if (memberSelectExpr.Member is DatatypeDiscriminator discriminator) {
           SetReplacement(memberSelectExpr,
             Expression.CreateBoolLiteral(memberSelectExpr.Origin, ReferenceEquals(ctor.QueryField, discriminator)));
@@ -922,6 +1047,43 @@ internal sealed partial class PartialEvaluatorEngine {
     // ------------------- Expression rewriting: quantifiers -------------------
 
     private bool SimplifyQuantifierExpr(QuantifierExpr quantifierExpr, PartialEvalState state) {
+      var proofArtifacts = MarkProofArtifacts();
+      try {
+        return SimplifyQuantifierExprCore(quantifierExpr, state);
+      }
+      finally {
+        if (quantifierExpr is ForallExpr) {
+          // A nested proof may be unreachable because the forall range is empty,
+          // or may depend on a quantified value. Never lift it unconditionally.
+          RollbackProofArtifacts(proofArtifacts);
+        }
+      }
+    }
+
+    private bool SimplifyQuantifierExprCore(QuantifierExpr quantifierExpr, PartialEvalState state) {
+      if (engine.heapReduction != null) {
+        // Rewriting a symbolic quantified body can require quantified definition
+        // instantiations that the checked outer equivalence cannot establish.
+        // Reduce concrete instances only; leave an unavailable domain's original
+        // body, range and triggers together for native verification.
+        if (engine.TryUnrollQuantifier(quantifierExpr,
+              expression => SimplifyExpression(expression, state.WithDepth(Math.Max(0, state.Depth - 1))),
+              out var heapUnrolled, emitOverflowResidual: engine.emitQuantifierOverflowResidual)) {
+          SetReplacement(quantifierExpr, heapUnrolled);
+        } else if (!engine.ExpressionNodeLimitExhausted && !(engine.quantifierExpansionBudget?.IsExhausted ?? false)) {
+          engine.heapReduction.ResidualReasons.Add(quantifierExpr.SplitQuantifier != null
+            ? "split_quantifier" : "unbounded_quantifier");
+        }
+        return false;
+      }
+
+      Expression witnessBody = null;
+      if (engine.UsesContractConcreteProfile && quantifierExpr is ExistsExpr &&
+          (engine.expressionExpansionBudget == null || engine.expressionExpansionBudget.TryReserve(quantifierExpr))) {
+        witnessBody = new Cloner(cloneResolvedFields: true).CloneExpr(
+          QuantifierBounds.GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr));
+      }
+
       // The finite-sequence recognizer needs the original resolved domain constraint. Simplifying
       // a nested forall first can turn that constraint into individual index checks and erase the
       // finite element-domain shape used by the bounded enumerator.
@@ -969,6 +1131,14 @@ internal sealed partial class PartialEvaluatorEngine {
       }
 
       if (quantifierExpr is ExistsExpr existsExpr) {
+        if (engine.UsesContractConcreteProfile &&
+            TrySimplifyExistsStructure(existsExpr, state, out var structuralReplacement)) {
+          if (witnessBody != null && Expression.IsBoolLiteral(structuralReplacement, out var proved) && proved) {
+            RecordConcreteExistentialWitness(existsExpr.BoundVars, witnessBody);
+          }
+          SetReplacement(quantifierExpr, structuralReplacement);
+          return false;
+        }
         if (TrySimplifyExistsByPointAssignments(existsExpr, state, out var pointReplacement)) {
           SetReplacement(quantifierExpr, pointReplacement);
           return false;
@@ -1088,6 +1258,146 @@ internal sealed partial class PartialEvaluatorEngine {
       replacement = CombineConjuncts(instantiatedConjuncts, forallExpr.Origin);
       replacement.Type ??= Type.Bool;
       return true;
+    }
+
+    // These rewrites expose exact finite product structure, rather than proposing witnesses.
+    // Keeping all original conjuncts also retains subset constraints and conflicting equalities.
+    private bool TrySimplifyExistsStructure(ExistsExpr existsExpr, PartialEvalState state, out Expression replacement) {
+      replacement = null;
+      var body = QuantifierBounds.GetLogicalBodyWithImpliedTypeConstraints(existsExpr);
+      var conjuncts = new List<Expression>();
+      QuantifierBounds.CollectConjuncts(body, conjuncts);
+      var usedNames = body.DescendantsAndSelf.OfType<IdentifierExpr>().Select(identifier => identifier.Name)
+        .Concat(existsExpr.BoundVars.Select(variable => variable.Name)).ToHashSet();
+      var nextName = 0;
+      BoundVar FreshVariable(IOrigin origin, Type type) {
+        string name;
+        do { name = "_contract_witness_" + nextName++; } while (!usedNames.Add(name));
+        return new BoundVar(origin, name, type);
+      }
+
+      foreach (var variable in existsExpr.BoundVars) {
+        foreach (var conjunct in conjuncts) {
+          if (TryGetExistsPointAssignment(conjunct, new[] { variable }, out _, out var value)) {
+            return TryReplaceExistentialVariable(existsExpr, body, variable, value, new List<BoundVar>(), state, out replacement);
+          }
+        }
+      }
+
+      foreach (var variable in existsExpr.BoundVars) {
+        var type = variable.Type.NormalizeExpand();
+        if (type.AsSeqType is { } sequenceType) {
+          foreach (var conjunct in conjuncts) {
+            if (!engine.GetQuantifierBounds().TryGetSeqLengthConstraint(conjunct, variable, out var length)) {
+              continue;
+            }
+            if (length > engine.GetRemainingQuantifierExpansionLimit()) {
+              engine.RecordQuantifierExpansionExhaustion();
+              return false;
+            }
+            var elements = new List<Expression>();
+            var variables = new List<BoundVar>();
+            for (var index = 0; index < length; index++) {
+              var element = FreshVariable(variable.Origin, sequenceType.Arg);
+              variables.Add(element);
+              elements.Add(new IdentifierExpr(element.Origin, element.Name) { Var = element, Type = element.Type });
+            }
+            var value = CreateSeqDisplayLiteral(variable.Origin, elements, variable.Type);
+            return TryReplaceExistentialVariable(existsExpr, body, variable, value, variables, state, out replacement);
+          }
+        }
+
+        // A single inductive constructor is a product, including its field type constraints.
+        // The instance/node budgets bound recursively nested products too.
+        if (type.AsIndDatatype is { Ctors.Count: 1 } datatype && type is UserDefinedType userType) {
+          var constructor = datatype.Ctors[0];
+          var typeMap = TypeParameter.SubstitutionMap(datatype.TypeArgs, userType.TypeArgs);
+          var variables = new List<BoundVar>();
+          var arguments = new List<Expression>();
+          foreach (var formal in constructor.Formals) {
+            var field = FreshVariable(variable.Origin, formal.Type.Subst(typeMap));
+            variables.Add(field);
+            arguments.Add(new IdentifierExpr(field.Origin, field.Name) { Var = field, Type = field.Type });
+          }
+          var value = new DatatypeValue(variable.Origin, datatype.Name, constructor.Name, arguments) {
+            Ctor = constructor,
+            Type = variable.Type,
+            InferredTypeArgs = userType.TypeArgs
+          };
+          return TryReplaceExistentialVariable(existsExpr, body, variable, value, variables, state, out replacement);
+        }
+      }
+
+      // Enumerating the complete boolean type allows dependent sequence fields to become
+      // point assignments. Other unbounded scalar types remain native solver residuals.
+      var boolean = existsExpr.BoundVars.FirstOrDefault(variable => variable.Type.NormalizeExpand().IsBoolType);
+      if (boolean != null) {
+        if (engine.GetRemainingQuantifierExpansionLimit() < 2) {
+          engine.RecordQuantifierExpansionExhaustion();
+          return false;
+        }
+        var cases = new List<Expression>();
+        foreach (var value in new[] { false, true }) {
+          if (!TryReplaceExistentialVariable(existsExpr, body, boolean,
+                Expression.CreateBoolLiteral(boolean.Origin, value), new List<BoundVar>(), state, out var branch)) {
+            return false;
+          }
+          cases.Add(branch);
+        }
+        replacement = SimplifyExpression(CombineDisjuncts(cases, existsExpr.Origin), state);
+        return true;
+      }
+      return false;
+    }
+
+    private bool TryReplaceExistentialVariable(ExistsExpr original, Expression body, BoundVar variable,
+      Expression value, List<BoundVar> newVariables, PartialEvalState state, out Expression replacement) {
+      replacement = null;
+      if (engine.GetRemainingQuantifierExpansionLimit() == 0) {
+        engine.RecordQuantifierExpansionExhaustion();
+        return false;
+      }
+      var substitutions = new Dictionary<IVariable, Expression> { [variable] = value };
+      if (!engine.TryReserveQuantifierInstanceExpansion(body, substitutions)) {
+        return false;
+      }
+      engine.RecordQuantifierExpansion();
+      var substituter = new Substituter(null, substitutions, null, null, engine.systemModuleManager);
+      var substituted = substituter.Substitute(new Cloner(cloneResolvedFields: true).CloneExpr(body));
+      var remaining = original.BoundVars.Where(candidate => !ReferenceEquals(candidate, variable)).ToList();
+      remaining.AddRange(newVariables);
+      Expression rewritten = remaining.Count == 0 ? substituted : new ExistsExpr(original.Origin,
+        remaining, null, substituted, null) {
+        Type = Type.Bool,
+        Bounds = ModuleResolver.DiscoverBestBounds_MultipleVars(remaining, substituted, true)
+      };
+      replacement = SimplifyExpression(rewritten, state);
+      if (Expression.IsBoolLiteral(replacement, out var holds) && holds) {
+        var witnessSubstituter = new Substituter(null, existentialWitnessValues, null, null, engine.systemModuleManager);
+        existentialWitnessValues[variable] = SimplifyExpression(
+          witnessSubstituter.Substitute(new Cloner(cloneResolvedFields: true).CloneExpr(value)), state.WithDepth(0));
+      }
+      return true;
+    }
+
+    private void RecordConcreteExistentialWitness(List<BoundVar> variables, Expression body) {
+      if (!variables.All(variable => existentialWitnessValues.TryGetValue(variable, out var value) &&
+                                     IsContractConcreteValue(value))) {
+        return;
+      }
+      var substituter = new Substituter(null, existentialWitnessValues, null, null, engine.systemModuleManager);
+      var instance = substituter.Substitute(body);
+      // Only escaping binder variables prevent lifting. Quantifiers inside the witness
+      // bind their own variables and remain part of its independently checked assertion.
+      var freeVariables = new HashSet<IVariable>();
+      var usesHeap = false;
+      FreeVariablesUtil.ComputeFreeVariables(engine.options, instance, freeVariables, ref usesHeap, includeStatements: true);
+      if (freeVariables.Any(variable => variable is BoundVar)) {
+        return;
+      }
+      if (engine.expressionExpansionBudget == null || engine.expressionExpansionBudget.TryReserve(instance)) {
+        engine.ProofWitnesses.Add(instance);
+      }
     }
 
     private bool TrySimplifyExistsByPointAssignments(ExistsExpr existsExpr, PartialEvalState state, out Expression replacement) {
@@ -2304,13 +2614,11 @@ internal sealed partial class PartialEvaluatorEngine {
           return false;
         }
         if (TryGetSeqDisplayLiteral(seqSelectExpr.Seq, out var display) &&
-            (AllElementsAreLiterals(display) ||
-             engine.UsesContractConcreteProfile && display.Elements.All(IsContractConcreteValue)) &&
+            (AllElementsAreLiterals(display) || engine.UsesContractConcreteProfile) &&
             seqSelectExpr.E0 != null &&
             TryGetIntLiteralValue(seqSelectExpr.E0, out index) &&
             0 <= index && index < display.Elements.Count &&
-            (IsLiteralLike(display.Elements[index]) ||
-             engine.UsesContractConcreteProfile && IsContractConcreteValue(display.Elements[index]))) {
+            (IsLiteralLike(display.Elements[index]) || engine.UsesContractConcreteProfile)) {
           SetReplacement(seqSelectExpr, display.Elements[index]);
           return false;
         }

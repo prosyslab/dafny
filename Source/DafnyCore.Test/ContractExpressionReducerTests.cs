@@ -7,6 +7,122 @@ using Microsoft.Dafny;
 namespace DafnyCore.Test;
 
 public class ContractExpressionReducerTests {
+  // Old changes only heap reads; scalar values and readonly cells keep their original meanings.
+  [Theory]
+  [InlineData("old(c.value) == 1 && c.value == 3", ContractReductionDecision.True)]
+  [InlineData("old(c).value == 3 && old(c.value) == 1", ContractReductionDecision.True)]
+  [InlineData("old(x) == 9 && c.tag == 7", ContractReductionDecision.True)]
+  [InlineData("c.value == old(c.value)", ContractReductionDecision.False)]
+  [InlineData("c.omitted == 0", ContractReductionDecision.Residual)]
+  [InlineData("Delta(c) == 2", ContractReductionDecision.True)]
+  [InlineData("Captured(c.value)", ContractReductionDecision.True)]
+  [InlineData("Captured(c.omitted)", ContractReductionDecision.Residual)]
+  [InlineData("c.value == 3 && Fixed() == [3]", ContractReductionDecision.True)]
+  public async Task ReduceWithHeapKeepsEpochsAndEvaluatedArguments(string property, ContractReductionDecision expected) {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+class Cell { var value:int const tag:int := 7 ghost var omitted:int }
+twostate function Delta(c:Cell):int reads c { c.value - old(c.value) }
+twostate predicate Captured(x:int) { old(x) == x && x == 3 }
+function Fixed():seq<int> { [1 + 2] }
+method M(c:Cell, x:int) ensures PROPERTY {}
+""".Replace("PROPERTY", property), options);
+    var method = FindCallable<Method>(program, "M");
+    var cell = program.DefaultModuleDef.TopLevelDecls.OfType<ClassDecl>().Single(declaration => declaration.Name == "Cell");
+    var value = cell.Members.OfType<Field>().Single(field => field.Name == "value");
+    var tag = cell.Members.OfType<Field>().Single(field => field.Name == "tag");
+    Expression Number(int n) => Expression.CreateIntLiteral(method.Origin, n);
+    var context = new ContractHeapReductionContext(
+      [new(method.Ins[0], value, Number(1)), new(method.Ins[0], tag, Number(7))],
+      [new(method.Ins[0], value, Number(3)), new(method.Ins[0], tag, Number(7))]);
+    var original = method.Ens.Single().E;
+    var before = Printer.ExprToString(options, original);
+    var definitions = ModuleDefinition.AllCallablesIncludingPrefixDeclarations(program.DefaultModuleDef.TopLevelDecls)
+      .OfType<Function>().Where(function => function.Body != null).ToDictionary(function => function,
+        function => Printer.ExprToString(options, function.Body!));
+    var result = CreateReducer(program, options).ReduceWithHeap(original, context,
+      new Dictionary<IVariable, Expression> { [method.Ins[1]] = Number(9) });
+    Assert.Equal(expected, result.Decision);
+    Assert.Equal(before, Printer.ExprToString(options, original));
+    Assert.All(definitions, pair => Assert.Equal(pair.Value, Printer.ExprToString(options, pair.Key.Body!)));
+    Assert.NotNull(result.HeapReduction);
+    Assert.Equal((uint)2, result.InlineDepthLimit);
+    Assert.False(result.BudgetExhausted);
+    if (property.Contains("omitted")) { Assert.Contains("unknown_heap_cell", result.HeapReduction!.ResidualReasons); }
+  }
+
+  // Proof statements and higher-order calls retain their original context and effects.
+  [Theory]
+  [InlineData("(Proof(); c.value == 3)", "proof_statement")]
+  [InlineData("f(c.value) == 3", "higher_order_apply")]
+  [InlineData("old@L(c.value) == 1", "labeled_old")]
+  [InlineData("exists i:int :: c.value == i && i > 3", "unbounded_quantifier")]
+  public async Task ReduceWithHeapLeavesUnsupportedContexts(string property, string reason) {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+class Cell { var value:int }
+lemma Proof() ensures true {}
+method M(c:Cell, f:int -> int) modifies c { c.value := 2; label L: c.value := 3; assert PROPERTY; }
+""".Replace("PROPERTY", property), options);
+    var method = FindCallable<Method>(program, "M");
+    var field = program.DefaultModuleDef.TopLevelDecls.OfType<ClassDecl>().Single(c => c.Name == "Cell").Members.OfType<Field>().Single();
+    var context = new ContractHeapReductionContext(
+      [new(method.Ins[0], field, Expression.CreateIntLiteral(method.Origin, 1))],
+      [new(method.Ins[0], field, Expression.CreateIntLiteral(method.Origin, 3))]);
+    var original = ((AssertStmt)method.Body!.Body[^1]).Expr;
+    var before = Printer.ExprToString(options, original);
+    var result = CreateReducer(program, options).ReduceWithHeap(original, context);
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Contains(reason, result.HeapReduction!.ResidualReasons);
+    Assert.Equal(before, Printer.ExprToString(options, original));
+    Assert.Equal(0, result.HeapReduction.EntryReads + result.HeapReduction.CurrentReads);
+  }
+
+  // New heap projection shares the node bound instead of creating a fresh budget per field.
+  [Fact]
+  public async Task ReduceWithHeapKeepsSharedNodeBudget() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("class Cell { var value:seq<int> } method M(c:Cell) ensures |c.value| == 4 {}", options);
+    var method = FindCallable<Method>(program, "M");
+    var field = program.DefaultModuleDef.TopLevelDecls.OfType<ClassDecl>().Single(c => c.Name == "Cell").Members.OfType<Field>().Single();
+    var literal = new SeqDisplayExpr(method.Origin, Enumerable.Range(0, 4).Select(n => (Expression)Expression.CreateIntLiteral(method.Origin, n)).ToList()) {
+      Type = new SeqType(Microsoft.Dafny.Type.Int)
+    };
+    var context = new ContractHeapReductionContext([new(method.Ins[0], field, literal)], [new(method.Ins[0], field, literal)]);
+    var result = CreateReducer(program, options).ReduceWithHeap(method.Ens.Single().E, context,
+      budget: new ContractReductionBudget(expressionNodeLimit: 6));
+    Assert.True(result.BudgetExhausted);
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Contains(ContractReductionExhaustionReason.ExpressionNodeLimit, result.ExhaustionReasons);
+  }
+
+  // Sibling heap quantifiers consume one shared cap and retain an untouched residual when it is exhausted.
+  [Fact]
+  public async Task ReduceWithHeapKeepsSharedQuantifierBudget() {
+    var options = CreateOptions();
+    var program = await ParseAndResolve("""
+class Cell { var value:int }
+method M(c:Cell)
+  ensures (forall i:int | 0 <= i < 2 :: c.value + i >= 3) &&
+    (forall j:int | 0 <= j < 2 :: c.value + j >= 3)
+{}
+""", options);
+    var method = FindCallable<Method>(program, "M");
+    var field = program.DefaultModuleDef.TopLevelDecls.OfType<ClassDecl>().Single(c => c.Name == "Cell").Members.OfType<Field>().Single();
+    var value = Expression.CreateIntLiteral(method.Origin, 3);
+    var context = new ContractHeapReductionContext([new(method.Ins[0], field, value)], [new(method.Ins[0], field, value)]);
+    var original = method.Ens.Single().E;
+    var before = Printer.ExprToString(options, original);
+    var result = CreateReducer(program, options).ReduceWithHeap(original, context,
+      budget: new ContractReductionBudget(quantifierInstanceLimit: 3));
+    Assert.Equal(3U, result.QuantifierInstancesUsed);
+    Assert.DoesNotContain("unbounded_quantifier", result.HeapReduction!.ResidualReasons);
+    Assert.Contains(ContractReductionExhaustionReason.QuantifierInstanceLimit, result.ExhaustionReasons);
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Equal(before, Printer.ExprToString(options, original));
+    Assert.Contains(DescendantsAndSelf(result.ReducedExpression), expression => expression is QuantifierExpr);
+  }
+
   private static DafnyOptions CreateOptions() {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();

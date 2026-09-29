@@ -100,13 +100,27 @@ namespace Microsoft.Dafny {
       return null; // success
     }
 
-    public static async Task<(PipelineOutcome Outcome, PipelineStatistics Statistics)> BoogieOnce(
+    /// <summary>Verifies a translated module using the native pipeline.</summary>
+    public static Task<(PipelineOutcome Outcome, PipelineStatistics Statistics)> BoogieOnce(
       ErrorReporter errorReporter, DafnyOptions options,
       TextWriter output,
       ExecutionEngine engine,
       string baseFile,
       string moduleName,
       Boogie.Program boogieProgram, string programId) {
+      return BoogieOnce(errorReporter, options, output, engine, baseFile, moduleName,
+        boogieProgram, programId, CancellationToken.None);
+    }
+
+    /// <summary>Verifies a translated module using the native pipeline and supplied cancellation token.</summary>
+    public static async Task<(PipelineOutcome Outcome, PipelineStatistics Statistics)> BoogieOnce(
+      ErrorReporter errorReporter, DafnyOptions options,
+      TextWriter output,
+      ExecutionEngine engine,
+      string baseFile,
+      string moduleName,
+      Boogie.Program boogieProgram, string programId, CancellationToken cancellationToken) {
+      cancellationToken.ThrowIfCancellationRequested();
       var moduleId = (programId ?? "main_program_id") + "_" + moduleName;
 
       string bplFilename;
@@ -121,7 +135,7 @@ namespace Microsoft.Dafny {
       bplFilename = BoogieProgramSuffix(bplFilename, moduleName);
       var (outcome, stats) = await BoogiePipelineWithRerun(options,
         output, engine, boogieProgram, bplFilename,
-        1 < options.VerifySnapshots ? moduleId : null);
+        1 < options.VerifySnapshots ? moduleId : null, cancellationToken);
       return (outcome, stats);
     }
 
@@ -152,12 +166,14 @@ namespace Microsoft.Dafny {
     private static async Task<(PipelineOutcome Outcome, PipelineStatistics Statistics)> BoogiePipelineWithRerun(
       DafnyOptions options,
       TextWriter output, ExecutionEngine engine, Microsoft.Boogie.Program /*!*/ program, string /*!*/ bplFileName,
-      string programId) {
+      string programId, CancellationToken cancellationToken) {
       Contract.Requires(program != null);
       Contract.Requires(bplFileName != null);
 
+      cancellationToken.ThrowIfCancellationRequested();
       var stats = new PipelineStatistics();
       var outcome = engine.ResolveAndTypecheck(program, bplFileName, out _);
+      cancellationToken.ThrowIfCancellationRequested();
       switch (outcome) {
         case PipelineOutcome.Done:
           return (outcome, stats);
@@ -179,10 +195,15 @@ namespace Microsoft.Dafny {
 
         case PipelineOutcome.ResolvedAndTypeChecked:
           engine.EliminateDeadVariables(program);
+          cancellationToken.ThrowIfCancellationRequested();
           engine.CollectModifies(program);
+          cancellationToken.ThrowIfCancellationRequested();
           engine.CoalesceBlocks(program);
+          cancellationToken.ThrowIfCancellationRequested();
           engine.Inline(program);
-          var inferAndVerifyOutcome = await engine.InferAndVerify(output, program, stats, programId);
+          cancellationToken.ThrowIfCancellationRequested();
+          var inferAndVerifyOutcome = await engine.InferAndVerify(output, program, stats, programId, null, null, cancellationToken);
+          cancellationToken.ThrowIfCancellationRequested();
           return (inferAndVerifyOutcome, stats);
 
         default:

@@ -23,6 +23,24 @@ public enum ContractReductionExhaustionReason {
   ExpressionNodeLimit
 }
 
+/// <summary>Describes why a native proof-composition assertion was emitted.</summary>
+public enum ContractReductionProofKind {
+  Witness,
+  Prerequisite,
+  Predicate
+}
+
+/// <summary>An ordered expression that native verification must prove before the original target.</summary>
+public sealed class ContractReductionProofObligation {
+  public ContractReductionProofKind Kind { get; }
+  public Expression Expression { get; }
+
+  internal ContractReductionProofObligation(ContractReductionProofKind kind, Expression expression) {
+    Kind = kind;
+    Expression = expression;
+  }
+}
+
 /// <summary>
 /// Independent limits for reducing one resolved contract expression. Quantifier instances are
 /// counted cumulatively across all quantifiers in the expression.
@@ -59,6 +77,14 @@ public sealed class ContractReductionBudget {
 /// The result of reducing a detached copy of a resolved contract expression.
 /// </summary>
 public sealed class ContractReductionResult {
+  /// <summary>Concrete existential instances that require independent native proof before use.</summary>
+  public IReadOnlyList<Expression> ProofWitnesses { get; internal set; } = Array.Empty<Expression>();
+  /// <summary>Dependency-ordered assertions for the opt-in native proof-composition path.</summary>
+  public IReadOnlyList<ContractReductionProofObligation> ProofObligations { get; internal set; } =
+    Array.Empty<ContractReductionProofObligation>();
+  public uint ProofCompositionNodesConsidered { get; internal set; }
+  public uint ProofCompositionNodesAdmitted { get; internal set; }
+  public ContractHeapReductionStatistics? HeapReduction { get; internal set; }
   public Expression OriginalExpression { get; }
   public Expression SubstitutedExpression { get; }
   public Expression ReducedExpression { get; }

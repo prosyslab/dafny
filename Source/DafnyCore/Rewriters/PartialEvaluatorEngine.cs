@@ -13,6 +13,18 @@ internal enum PartialEvaluationProfile {
   ContractConcrete
 }
 
+internal sealed class ContractPredicateReductionCandidate {
+  internal Expression Call { get; }
+  internal Expression InstantiatedBody { get; }
+  internal Expression ReducedBody { get; }
+
+  internal ContractPredicateReductionCandidate(Expression call, Expression instantiatedBody, Expression reducedBody) {
+    Call = call;
+    InstantiatedBody = instantiatedBody;
+    ReducedBody = reducedBody;
+  }
+}
+
 internal sealed class ExpressionExpansionBudget {
   private readonly uint limit;
 
@@ -27,20 +39,39 @@ internal sealed class ExpressionExpansionBudget {
     return TryReserveNodeCount(CountExpressionNodes(expression));
   }
 
-  internal bool TryReserveSubstitution(Expression template, IEnumerable<Expression> substitutionValues) {
-    var templateNodeCount = CountExpressionNodes(template);
-    ulong multiplier = 1;
-    foreach (var substitutionValue in substitutionValues) {
-      multiplier += CountExpressionNodes(substitutionValue);
-      if (multiplier > uint.MaxValue) {
+  internal bool TryReserveSubstitution(Expression template,
+    IReadOnlyDictionary<IVariable, Expression> substitutions, Expression receiver = null) {
+    // Count occurrences rather than multiplying unrelated arguments into every node.
+    // Traversing shared template subtrees at each use conservatively covers copies
+    // made by Substituter; replacement expressions themselves are shared resolved ASTs.
+    var sizes = new Dictionary<Expression, uint>();
+    var pending = new Stack<Expression>();
+    pending.Push(template);
+    ulong upperBound = 0;
+    while (pending.Count > 0) {
+      var current = pending.Pop();
+      Expression replacement = null;
+      if (current is IdentifierExpr identifier) {
+        substitutions.TryGetValue(identifier.Var, out replacement);
+      } else if (current is ThisExpr) {
+        replacement = receiver;
+      }
+      if (replacement != null) {
+        if (!sizes.TryGetValue(replacement, out var size)) {
+          size = CountExpressionNodes(replacement);
+          sizes.Add(replacement, size);
+        }
+        upperBound += size;
+      } else {
+        upperBound++;
+        foreach (var child in current.SubExpressions) {
+          pending.Push(child);
+        }
+      }
+      if (upperBound > limit - Used) {
         IsExhausted = true;
         return false;
       }
-    }
-    var upperBound = (ulong)templateNodeCount * multiplier;
-    if (upperBound > uint.MaxValue) {
-      IsExhausted = true;
-      return false;
     }
     return TryReserveNodeCount((uint)upperBound);
   }
@@ -84,6 +115,10 @@ internal sealed partial class PartialEvaluatorEngine {
   private readonly PartialEvaluationProfile evaluationProfile;
   private readonly ExpressionExpansionBudget expressionExpansionBudget;
   private readonly HelperFunctionInterpreter helperInterpreter;
+  private readonly ContractHeapReductionSession heapReduction;
+  private readonly bool collectProofCompositionCandidates;
+  private readonly bool detectEmptyQuantifierProduct;
+  private readonly bool proofCompositionMode;
   private readonly Dictionary<string, CachedLiteral> inlineCallCache = new(StringComparer.Ordinal);
   private readonly Dictionary<DatatypeCtor, uint> contractConcreteConstructorIds = new();
   private uint nextContractConcreteConstructorId;
@@ -94,6 +129,8 @@ internal sealed partial class PartialEvaluatorEngine {
   internal bool UsesContractConcreteProfile => evaluationProfile == PartialEvaluationProfile.ContractConcrete;
   internal bool ExpressionNodeLimitExhausted => expressionExpansionBudget?.IsExhausted ?? false;
   internal uint ExpressionExpansionNodesReserved => expressionExpansionBudget?.Used ?? 0;
+  internal List<Expression> ProofWitnesses { get; } = new();
+  internal List<ContractPredicateReductionCandidate> ProofCompositionCandidates { get; } = new();
 
   // ------------------- Construction and entry points -------------------
 
@@ -110,7 +147,9 @@ internal sealed partial class PartialEvaluatorEngine {
     uint? quantifierUnrollCap, QuantifierExpansionBudget quantifierExpansionBudget,
     bool emitQuantifierOverflowResidual,
     PartialEvaluationProfile evaluationProfile = PartialEvaluationProfile.Default,
-    ExpressionExpansionBudget expressionExpansionBudget = null) {
+    ExpressionExpansionBudget expressionExpansionBudget = null, ContractHeapReductionSession heapReduction = null,
+    bool collectProofCompositionCandidates = false, bool detectEmptyQuantifierProduct = false,
+    bool proofCompositionMode = false) {
     this.options = options;
     this.module = module;
     this.systemModuleManager = systemModuleManager;
@@ -121,6 +160,10 @@ internal sealed partial class PartialEvaluatorEngine {
     this.emitQuantifierOverflowResidual = emitQuantifierOverflowResidual;
     this.evaluationProfile = evaluationProfile;
     this.expressionExpansionBudget = expressionExpansionBudget;
+    this.heapReduction = heapReduction;
+    this.collectProofCompositionCandidates = collectProofCompositionCandidates;
+    this.detectEmptyQuantifierProduct = detectEmptyQuantifierProduct;
+    this.proofCompositionMode = proofCompositionMode;
     helperInterpreter = new HelperFunctionInterpreter(this, systemModuleManager);
   }
 
@@ -186,7 +229,8 @@ internal sealed partial class PartialEvaluatorEngine {
     if (quantifierBounds != null) {
       return quantifierBounds;
     }
-    quantifierBounds = new QuantifierBounds(systemModuleManager, GetPartialEvalUnrollCap(), quantifierExpansionBudget);
+    quantifierBounds = new QuantifierBounds(systemModuleManager, GetPartialEvalUnrollCap(), quantifierExpansionBudget,
+      detectEmptyQuantifierProduct);
     return quantifierBounds;
   }
 
@@ -220,7 +264,7 @@ internal sealed partial class PartialEvaluatorEngine {
   private bool TryReserveQuantifierInstanceExpansion(
     Expression expression, IReadOnlyDictionary<IVariable, Expression> substitutions) {
     return expressionExpansionBudget == null ||
-           expressionExpansionBudget.TryReserveSubstitution(expression, substitutions.Values);
+           expressionExpansionBudget.TryReserveSubstitution(expression, substitutions);
   }
 
   internal uint GetQuantifierUnrollLimit() {
@@ -598,6 +642,42 @@ internal sealed partial class PartialEvaluatorEngine {
     return binary;
   }
 
+  private bool TrySimplifyContractConstructorEquality(BinaryExpr binary, out Expression replacement) {
+    replacement = null;
+    if (!UsesContractConcreteProfile || binary.ResolvedOp != BinaryExpr.ResolvedOpcode.EqCommon ||
+        NormalizeContractConcreteExpression(binary.E0) is not DatatypeValue { Ctor: { } leftCtor } left ||
+        NormalizeContractConcreteExpression(binary.E1) is not DatatypeValue { Ctor: { } rightCtor } right ||
+        leftCtor.EnclosingDatatype is not IndDatatypeDecl ||
+        !ReferenceEquals(leftCtor.EnclosingDatatype, rightCtor.EnclosingDatatype) ||
+        !left.Type.NormalizeExpand().Equals(right.Type.NormalizeExpand()) ||
+        leftCtor.IsGhost || rightCtor.IsGhost ||
+        leftCtor.Formals.Any(formal => formal.IsGhost) || rightCtor.Formals.Any(formal => formal.IsGhost)) {
+      return false;
+    }
+    if (!ReferenceEquals(leftCtor, rightCtor)) {
+      replacement = CreateBoolLiteral(binary.Origin, false);
+      return true;
+    }
+    if (left.Arguments.Count != leftCtor.Formals.Count || right.Arguments.Count != leftCtor.Formals.Count ||
+        !left.Arguments.Zip(right.Arguments).All(arguments =>
+          arguments.First.Type.NormalizeExpand().Equals(arguments.Second.Type.NormalizeExpand()))) {
+      return false;
+    }
+
+    // Constructor injectivity is exact even when a field contains an existential variable.
+    // Keep the equalities visible to point elimination, without selecting any field value.
+    Expression fields = CreateBoolLiteral(binary.Origin, true);
+    foreach (var (leftArgument, rightArgument) in left.Arguments.Zip(right.Arguments)) {
+      fields = Expression.CreateAnd(fields,
+        Expression.CreateEq(leftArgument, rightArgument, leftArgument.Type.NormalizeExpand()));
+    }
+    if (expressionExpansionBudget != null && !expressionExpansionBudget.TryReserve(fields)) {
+      return false;
+    }
+    replacement = fields;
+    return true;
+  }
+
   private static Expression SimplifySeqConcat(BinaryExpr binary) {
     if (TryGetStringLiteral(binary.E0, out var leftString, out var leftVerbatim) &&
         TryGetStringLiteral(binary.E1, out var rightString, out var rightVerbatim)) {
@@ -833,7 +913,12 @@ internal sealed partial class PartialEvaluatorEngine {
     return binary;
   }
 
-  private static Expression SimplifySeqMembership(BinaryExpr binary, bool isIn) {
+  private Expression SimplifySeqMembership(BinaryExpr binary, bool isIn) {
+    if (UsesContractConcreteProfile && binary.E1 is SeqDisplayExpr concreteSequence &&
+        IsContractConcreteValue(binary.E0) && concreteSequence.Elements.All(IsContractConcreteValue)) {
+      var contains = concreteSequence.Elements.Any(element => AreContractConcreteExpressionsEqual(element, binary.E0));
+      return CreateBoolLiteral(binary.Origin, isIn ? contains : !contains);
+    }
     if (TryGetSeqDisplayLiteral(binary.E1, out var seqDisplay) &&
         AllElementsAreLiterals(seqDisplay.Elements) &&
         IsLiteralLike(binary.E0)) {
@@ -1103,13 +1188,19 @@ internal sealed partial class PartialEvaluatorEngine {
     }
 
     var is_revealed_in_effective_scope = function.IsRevealedInScope(effectiveScope);
-    if (BoogieGenerator.IsOpaque(function, options) || !is_revealed_in_effective_scope) {
+    if ((BoogieGenerator.IsOpaque(function, options) && !(heapReduction?.Context.IsRevealed(function) ?? false)) ||
+        !is_revealed_in_effective_scope) {
       return false;
     }
 
-    if (function.Reads.Expressions != null && function.Reads.Expressions.Count > 0) {
+    var stateful = function.ReadsHeap;
+    if (heapReduction != null && (callExpr.AtLabel != null ||
+        !ContractHeapReductionContext.IsHeapIndependent(callExpr.Receiver) ||
+        !callExpr.Args.All(ContractHeapReductionContext.IsHeapIndependent))) {
+      heapReduction.ResidualReasons.Add("uncaptured_call_argument_or_label");
       return false;
     }
+    if (heapReduction == null && function.Reads.Expressions is { Count: > 0 }) { return false; }
 
     var hasInlineableArgument = callExpr.Args.Count == 0;
     for (var i = 0; i < callExpr.Args.Count; i++) {
@@ -1121,7 +1212,7 @@ internal sealed partial class PartialEvaluatorEngine {
     if (!hasInlineableArgument && UsesContractConcreteProfile) {
       hasInlineableArgument = callExpr.Args.Any(IsContractConcreteValue);
     }
-    if (!hasInlineableArgument) {
+    if (!hasInlineableArgument && !(heapReduction != null && stateful)) {
       return false;
     }
 
@@ -1143,7 +1234,9 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
-    if (TryGetCachedInlinedLiteral(callExpr, state, out inlined)) {
+    // Composition needs the exact candidate/dependency provenance from every
+    // eligible visit. A cached literal has no instantiated-body certificate.
+    if (!collectProofCompositionCandidates && TryGetCachedInlinedLiteral(callExpr, state, out inlined)) {
       return true;
     }
 
@@ -1162,6 +1255,14 @@ internal sealed partial class PartialEvaluatorEngine {
       }
     }
 
+    Expression proofCall = null;
+    if (collectProofCompositionCandidates && UsesContractConcreteProfile && heapReduction == null &&
+        !function.IsRecursive && callExpr.Type?.NormalizeExpand().IsBoolType == true &&
+        callExpr.Args.All(IsContractConcreteValue) &&
+        (expressionExpansionBudget == null || expressionExpansionBudget.TryReserve(callExpr))) {
+      proofCall = new Cloner(cloneResolvedFields: true).CloneExpr(callExpr);
+    }
+
     try {
       var substMap = new Dictionary<IVariable, Expression>(function.Ins.Count);
       for (var i = 0; i < function.Ins.Count; i++) {
@@ -1170,18 +1271,27 @@ internal sealed partial class PartialEvaluatorEngine {
 
       Expression receiverReplacement = function.IsStatic ? null : callExpr.Receiver;
       if (UsesContractConcreteProfile && expressionExpansionBudget != null) {
-        IEnumerable<Expression> substitutionValues = substMap.Values;
-        if (receiverReplacement != null) {
-          substitutionValues = substitutionValues.Append(receiverReplacement);
-        }
-        if (!expressionExpansionBudget.TryReserveSubstitution(function.Body, substitutionValues)) {
+        if (!expressionExpansionBudget.TryReserveSubstitution(function.Body, substMap, receiverReplacement)) {
           return false;
         }
       }
       var typeMap = callExpr.GetTypeArgumentSubstitutions();
       var substituter = new Substituter(receiverReplacement, substMap, typeMap, null, systemModuleManager);
-      var body = substituter.Substitute(function.Body);
+      // Substituter may return unchanged source subtrees. Heap-aware reduction
+      // must not let its mutable visitor rewrite any original definition.
+      var template = heapReduction == null ? function.Body : new Cloner(cloneResolvedFields: true).CloneExpr(function.Body);
+      var body = substituter.Substitute(template);
+      Expression proofBody = null;
+      if (proofCall != null &&
+          (expressionExpansionBudget == null || expressionExpansionBudget.TryReserve(body))) {
+        proofBody = new Cloner(cloneResolvedFields: true).CloneExpr(body);
+      }
+      if (stateful && heapReduction != null) { heapReduction.StatefulInlines++; }
       inlined = visitor.SimplifyExpression(body, state.WithDepth(state.Depth - 1));
+      if (proofCall != null && proofBody != null && IsClosedProofExpression(options, proofCall) &&
+          IsClosedProofExpression(options, proofBody)) {
+        ProofCompositionCandidates.Add(new ContractPredicateReductionCandidate(proofCall, proofBody, inlined));
+      }
       if (inlined is LiteralExpr literal) {
         CacheInlinedLiteral(callExpr, state, literal);
       }
@@ -1196,10 +1306,56 @@ internal sealed partial class PartialEvaluatorEngine {
     }
   }
 
+  /// <summary>Recognizes heap-independent expressions without escaping binder variables, as proof composition requires.</summary>
+  internal static bool IsClosedProofExpression(DafnyOptions options, Expression expression) {
+    var freeVariables = new HashSet<IVariable>();
+    var usesHeap = false;
+    FreeVariablesUtil.ComputeFreeVariables(options, expression, freeVariables, ref usesHeap, includeStatements: true);
+    return !usesHeap && freeVariables.All(variable => variable is not BoundVar);
+  }
+
+  internal bool TryCreateProofCompositionCandidate(FunctionCallExpr callExpr,
+    out ContractPredicateReductionCandidate candidate) {
+    candidate = null;
+    var function = callExpr.Function;
+    if (!collectProofCompositionCandidates || function == null || function.Body == null ||
+        function.IsRecursive || callExpr.Type?.NormalizeExpand().IsBoolType != true ||
+        !callExpr.Args.All(IsContractConcreteValue) || function.Reads.Expressions is { Count: > 0 } ||
+        BoogieGenerator.IsOpaque(function, options) || !function.IsRevealedInScope(effectiveScope)) {
+      return false;
+    }
+    if (expressionExpansionBudget != null && !expressionExpansionBudget.TryReserve(callExpr)) {
+      return false;
+    }
+    var proofCall = new Cloner(cloneResolvedFields: true).CloneExpr(callExpr);
+    var substitutions = new Dictionary<IVariable, Expression>(function.Ins.Count);
+    for (var i = 0; i < function.Ins.Count; i++) {
+      substitutions[function.Ins[i]] = callExpr.Args[i];
+    }
+    Expression receiver = function.IsStatic ? null : callExpr.Receiver;
+    if (expressionExpansionBudget != null &&
+        !expressionExpansionBudget.TryReserveSubstitution(function.Body, substitutions, receiver)) {
+      return false;
+    }
+    var substituter = new Substituter(receiver, substitutions, callExpr.GetTypeArgumentSubstitutions(),
+      null, systemModuleManager);
+    var body = substituter.Substitute(function.Body);
+    if (expressionExpansionBudget != null && !expressionExpansionBudget.TryReserve(body)) {
+      return false;
+    }
+    var proofBody = new Cloner(cloneResolvedFields: true).CloneExpr(body);
+    if (!IsClosedProofExpression(options, proofCall) || !IsClosedProofExpression(options, proofBody)) {
+      return false;
+    }
+    candidate = new ContractPredicateReductionCandidate(proofCall, proofBody, proofBody);
+    return true;
+  }
+
   // ------------------- Inlined-literal cache -------------------
 
   private bool TryGetCachedInlinedLiteral(FunctionCallExpr callExpr, PartialEvalState state, out Expression inlined) {
     inlined = null;
+    if (heapReduction != null) { return false; }
     var function = callExpr.Function;
     if (function == null || !function.IsStatic) {
       return false;
@@ -1218,6 +1374,7 @@ internal sealed partial class PartialEvaluatorEngine {
   }
 
   private void CacheInlinedLiteral(FunctionCallExpr callExpr, PartialEvalState state, LiteralExpr literal) {
+    if (heapReduction != null) { return; }
     var function = callExpr.Function;
     if (function == null || !function.IsStatic) {
       return;
@@ -1875,7 +2032,7 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     var unconstrainedTargetType = ConstantFolder.AsUnconstrainedType(constraintPreservingTargetType);
     if (unconstrainedTargetType == null ||
-        unconstrainedTargetType is not IntType && !unconstrainedTargetType.IsBitVectorType) {
+        unconstrainedTargetType is not IntType && !unconstrainedTargetType.IsBitVectorType && !unconstrainedTargetType.IsCharType) {
       return false;
     }
 
@@ -1890,6 +2047,27 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
+    // ConstantFolder interprets raw escaped character text as its first code unit.
+    // Decode supported BMP literals explicitly; supplementary conversions remain native obligations.
+    if (operandType.IsCharType) {
+      if (!TryGetCharLiteral(operand, out var character) || unconstrainedTargetType.IsCharType ||
+          unconstrainedTargetType.IsBitVectorType && character > ConstantFolder.MaxBv(unconstrainedTargetType)) {
+        return false;
+      }
+      convertedLiteral = CreateIntLiteral(conversionExpr.Origin, character, targetType);
+      return true;
+    }
+    if (unconstrainedTargetType.IsCharType) {
+      if (!Expression.IsIntLiteral(operand, out var scalar) || scalar < 0 || scalar > 0xFFFF ||
+          scalar >= 0xD800 && scalar <= 0xDFFF) {
+        return false;
+      }
+      // These scalar values are valid in both legacy and Unicode character modes.
+      convertedLiteral = new CharLiteralExpr(conversionExpr.Origin,
+        "\\U{" + ((int)scalar).ToString("X", System.Globalization.CultureInfo.InvariantCulture) + "}") { Type = targetType };
+      return true;
+    }
+
     var conversionToFold = ReferenceEquals(operand, conversionExpr.E)
       ? conversionExpr
       : new ConversionExpr(conversionExpr.Origin, operand, targetType) { Type = targetType };
@@ -1901,7 +2079,7 @@ internal sealed partial class PartialEvaluatorEngine {
     return true;
   }
 
-  private static bool IsContractConcreteValue(Expression expression) {
+  internal static bool IsContractConcreteValue(Expression expression) {
     expression = NormalizeContractConcreteExpression(expression);
     if (expression is LiteralExpr) {
       return true;

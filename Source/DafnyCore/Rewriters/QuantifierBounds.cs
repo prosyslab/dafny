@@ -41,14 +41,16 @@ internal sealed class QuantifierBounds {
   private readonly SystemModuleManager systemModuleManager;
   private readonly uint maxInstances;
   private readonly QuantifierExpansionBudget? expansionBudget;
+  private readonly bool detectEmptyProduct;
 
   internal uint MaxInstances => maxInstances;
 
   internal QuantifierBounds(SystemModuleManager systemModuleManager, uint maxInstances,
-    QuantifierExpansionBudget? expansionBudget = null) {
+    QuantifierExpansionBudget? expansionBudget = null, bool detectEmptyProduct = false) {
     this.systemModuleManager = systemModuleManager ?? throw new ArgumentNullException(nameof(systemModuleManager));
     this.maxInstances = maxInstances;
     this.expansionBudget = expansionBudget;
+    this.detectEmptyProduct = detectEmptyProduct;
   }
 
   internal sealed class ConcreteDomain {
@@ -1201,8 +1203,18 @@ internal sealed class QuantifierBounds {
 
     var logicalBody = GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr);
     Expression rangeExpr = logicalBody;
-    if (quantifierExpr is ForallExpr && logicalBody is BinaryExpr impExpr && IsImplication(impExpr)) {
-      rangeExpr = impExpr.E0;
+    if (quantifierExpr is ForallExpr) {
+      Expression? accumulatedRange = null;
+      var remainingBody = logicalBody;
+      while (NormalizeForPattern(remainingBody) is BinaryExpr implication && IsImplication(implication)) {
+        accumulatedRange = accumulatedRange == null
+          ? implication.E0
+          : Expression.CreateAnd(accumulatedRange, implication.E0);
+        remainingBody = implication.E1;
+      }
+      if (accumulatedRange != null) {
+        rangeExpr = accumulatedRange;
+      }
     }
 
     var conjuncts = new List<Expression>();
@@ -1616,6 +1628,18 @@ internal sealed class QuantifierBounds {
           }
         }
       }
+    }
+
+    // One empty factor makes the complete Cartesian product empty, even when
+    // another factor has only relational (and therefore non-concrete) bounds.
+    // Represent the product as empty so the caller returns the quantifier's
+    // vacuous value before attempting enumeration.
+    if (detectEmptyProduct && Enumerable.Range(0, boundVars.Count).Any(index =>
+          lowerBounds[index].HasValue && upperBounds[index].HasValue &&
+          lowerBounds[index]!.Value >= upperBounds[index]!.Value)) {
+      domains = boundVars.Select(boundVar => new ConcreteDomain(
+        BigInteger.Zero, () => Enumerable.Empty<Expression>())).ToArray();
+      return true;
     }
 
     domains = new ConcreteDomain[boundVars.Count];
