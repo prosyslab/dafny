@@ -17,11 +17,6 @@ public static class ContractRuntimeCampaignRunner {
   private sealed class CampaignDeadlineExpiredException : Exception {
   }
 
-  private sealed record MembershipProofSource(string Path, string CanonicalPath, string Content);
-
-  private sealed record MembershipProofIdentity(string Query, IReadOnlyList<MembershipProofSource> Sources,
-    string SourcePath, string CanonicalSourcePath, string QueryName);
-
   private sealed record MembershipProof(string IdentitySha256, string QuerySha256, string SourceSetSha256,
     string SourcePath, string CanonicalSourcePath, string QueryName, string Role, int SampleOrdinal,
     string QueryArtifact, string ResultArtifact, string ResultSha256, ContractQueryOutcome Outcome);
@@ -34,6 +29,7 @@ public static class ContractRuntimeCampaignRunner {
     Validate(request);
     var clock = Stopwatch.StartNew();
     var phases = new ContractPhaseRecorder(Path.Combine(directory, "campaign-phases.jsonl"));
+    var profile = new ContractProfileRecorder(Path.Combine(directory, "campaign-profile.json"));
     phases.Record("campaign", "started");
     options.Set(CommonOptionBag.UnicodeCharacters, true);
     // The detached diagnostic may use any declaration; this reveals every export instead of rewriting export text.
@@ -143,9 +139,9 @@ public static class ContractRuntimeCampaignRunner {
         // A rendered runtime check that does not resolve (for example equality on a type without compiled
         // equality) falls back to its closed form instead of failing the whole diagnostic.
         var line = transformation.Sources.FirstOrDefault(s => ContractSourceSnapshot.UriFor(s.Path) == token.Uri)?.Content.Split('\n').ElementAtOrDefault(token.line - 1);
-        var marker = line?.IndexOf("PbtBridge.Check(\"", StringComparison.Ordinal) ?? -1;
+        var marker = line?.IndexOf("PbtChecks.Check(\"", StringComparison.Ordinal) ?? -1;
         if (marker >= 0) {
-          var literal = line![(marker + "PbtBridge.Check(\"".Length)..];
+          var literal = line![(marker + "PbtChecks.Check(\"".Length)..];
           var clause = transformation.Clauses.FirstOrDefault(c => literal.StartsWith(ContractRuntimeObligationTransformer.Literal(c.Obligation.Id) + "\"", StringComparison.Ordinal));
           if (clause != null) {
             var prefix = ContractRuntimeObligationTransformer.IdPrefix(clause.Obligation.Id);
@@ -203,14 +199,15 @@ public static class ContractRuntimeCampaignRunner {
       using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
       timeout.CancelAfter((int)Math.Min(remaining, request.SampleTimeoutMilliseconds));
       phases.Record("sample:" + ordinal, "started");
-      var execution = await ContractExecutionProcess.RunAsync("dotnet", [compile.AssemblyPath!,
+      var execution = await profile.MeasureAsync("sample_process", () => ContractExecutionProcess.RunAsync("dotnet", [compile.AssemblyPath!,
         "--pbt-seed",
         request.Seed,
         "--pbt-ordinal",
         ordinal.ToString(CultureInfo.InvariantCulture),
         "--pbt-out",
-        observationPath], directory, timeout.Token);
+        observationPath], directory, timeout.Token));
       phases.Record("sample:" + ordinal, execution.Cancelled ? "cancelled" : "completed");
+      profile.Flush();
       var records = new List<JsonElement>();
       var truncated = false;
       int? firstMalformedRecord = null;
@@ -228,8 +225,9 @@ public static class ContractRuntimeCampaignRunner {
     }
     var queryCache = new Dictionary<string, (bool? Passed, string? Reason)>();
     var initialHeapCache = new Dictionary<string, (bool? Passed, string? Reason, bool Constructive)>();
-    var membershipProofs = new Dictionary<string, MembershipProof>();
+    var membershipProofs = new ContractNativeFactCache<MembershipProof>();
     var membershipReuseReceipts = 0;
+    var callObservedCertificates = 0;
     var closedQueries = 0;
     var specifications = new ContractSpecificationChecker(originalProgram, request.Sources, ClosedQueryOptions());
     var specificationAttempts = new Dictionary<string, bool>();
@@ -243,186 +241,213 @@ public static class ContractRuntimeCampaignRunner {
       }
     }
     foreach (var originalSample in samples) {
-      // Later execution is unnecessary for a safety counterexample. Restrict every
-      // validation input, including runtime type evidence, to this exact finite prefix.
-      var originalComplete = originalSample.Records.Any(r => Kind(r) == "complete");
-      var prefixLength = originalComplete ? 0 : CounterexamplePrefixLength(originalSample, obligations);
-      var sample = originalSample;
-      if (prefixLength > 0) {
-        var prefix = originalSample.Records.Take(prefixLength).ToList();
-        sample = originalSample with { Records = prefix, Inputs = SampleInputs(prefix) };
-      }
-      ContractRuntimeTypeEvidence? runtimeTypeEvidence = null;
-      var evidencePhases = new ContractPhaseRecorder(Path.Combine(directory, "runtime-evidence-" + sample.Ordinal + ".phases.jsonl"));
+      var classificationStarted = Stopwatch.GetTimestamp();
       try {
-        runtimeTypeEvidence = ContractPhaseRecorder.Measure(phases.Record, "runtime_evidence:" + sample.Ordinal, cancellationToken,
-          () => ContractRuntimeTypeEvidence.Collect(originalProgram, request.Sources, clauses, sample.Records, compiledChecks, draftedSymbols,
-            cancellationToken, ContractQueryDeadline.AfterMilliseconds(Math.Max(0, request.TimeoutMilliseconds - clock.ElapsedMilliseconds)), evidencePhases.Record));
-      } catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) {
-        // Partial collection cannot be reused: a later false check could contradict it.
-        evidencePhases.Record("collection", "cancelled");
-      }
-      var kinds = sample.Records.Select(Kind).ToHashSet();
-      var complete = kinds.Contains("complete");
-      if (kinds.Contains("generated")) { population = population with { Generated = population.Generated + 1 }; }
-      if (kinds.Contains("executed")) { population = population with { Executed = population.Executed + 1 }; }
-      var stoppedAtCall = false; var rejected = kinds.Contains("rejected"); var uncheckedPrecondition = false; var badCallee = false; var uncheckedCallee = false;
-      var pending = new List<ContractRuntimeViolation>();
-      var failed = new List<ContractRuntimeObligation>();
-      var decided = 0;
-      ContractRuntimeHeapCheck? heapCheck = null;
-      string? heapFailure = null;
-      var heapPrepared = false;
-      var initialCaptures = HeapCaptures(sample.Records, "entry");
-      if (initialCaptures.Count == 1) {
-        var (validTypes, initialError) = await ValidateInitialHeapAsync(initialCaptures[0], sample, runtimeTypeEvidence);
-        if (initialError != null) { AddError(initialError); }
-        rejected |= validTypes == false;
-        uncheckedPrecondition |= validTypes == null;
-      } else if (complete || prefixLength > 0) {
-        uncheckedPrecondition = true;
-        AddError("entry_heap_capture_missing_or_duplicated");
-      }
-      foreach (var record in sample.Records.Where(r => Kind(r) is "check" or "checkpoint")) {
-        var id = record.GetProperty("id").GetString()!;
-        var obligation = obligations[id];
-        var clause = clauses[id];
-        var isRuntime = Kind(record) == "check";
-        var unvalidatedCallees = clause.UnvalidatedCallees;
-        var passed = isRuntime ? record.GetProperty("passed").GetBoolean() : (bool?)null;
-        Dictionary<string, ContractValue>? decodedValues = null;
-        Dictionary<string, ContractValue> Values() => decodedValues ??=
-          JsonSerializer.Deserialize<Dictionary<string, ContractValue>>(record.GetProperty("values"), ContractJson.Options)!;
-        // Failed runtime records can contribute rejection or counterexample evidence and retain strict value validation.
-        if (passed == false) { _ = Values(); }
-        string? uncheckedReason = obligation.UncheckedReason;
-        if (!isRuntime && obligation.DecisionMethod == ContractRuntimeDecisionMethod.ClosedSmt) {
-          var values = Values();
-          if (clause.EntryHeapPostcondition != null && !heapPrepared) {
-            heapPrepared = true;
-            (heapCheck, heapFailure) = PrepareObservedHeap(sample);
-          }
-          if (clause.EntryHeapPostcondition != null && heapCheck != null) {
-            foreach (var pair in heapCheck.Evidence) { values[pair.Key] = pair.Value; }
-          }
-          var cacheMaterial = clause.EntryHeapPostcondition != null && heapCheck != null
-            ? JsonSerializer.Serialize(new { heapCheck.Request, heapCheck.Outputs, heapCheck.Observations }, ContractJson.Options)
-            : JsonSerializer.Serialize(values, ContractJson.Options);
-          var cacheKey = id + ":" + ContractHarnessBuilder.Hash(cacheMaterial);
-          (bool? Passed, string? Reason) decision;
-          if (unvalidatedCallees && clause.EntryHeapPostcondition is { } dependencyPostcondition &&
-              heapFailure == null && !rejected && !uncheckedPrecondition && !badCallee && !uncheckedCallee) {
-            unvalidatedCallees = !await ValidateSpecificationsAsync(
-              specifications.LogicalScope(originalPrepared.Method.Ens[dependencyPostcondition].E));
-          }
-          if (clause.EntryHeapPostcondition != null && (heapFailure != null || badCallee || uncheckedCallee || unvalidatedCallees)) {
-            decision = (null, heapFailure ?? "callee_contract_unvalidated");
-          } else if (!queryCache.TryGetValue(cacheKey, out decision)) {
-            if (clause.EntryHeapPostcondition == null && closedQueries >= request.MaxClosedQueries) {
-              decision = (null, "closed_query_budget_exhausted");
+        // Later execution is unnecessary for a safety counterexample. Restrict every
+        // validation input, including runtime type evidence, to this exact finite prefix.
+        var originalComplete = originalSample.Records.Any(r => Kind(r) == "complete");
+        var prefixLength = originalComplete ? 0 : CounterexamplePrefixLength(originalSample, obligations);
+        var sample = originalSample;
+        if (prefixLength > 0) {
+          var prefix = originalSample.Records.Take(prefixLength).ToList();
+          sample = originalSample with { Records = prefix, Inputs = SampleInputs(prefix) };
+        }
+        ContractRuntimeTypeEvidence? runtimeTypeEvidence = null;
+        var evidencePhases = new ContractPhaseRecorder(Path.Combine(directory, "runtime-evidence-" + sample.Ordinal + ".phases.jsonl"));
+        try {
+          runtimeTypeEvidence = ContractPhaseRecorder.Measure(phases.Record, "runtime_evidence:" + sample.Ordinal, cancellationToken,
+            () => ContractRuntimeTypeEvidence.Collect(originalProgram, request.Sources, clauses, sample.Records, compiledChecks, draftedSymbols,
+              cancellationToken, ContractQueryDeadline.AfterMilliseconds(Math.Max(0, request.TimeoutMilliseconds - clock.ElapsedMilliseconds)), evidencePhases.Record));
+        } catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) {
+          // Partial collection cannot be reused: a later false check could contradict it.
+          evidencePhases.Record("collection", "cancelled");
+        }
+        var kinds = sample.Records.Select(Kind).ToHashSet();
+        var complete = kinds.Contains("complete");
+        if (kinds.Contains("generated")) { population = population with { Generated = population.Generated + 1 }; }
+        if (kinds.Contains("executed")) { population = population with { Executed = population.Executed + 1 }; }
+        var stoppedAtCall = false; var rejected = kinds.Contains("rejected"); var uncheckedPrecondition = false; var badCallee = false; var uncheckedCallee = false;
+        var pending = new List<ContractRuntimeViolation>();
+        var failed = new List<ContractRuntimeObligation>();
+        var decided = 0;
+        ContractRuntimeHeapCheck? heapCheck = null;
+        string? heapFailure = null;
+        var heapPrepared = false;
+        var initialCaptures = HeapCaptures(sample.Records, "entry");
+        if (initialCaptures.Count == 1) {
+          var (validTypes, initialError) = await ValidateInitialHeapAsync(initialCaptures[0], sample, runtimeTypeEvidence);
+          if (initialError != null) { AddError(initialError); }
+          rejected |= validTypes == false;
+          uncheckedPrecondition |= validTypes == null;
+        } else if (complete || prefixLength > 0) {
+          uncheckedPrecondition = true;
+          AddError("entry_heap_capture_missing_or_duplicated");
+        }
+        var observedPrefix = new List<JsonElement>();
+        foreach (var record in sample.Records) {
+          observedPrefix.Add(record);
+          if (Kind(record) is not ("check" or "checkpoint")) { continue; }
+          var id = record.GetProperty("id").GetString()!;
+          var obligation = obligations[id];
+          var clause = clauses[id];
+          var isRuntime = Kind(record) == "check";
+          var unvalidatedCallees = clause.UnvalidatedCallees;
+          var passed = isRuntime ? record.GetProperty("passed").GetBoolean() : (bool?)null;
+          Dictionary<string, ContractValue>? decodedValues = null;
+          Dictionary<string, ContractValue> Values() => decodedValues ??=
+            JsonSerializer.Deserialize<Dictionary<string, ContractValue>>(record.GetProperty("values"), ContractJson.Options)!;
+          // Failed runtime records can contribute rejection or counterexample evidence and retain strict value validation.
+          if (passed == false) { _ = Values(); }
+          string? uncheckedReason = obligation.UncheckedReason;
+          if (!isRuntime && obligation.DecisionMethod == ContractRuntimeDecisionMethod.ClosedSmt) {
+            var values = Values();
+            var clauseHeap = heapCheck;
+            var clauseHeapFailure = heapFailure;
+            if (clause.CallHeapScope != null) {
+              (clauseHeap, clauseHeapFailure) = await PrepareObservedCallAsync(sample, observedPrefix, record, clause, runtimeTypeEvidence);
+            } else if (clause.EntryHeapPostcondition != null && !heapPrepared) {
+              heapPrepared = true;
+              (heapCheck, heapFailure) = PrepareObservedHeap(sample);
+              clauseHeap = heapCheck;
+              clauseHeapFailure = heapFailure;
+            }
+            if (clause.EntryHeapPostcondition != null && clauseHeap != null) {
+              foreach (var pair in clauseHeap.Evidence) { values[pair.Key] = pair.Value; }
+            }
+            var cacheMaterial = clause.EntryHeapPostcondition != null && clauseHeap != null
+              ? JsonSerializer.Serialize(new { clauseHeap.Request, clauseHeap.Outputs, clauseHeap.Observations }, ContractJson.Options)
+              : JsonSerializer.Serialize(values, ContractJson.Options);
+            var cacheKey = id + ":" + ContractHarnessBuilder.Hash(cacheMaterial);
+            (bool? Passed, string? Reason) decision;
+            if (unvalidatedCallees && clause.EntryHeapPostcondition is { } dependencyPostcondition &&
+                clauseHeapFailure == null && clauseHeap != null && !rejected && !uncheckedPrecondition && !badCallee && !uncheckedCallee) {
+              unvalidatedCallees = !await ValidateSpecificationsAsync(
+                specifications.LogicalScope(clauseHeap.Prepared.Method.Ens[dependencyPostcondition].E));
+            }
+            if (clause.EntryHeapPostcondition != null && (clauseHeapFailure != null || badCallee || uncheckedCallee || unvalidatedCallees)) {
+              decision = (null, clauseHeapFailure ?? "callee_contract_unvalidated");
             } else if (clock.ElapsedMilliseconds >= request.TimeoutMilliseconds) {
               decision = (null, "campaign_timeout");
             } else {
-              if (clause.EntryHeapPostcondition is { } postcondition) {
-                decision = await DecideHeapAsync(heapCheck!, postcondition, runtimeTypeEvidence, sample.Ordinal);
-              } else {
-                closedQueries++;
-                decision = await DecideClosedAsync(clause, values);
+              try {
+                if (!ContractQueryDeadline.TryReadCached(queryCache, cacheKey, RequireCampaignTime, out decision)) {
+                  if (clause.EntryHeapPostcondition == null && closedQueries >= request.MaxClosedQueries) {
+                    decision = (null, "closed_query_budget_exhausted");
+                  } else if (clock.ElapsedMilliseconds >= request.TimeoutMilliseconds) {
+                    decision = (null, "campaign_timeout");
+                  } else {
+                    if (clause.EntryHeapPostcondition is { } postcondition) {
+                      decision = await DecideHeapAsync(clauseHeap!, postcondition, runtimeTypeEvidence, sample.Ordinal);
+                    } else {
+                      closedQueries++;
+                      decision = await DecideClosedAsync(clause, values);
+                    }
+                  }
+                  RequireCampaignTime();
+                  if (decision.Passed != null) { queryCache.TryAdd(cacheKey, decision); }
+                }
+                RequireCampaignTime();
+              } catch (CampaignDeadlineExpiredException) {
+                decision = (null, "campaign_timeout");
               }
             }
-            queryCache.Add(cacheKey, decision);
-          }
-          passed = decision.Passed; uncheckedReason = decision.Reason;
-          if (passed != null && unvalidatedCallees && (clause.EntryHeapPostcondition != null || obligation.Kind == ContractRuntimeObligationKind.CalleePostcondition || (passed == false ? GoalKind(obligation.Kind) : obligation.Kind == ContractRuntimeObligationKind.EntryPrecondition))) {
-            if (clause.EntryHeapPostcondition == null && !rejected && !uncheckedPrecondition && !badCallee && !uncheckedCallee) {
-              if (!scalarDependencyScopes.TryGetValue(id, out var dependencyScope)) {
-                var originalExpression = ContractRuntimeClauseDependencies.OriginalExpression(originalProgram, request.Sources, clause);
-                dependencyScope = originalExpression == null ? null : specifications.LogicalScope(originalExpression);
-                scalarDependencyScopes.Add(id, dependencyScope);
+            cancellationToken.ThrowIfCancellationRequested();
+            passed = decision.Passed; uncheckedReason = decision.Reason;
+            if (passed != null && unvalidatedCallees && (clause.EntryHeapPostcondition != null || obligation.Kind == ContractRuntimeObligationKind.CalleePostcondition || (passed == false ? GoalKind(obligation.Kind) : obligation.Kind == ContractRuntimeObligationKind.EntryPrecondition))) {
+              if (clause.EntryHeapPostcondition == null && !rejected && !uncheckedPrecondition && !badCallee && !uncheckedCallee) {
+                if (!scalarDependencyScopes.TryGetValue(id, out var dependencyScope)) {
+                  var originalExpression = ContractRuntimeClauseDependencies.OriginalExpression(originalProgram, request.Sources, clause);
+                  dependencyScope = originalExpression == null ? null : specifications.LogicalScope(originalExpression);
+                  scalarDependencyScopes.Add(id, dependencyScope);
+                }
+                if (dependencyScope != null) {
+                  unvalidatedCallees = !await ValidateSpecificationsAsync(dependencyScope);
+                }
               }
-              if (dependencyScope != null) {
-                unvalidatedCallees = !await ValidateSpecificationsAsync(dependencyScope);
-              }
+              // Solver evaluation uses function bodies without checking their own contracts, so a clause that could
+              // indict the goal (or admit an input) through an unvalidated callee stays undecided.
+              if (unvalidatedCallees) { passed = null; uncheckedReason = "callee_contract_unvalidated"; }
             }
-            // Solver evaluation uses function bodies without checking their own contracts, so a clause that could
-            // indict the goal (or admit an input) through an unvalidated callee stays undecided.
-            if (unvalidatedCallees) { passed = null; uncheckedReason = "callee_contract_unvalidated"; }
+          }
+          obligation = obligation with {
+            Evaluations = isRuntime ? obligation.Evaluations with { Runtime = obligation.Evaluations.Runtime + 1 } :
+            passed != null ? obligation.Evaluations with { ClosedSmt = obligation.Evaluations.ClosedSmt + 1 } :
+            obligation.Evaluations with { Unchecked = obligation.Evaluations.Unchecked + 1 },
+            UncheckedReason = uncheckedReason ?? obligation.UncheckedReason
+          };
+          obligations[id] = obligation;
+          if (passed == false) { failed.Add(obligation); }
+          if (passed != null && GoalKind(obligation.Kind)) { decided++; }
+          if (obligation.Kind == ContractRuntimeObligationKind.EntryPrecondition) { rejected |= passed == false; uncheckedPrecondition |= passed == null; } else if (obligation.Kind == ContractRuntimeObligationKind.CalleePostcondition) {
+            badCallee |= passed == false; uncheckedCallee |= passed == null;
+            if (passed == false) { calleeViolations.Add(new(id, obligation.Callee!, request.Drafts?.Any(d => d.Symbol == obligation.Callee) == true, sample.Ordinal, sample.Inputs, Values())); }
+          } else if (passed == false) {
+            var iteration = record.GetProperty("iteration").GetInt32();
+            pending.Add(new(id, obligation.Kind, sample.Ordinal, iteration < 0 ? null : iteration,
+              isRuntime ? ContractRuntimeDecisionMethod.Runtime : ContractRuntimeDecisionMethod.ClosedSmt, sample.Inputs, Values()));
+            if (obligation.Kind == ContractRuntimeObligationKind.CallPrecondition) { stoppedAtCall = true; break; }
           }
         }
-        obligation = obligation with {
-          Evaluations = isRuntime ? obligation.Evaluations with { Runtime = obligation.Evaluations.Runtime + 1 } :
-          passed != null ? obligation.Evaluations with { ClosedSmt = obligation.Evaluations.ClosedSmt + 1 } :
-          obligation.Evaluations with { Unchecked = obligation.Evaluations.Unchecked + 1 },
-          UncheckedReason = uncheckedReason ?? obligation.UncheckedReason
-        };
-        obligations[id] = obligation;
-        if (passed == false) { failed.Add(obligation); }
-        if (passed != null && GoalKind(obligation.Kind)) { decided++; }
-        if (obligation.Kind == ContractRuntimeObligationKind.EntryPrecondition) { rejected |= passed == false; uncheckedPrecondition |= passed == null; } else if (obligation.Kind == ContractRuntimeObligationKind.CalleePostcondition) {
-          badCallee |= passed == false; uncheckedCallee |= passed == null;
-          if (passed == false) { calleeViolations.Add(new(id, obligation.Callee!, request.Drafts?.Any(d => d.Symbol == obligation.Callee) == true, sample.Ordinal, sample.Inputs, Values())); }
-        } else if (passed == false) {
-          var iteration = record.GetProperty("iteration").GetInt32();
-          pending.Add(new(id, obligation.Kind, sample.Ordinal, iteration < 0 ? null : iteration,
-            isRuntime ? ContractRuntimeDecisionMethod.Runtime : ContractRuntimeDecisionMethod.ClosedSmt, sample.Inputs, Values()));
-          if (obligation.Kind == ContractRuntimeObligationKind.CallPrecondition) { stoppedAtCall = true; break; }
+        var validatedPrefix = prefixLength > 0 && pending.Any(violation =>
+          violation.ObligationId == sample.Records[^1].GetProperty("id").GetString()) &&
+          kinds.Contains("generated") && kinds.Contains("executed") && !kinds.Contains("runtime_error") &&
+          originalPrepared.Method.Ins.All(formal => sample.Inputs.ContainsKey(formal.Name)) &&
+          (originalPrepared.Method.IsStatic || sample.Inputs.ContainsKey("receiver"));
+        // Obligation violation counts include only failures that decide this sample's classification.
+        Func<ContractRuntimeObligationKind, bool> counted = _ => false;
+        if (rejected) {
+          population = population with { PreconditionRejected = population.PreconditionRejected + 1 };
+          counted = kind => kind == ContractRuntimeObligationKind.EntryPrecondition;
+        } else if (uncheckedPrecondition) {
+          population = population with { PreconditionUnchecked = population.PreconditionUnchecked + 1 };
+        } else if (badCallee) {
+          population = population with { CalleeContractViolations = population.CalleeContractViolations + 1 };
+          counted = kind => kind == ContractRuntimeObligationKind.CalleePostcondition;
+        } else if (uncheckedCallee) {
+          population = population with { CalleeContractUnchecked = population.CalleeContractUnchecked + 1 };
+        } else if (heapFailure != null) {
+          population = population with { RuntimeErrors = population.RuntimeErrors + 1 };
+          AddError(heapFailure);
+        } else if (sample.Timeout && !complete && !stoppedAtCall && !validatedPrefix) {
+          // A sample that already recorded completion is not recounted as a timeout because of process teardown.
+          population = population with { Timeouts = population.Timeouts + 1 }; AddError("sample_timeout");
+        } else if ((sample.Truncated || !complete) && !validatedPrefix) {
+          population = population with { RuntimeErrors = population.RuntimeErrors + 1 }; var error = sample.Records.LastOrDefault(r => Kind(r) == "runtime_error");
+          AddError(sample.Truncated ? "truncated observation record" : error.ValueKind == JsonValueKind.Undefined ? sample.Diagnostics : error.GetProperty("message").GetString()!,
+            error.ValueKind == JsonValueKind.Undefined ? null : error.GetProperty("location").GetString());
+        } else {
+          population = population with { Valid = population.Valid + 1, ViolatingSamples = population.ViolatingSamples + (pending.Count > 0 ? 1 : 0) };
+          violations.AddRange(pending);
+          decidedGoalEvaluations += decided;
+          counted = GoalKind;
+          if (validatedPrefix) {
+            await using var rawTrace = File.OpenRead(Path.Combine(directory, "sample-" + sample.Ordinal + ".jsonl"));
+            var traceHash = Convert.ToHexString(await System.Security.Cryptography.SHA256.HashDataAsync(rawTrace, cancellationToken)).ToLowerInvariant();
+            await WriteJsonAsync(Path.Combine(directory, "prefix-certificate-" + sample.Ordinal + ".json"), new {
+              sourceSetHash = ContractRuntimeTypeEvidence.SourceSetHash(request.Sources),
+              request.Seed,
+              sample.Ordinal,
+              endpointId = sample.Records[^1].GetProperty("id").GetString(),
+              recordCount = prefixLength,
+              originalRecordCount = originalSample.Records.Count,
+              originalTimeout = originalSample.Timeout,
+              originalComplete,
+              originalError = originalSample.Error,
+              originalTruncated = originalSample.Truncated,
+              firstMalformedRecord = originalSample.FirstMalformedRecord,
+              traceHash
+            });
+          }
         }
-      }
-      var validatedPrefix = prefixLength > 0 && pending.Any(violation =>
-        violation.ObligationId == sample.Records[^1].GetProperty("id").GetString()) &&
-        kinds.Contains("generated") && kinds.Contains("executed") && !kinds.Contains("runtime_error") &&
-        originalPrepared.Method.Ins.All(formal => sample.Inputs.ContainsKey(formal.Name)) &&
-        (originalPrepared.Method.IsStatic || sample.Inputs.ContainsKey("receiver"));
-      // Obligation violation counts include only failures that decide this sample's classification.
-      Func<ContractRuntimeObligationKind, bool> counted = _ => false;
-      if (rejected) {
-        population = population with { PreconditionRejected = population.PreconditionRejected + 1 };
-        counted = kind => kind == ContractRuntimeObligationKind.EntryPrecondition;
-      } else if (uncheckedPrecondition) {
-        population = population with { PreconditionUnchecked = population.PreconditionUnchecked + 1 };
-      } else if (badCallee) {
-        population = population with { CalleeContractViolations = population.CalleeContractViolations + 1 };
-        counted = kind => kind == ContractRuntimeObligationKind.CalleePostcondition;
-      } else if (uncheckedCallee) {
-        population = population with { CalleeContractUnchecked = population.CalleeContractUnchecked + 1 };
-      } else if (heapFailure != null) {
-        population = population with { RuntimeErrors = population.RuntimeErrors + 1 };
-        AddError(heapFailure);
-      } else if (sample.Timeout && !complete && !stoppedAtCall && !validatedPrefix) {
-        // A sample that already recorded completion is not recounted as a timeout because of process teardown.
-        population = population with { Timeouts = population.Timeouts + 1 }; AddError("sample_timeout");
-      } else if ((sample.Truncated || !complete) && !validatedPrefix) {
-        population = population with { RuntimeErrors = population.RuntimeErrors + 1 }; var error = sample.Records.LastOrDefault(r => Kind(r) == "runtime_error");
-        AddError(sample.Truncated ? "truncated observation record" : error.ValueKind == JsonValueKind.Undefined ? sample.Diagnostics : error.GetProperty("message").GetString()!,
-          error.ValueKind == JsonValueKind.Undefined ? null : error.GetProperty("location").GetString());
-      } else {
-        population = population with { Valid = population.Valid + 1, ViolatingSamples = population.ViolatingSamples + (pending.Count > 0 ? 1 : 0) };
-        violations.AddRange(pending);
-        decidedGoalEvaluations += decided;
-        counted = GoalKind;
-        if (validatedPrefix) {
-          await using var rawTrace = File.OpenRead(Path.Combine(directory, "sample-" + sample.Ordinal + ".jsonl"));
-          var traceHash = Convert.ToHexString(await System.Security.Cryptography.SHA256.HashDataAsync(rawTrace, cancellationToken)).ToLowerInvariant();
-          await WriteJsonAsync(Path.Combine(directory, "prefix-certificate-" + sample.Ordinal + ".json"), new {
-            sourceSetHash = ContractRuntimeTypeEvidence.SourceSetHash(request.Sources),
-            request.Seed,
-            sample.Ordinal,
-            endpointId = sample.Records[^1].GetProperty("id").GetString(),
-            recordCount = prefixLength,
-            originalRecordCount = originalSample.Records.Count,
-            originalTimeout = originalSample.Timeout,
-            originalComplete,
-            originalError = originalSample.Error,
-            originalTruncated = originalSample.Truncated,
-            firstMalformedRecord = originalSample.FirstMalformedRecord,
-            traceHash
-          });
+        foreach (var failure in failed.Where(f => counted(f.Kind))) {
+          obligations[failure.Id] = obligations[failure.Id] with { Violations = obligations[failure.Id].Violations + 1 };
         }
+        void AddError(string message, string? location = null) { if (errors.Count < 20) { errors.Add(new(sample.Ordinal, message, location)); } }
       }
-      foreach (var failure in failed.Where(f => counted(f.Kind))) {
-        obligations[failure.Id] = obligations[failure.Id] with { Violations = obligations[failure.Id].Violations + 1 };
+      finally {
+        profile.Record("result_classification", classificationStarted);
+        profile.Flush();
       }
-      void AddError(string message, string? location = null) { if (errors.Count < 20) { errors.Add(new(sample.Ordinal, message, location)); } }
     }
     // Valid samples support "no violation" only when at least one goal obligation was actually decided in them.
     var status = population.ViolatingSamples > 0 ? ContractRuntimeStatus.ViolationFound :
@@ -469,10 +494,12 @@ public static class ContractRuntimeCampaignRunner {
           () => ContractRuntimeHeapChecking.PrepareInitial(originalProgram, request, sample.Inputs, initial, specifications));
         RequireCampaignTime();
         var initialKey = ContractHarnessBuilder.Hash(JsonSerializer.Serialize(initialCheck.Request, ContractJson.Options));
-        if (!initialHeapCache.TryGetValue(initialKey, out var validation)) {
+        if (!ContractQueryDeadline.TryReadCached(initialHeapCache, initialKey, RequireCampaignTime, out var validation)) {
           validation = await CertifyInitialHeapAsync(initialCheck, initialKey, sample, runtimeTypeEvidence);
-          initialHeapCache.Add(initialKey, validation);
+          RequireCampaignTime();
+          if (validation.Passed == true) { initialHeapCache.TryAdd(initialKey, validation); }
         }
+        RequireCampaignTime();
         return (validation.Passed, validation.Passed == null ? validation.Reason ?? "initial_heap_type_constraints_undecided" : null);
       } catch (CampaignDeadlineExpiredException) {
         return (null, "campaign_timeout");
@@ -483,7 +510,7 @@ public static class ContractRuntimeCampaignRunner {
 
     // Admits an initial state by a certified construction plan, else by original premise consistency.
     async Task<(bool? Passed, string? Reason, bool Constructive)> CertifyInitialHeapAsync(ContractRuntimeHeapCheck initialCheck,
-      string initialKey, Sample sample, ContractRuntimeTypeEvidence? runtimeTypeEvidence) {
+      string initialKey, Sample sample, ContractRuntimeTypeEvidence? runtimeTypeEvidence, int? invocation = null) {
       // Native type WD includes plain specification functions too: absence of
       // an explicit requires/ensures clause is not proof that a body is defined.
       RequireCampaignTime();
@@ -500,7 +527,7 @@ public static class ContractRuntimeCampaignRunner {
         () => ContractInitialTypeProof.TryPrepare(preparation, specifications, runtimeTypeEvidence));
       if (typeProof is null) {
         RequireCampaignTime();
-        var premise = await QueryHeapAsync(initialCheck, ContractQueryKind.PremiseConsistency, observed: false);
+        var premise = await QueryHeapAsync(initialCheck, ContractQueryKind.PremiseConsistency, observed: false, sampleOrdinal: sample.Ordinal);
         return (premise.Outcome == ContractQueryOutcome.Sat ? true : premise.Outcome == ContractQueryOutcome.Unsat ? false : null, premise.Reason, false);
       }
       (bool? Passed, string? Reason, bool Constructive) validation;
@@ -516,7 +543,7 @@ public static class ContractRuntimeCampaignRunner {
         var withinBudget = clock.ElapsedMilliseconds < request.TimeoutMilliseconds;
         validation = (withinBudget ? true : null, withinBudget ? null : "campaign_timeout", withinBudget);
       }
-      await WriteJsonAsync(Path.Combine(directory, "initial-type-certificate-" + sample.Ordinal + ".json"), new {
+      await WriteJsonAsync(Path.Combine(directory, "initial-type-certificate-" + sample.Ordinal + (invocation is { } callId ? "-call-" + callId : "") + ".json"), new {
         initialKey,
         typeProof.RuntimeChecks,
         typeProof.RequiresNativeProof,
@@ -547,36 +574,86 @@ public static class ContractRuntimeCampaignRunner {
       }
     }
 
-    async Task<bool> ValidateSpecificationsAsync(ContractSpecificationScope scope) {
-      var key = scope.CacheIdentity;
-      if (specificationAttempts.TryGetValue(key, out var previous)) { return previous && specifications.Accept(scope); }
-      await WriteJsonAsync(Path.Combine(directory, "specification-scope-" + specificationAttempts.Count + ".json"),
-        new { scope.Symbols, scope.Role, scope.RequiredNativeChecks, scope.Failure, modules = specifications.PendingModules(scope) });
-      var success = scope.Failure == null;
-      foreach (var module in success ? specifications.PendingModules(scope) : []) {
-        var remaining = request.TimeoutMilliseconds - clock.ElapsedMilliseconds;
-        if (closedQueries >= request.MaxClosedQueries || remaining <= 0) { success = false; break; }
-        closedQueries++;
-        var deadline = ContractQueryDeadline.AfterMilliseconds(Math.Min(request.ClosedQueryTimeoutMilliseconds, remaining));
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter((int)Math.Min(request.ClosedQueryTimeoutMilliseconds, remaining));
-        var path = Path.Combine(directory, "specification-query-" + closedQueries);
-        var queryPhases = new ContractPhaseRecorder(path + ".phases.jsonl");
-        await WriteJsonAsync(path + ".scope.json", new { module, scope.Symbols, scope.Role, scope.RequiredNativeChecks });
-        try {
-          var result = await specifications.CheckModuleAsync(scope, module, timeout.Token, queryPhases.Record, deadline);
-          await WriteJsonAsync(path + ".result.json", result);
-          if (!result.Verified) { success = false; break; }
-        } catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested) {
-          queryPhases.Record("query", "cancelled");
-          await WriteJsonAsync(path + ".result.json", new ContractSpecificationResult(false, error.Message, [], []));
-          success = false;
-          break;
-        }
+    // Read only records preceding this checkpoint; later calls/returns cannot supply its old state.
+    async Task<(ContractRuntimeHeapCheck? Check, string? Failure)> PrepareObservedCallAsync(Sample sample,
+      IReadOnlyList<JsonElement> prefix, JsonElement record, ContractRuntimeClause clause,
+      ContractRuntimeTypeEvidence? runtimeTypeEvidence) {
+      if (!record.TryGetProperty("call_invocation", out var encodedInvocation) ||
+          encodedInvocation.ValueKind != JsonValueKind.Number || !encodedInvocation.TryGetInt32(out var invocation)) {
+        return (null, "call_heap_invocation_missing");
       }
-      success = success && specifications.Accept(scope);
-      specificationAttempts.Add(key, success);
-      return success;
+      var captures = ContractRuntimeHeapChecking.MatchCallCaptures(prefix, clause.CallHeapScope!, invocation);
+      if (captures == null) { return (null, "call_heap_capture_missing_or_mismatched"); }
+      try {
+        RequireCampaignTime();
+        var original = ContractRuntimeClauseDependencies.OriginalExpression(originalProgram, request.Sources, clause);
+        var callRequest = request with { Entry = new ContractEntry(clause.CallHeapScope!) };
+        var inputs = Decode<Dictionary<string, ContractValue>>(captures.Value.Entry.GetProperty("inputs"));
+        var initial = Decode<List<ContractHeapObject>>(captures.Value.Entry.GetProperty("heap"));
+        var check = ContractRuntimeHeapChecking.Prepare(originalProgram, callRequest, inputs, initial,
+          Decode<List<ContractHeapObject>>(captures.Value.Return.GetProperty("heap")),
+          Decode<Dictionary<string, ContractValue>>(captures.Value.Return.GetProperty("outputs")));
+        if (original == null || clause.EntryHeapPostcondition is not { } index ||
+            index >= check.Prepared.Method.Ens.Count || check.Prepared.Method.Ens[index].E != original) {
+          return (null, "call_heap_original_contract_unavailable");
+        }
+        if (check.FrameViolation != null) { return (null, check.FrameViolation); }
+        var initialCheck = ContractRuntimeHeapChecking.PrepareInitial(originalProgram, callRequest, inputs, initial, specifications);
+        var initialKey = ContractHarnessBuilder.Hash(JsonSerializer.Serialize(initialCheck.Request, ContractJson.Options));
+        if (!ContractQueryDeadline.TryReadCached(initialHeapCache, initialKey, RequireCampaignTime, out var validation)) {
+          validation = await CertifyInitialHeapAsync(initialCheck, initialKey, sample, runtimeTypeEvidence, invocation);
+          RequireCampaignTime();
+          if (validation.Passed == true) { initialHeapCache.TryAdd(initialKey, validation); }
+        }
+        RequireCampaignTime();
+        return validation.Passed == true ? (check, null) : (null, validation.Reason ?? "call_heap_initial_state_unproved");
+      } catch (CampaignDeadlineExpiredException) {
+        return (null, "campaign_timeout");
+      } catch (Exception error) when (error is JsonException or ArgumentException or NotSupportedException) {
+        return (null, "call_heap_unavailable: " + error.Message);
+      }
+    }
+
+    async Task<bool> ValidateSpecificationsAsync(ContractSpecificationScope scope) {
+      try {
+        var key = scope.CacheIdentity;
+        if (ContractQueryDeadline.TryReadCached(specificationAttempts, key, RequireCampaignTime, out var previous)) {
+          var accepted = previous && specifications.Accept(scope);
+          RequireCampaignTime();
+          return accepted;
+        }
+        await WriteJsonAsync(Path.Combine(directory, "specification-scope-" + specificationAttempts.Count + ".json"),
+          new { scope.Symbols, scope.Role, scope.RequiredNativeChecks, scope.Failure, modules = specifications.PendingModules(scope) });
+        var success = scope.Failure == null;
+        foreach (var module in success ? specifications.PendingModules(scope) : []) {
+          var remaining = request.TimeoutMilliseconds - clock.ElapsedMilliseconds;
+          if (closedQueries >= request.MaxClosedQueries || remaining <= 0) { success = false; break; }
+          closedQueries++;
+          var deadline = ContractQueryDeadline.AfterMilliseconds(Math.Min(request.ClosedQueryTimeoutMilliseconds, remaining));
+          using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+          timeout.CancelAfter((int)Math.Min(request.ClosedQueryTimeoutMilliseconds, remaining));
+          var path = Path.Combine(directory, "specification-query-" + closedQueries);
+          var queryPhases = new ContractPhaseRecorder(path + ".phases.jsonl");
+          await WriteJsonAsync(path + ".scope.json", new { module, scope.Symbols, scope.Role, scope.RequiredNativeChecks });
+          try {
+            var result = await specifications.CheckModuleAsync(scope, module, timeout.Token, queryPhases.Record, deadline);
+            await WriteJsonAsync(path + ".result.json", result);
+            if (!result.Verified) { success = false; break; }
+          } catch (OperationCanceledException error) when (!cancellationToken.IsCancellationRequested) {
+            queryPhases.Record("query", "cancelled");
+            await WriteJsonAsync(path + ".result.json", new ContractSpecificationResult(false, error.Message, [], []));
+            success = false;
+            break;
+          }
+        }
+        RequireCampaignTime();
+        success = success && specifications.Accept(scope);
+        RequireCampaignTime();
+        specificationAttempts.Add(key, success);
+        return success;
+      } catch (CampaignDeadlineExpiredException) {
+        return false;
+      }
     }
 
     // A closed decision reports a violation only when the negated clause is proven for the captured values.
@@ -586,7 +663,7 @@ public static class ContractRuntimeCampaignRunner {
       var initialKey = ContractHarnessBuilder.Hash(JsonSerializer.Serialize(check.Request, ContractJson.Options));
       // Only a source-and-value-identical native certificate can replace the initial
       // consistency query. A host-only field check never creates this cache entry.
-      if (!initialHeapCache.TryGetValue(initialKey, out var initialValidation) || initialValidation.Passed != true) {
+      if (!ContractQueryDeadline.TryReadCached(initialHeapCache, initialKey, RequireCampaignTime, out var initialValidation) || initialValidation.Passed != true) {
         var premise = await Query(ContractQueryKind.PremiseConsistency, observed: false);
         if (premise != ContractQueryOutcome.Sat) { return (null, stopped ?? "entry_heap_premise_undecided"); }
       }
@@ -613,7 +690,7 @@ public static class ContractRuntimeCampaignRunner {
         cancellationToken.ThrowIfCancellationRequested();
         passed &= clock.ElapsedMilliseconds < request.TimeoutMilliseconds;
         if (!passed) { reason ??= "observed_heap_membership_unproved_or_expired"; }
-        await WriteJsonAsync(Path.Combine(directory, "observed-type-certificate-" + sampleOrdinal + ".json"), new {
+        await WriteJsonAsync(Path.Combine(directory, "observed-type-certificate-" + sampleOrdinal + (check.Request.Entry.Symbol != request.Entry.Symbol ? "-call-" + ++callObservedCertificates : "") + ".json"), new {
           initialKey,
           initialValidation.Constructive,
           observedKey = ContractHarnessBuilder.Hash(JsonSerializer.Serialize(new { check.Request, check.Observations, check.Outputs }, ContractJson.Options)),
@@ -636,7 +713,7 @@ public static class ContractRuntimeCampaignRunner {
       return fails == ContractQueryOutcome.Unsat ? (false, null) : (null, stopped ?? "closed_query_undecided");
 
       async Task<ContractQueryOutcome> Query(ContractQueryKind kind, bool observed = true, bool negate = false) {
-        var result = await QueryHeapAsync(check, kind, observed, negate, postcondition);
+        var result = await QueryHeapAsync(check, kind, observed, negate, postcondition, sampleOrdinal: sampleOrdinal);
         stopped ??= result.Reason;
         return result.Outcome;
       }
@@ -645,40 +722,53 @@ public static class ContractRuntimeCampaignRunner {
     async Task<(ContractQueryOutcome Outcome, string? Reason)> QueryHeapAsync(ContractRuntimeHeapCheck check,
       ContractQueryKind kind, bool observed = true, bool negate = false, int? postcondition = null,
       ContractInitialTypeProof? initialTypeProof = null, int? sampleOrdinal = null) {
-      if (initialTypeProof == null && closedQueries >= request.MaxClosedQueries) {
-        return (ContractQueryOutcome.Unknown, "closed_query_budget_exhausted");
-      }
+      cancellationToken.ThrowIfCancellationRequested();
       var budget = request.TimeoutMilliseconds - clock.ElapsedMilliseconds;
       if (budget <= 0) { return (ContractQueryOutcome.Timeout, "campaign_timeout"); }
       var deadline = ContractQueryDeadline.AfterMilliseconds(Math.Min(request.ClosedQueryTimeoutMilliseconds, budget));
       using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
       timeout.CancelAfter((int)Math.Min(request.ClosedQueryTimeoutMilliseconds, budget));
-      var role = initialTypeProof?.Observed == true ? "observed" : "initial";
+      var role = initialTypeProof == null ? (observed ? "observed_heap" : "initial_heap") :
+        initialTypeProof.Observed ? "observed" : "initial";
       string? query = null;
       string? identityMaterial = null;
-      MembershipProofIdentity? identity = null;
+      ContractNativeFactIdentity? identity = null;
       IReadOnlyList<ContractSource>? membershipSources = null;
       string? identitySha256 = null;
       string? querySha256 = null;
       string? sourceSetSha256 = null;
       NotSupportedException? constructionError = null;
-      if (initialTypeProof != null) {
+      {
         try {
-          query = initialTypeProof.BuildQuery();
+          query = initialTypeProof != null ? initialTypeProof.BuildQuery() :
+            ContractQueryBuilder.Build(check.Prepared, check.Request, kind,
+              observed ? check.Outputs : null, negate, observed ? check.Observations : null,
+              choiceConstraints: check.InitialTypeConstraints,
+              postconditionClause: postcondition is { } index ? check.Prepared.Method.Ens[index].E : null);
           membershipSources = check.Prepared.DiagnosticSourceSnapshots;
-          var sources = membershipSources.Select(source => new MembershipProofSource(
+          var sources = membershipSources.Select(source => new ContractNativeFactSource(
             source.Path, ContractSourceSnapshot.UriFor(source.Path).AbsoluteUri, source.Content)).ToList();
           identity = new(query, sources, check.Prepared.Source.Path,
             ContractSourceSnapshot.UriFor(check.Prepared.Source.Path).AbsoluteUri,
             ContractQueryBuilder.Name(check.Prepared));
-          identityMaterial = JsonSerializer.Serialize(identity, ContractJson.Options);
+          identityMaterial = identity.Material(kind);
           identitySha256 = ContractHarnessBuilder.Hash(identityMaterial);
           querySha256 = ContractHarnessBuilder.Hash(identity.Query);
           sourceSetSha256 = ContractHarnessBuilder.Hash(JsonSerializer.Serialize(identity.Sources, ContractJson.Options));
         } catch (NotSupportedException error) {
           constructionError = error;
         }
-        if (identityMaterial != null && membershipProofs.TryGetValue(identityMaterial, out var proof)) {
+        MembershipProof? proof = null;
+        var reused = false;
+        if (identityMaterial != null) {
+          try {
+            reused = membershipProofs.TryReuse(identity!, kind, timeout.Token, deadline, out proof);
+          } catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) {
+            return (ContractQueryOutcome.Timeout, "closed_query_timeout");
+          }
+        }
+        if (reused) {
+          var reusedProof = proof!;
           var reusedIdentity = identity!;
           if (QueryExpired()) { return (ContractQueryOutcome.Timeout, "closed_query_timeout"); }
           if (sampleOrdinal == null) {
@@ -686,10 +776,11 @@ public static class ContractRuntimeCampaignRunner {
           }
           var receiptOrdinal = membershipReuseReceipts + 1;
           var receiptPath = Path.Combine(directory,
-            "membership-proof-reuse-" + role + "-" + sampleOrdinal + "-" + receiptOrdinal + ".json");
+            (initialTypeProof != null ? "membership-proof-reuse-" + role : "heap-fact-reuse") + "-" + sampleOrdinal + "-" + receiptOrdinal + ".json");
           var pendingReceiptPath = receiptPath + ".pending";
           var receipt = JsonSerializer.Serialize(new {
-            kind = "native_membership_proof_reuse",
+            kind = initialTypeProof != null ? "native_membership_proof_reuse" : "native_heap_fact_reuse",
+            queryKind = kind,
             receiptOrdinal,
             sampleOrdinal,
             role,
@@ -699,7 +790,7 @@ public static class ContractRuntimeCampaignRunner {
             reusedIdentity.SourcePath,
             reusedIdentity.CanonicalSourcePath,
             reusedIdentity.QueryName,
-            originalProof = proof
+            originalProof = reusedProof
           }, ContractJson.Options);
           try {
             await File.WriteAllTextAsync(pendingReceiptPath, receipt, timeout.Token);
@@ -709,7 +800,7 @@ public static class ContractRuntimeCampaignRunner {
           }
           File.Move(pendingReceiptPath, receiptPath);
           membershipReuseReceipts = receiptOrdinal;
-          return (ContractQueryOutcome.Unsat, null);
+          return (reusedProof.Outcome, null);
         }
         if (closedQueries >= request.MaxClosedQueries) {
           return (ContractQueryOutcome.Unknown, "closed_query_budget_exhausted");
@@ -743,16 +834,16 @@ public static class ContractRuntimeCampaignRunner {
           phaseObserver: queryPhases.Record, deadlineTimestamp: deadline);
         var resultJson = JsonSerializer.Serialize(result, ContractJson.Options);
         await File.WriteAllTextAsync(queryPath + ".result.json", resultJson, cancellationToken);
-        if (identityMaterial != null && result.Outcome == ContractQueryOutcome.Unsat) {
+        if (identityMaterial != null) {
           var resultSha256 = ContractHarnessBuilder.Hash(resultJson);
           if (QueryExpired()) { return (ContractQueryOutcome.Timeout, "closed_query_timeout"); }
           var completedIdentity = identity!;
-          membershipProofs.Add(identityMaterial, new(
+          membershipProofs.Record(identity!, kind, result.Outcome, new(
             identitySha256!, querySha256!, sourceSetSha256!,
             completedIdentity.SourcePath, completedIdentity.CanonicalSourcePath, completedIdentity.QueryName,
             role, sampleOrdinal ?? -1,
             Path.GetFileName(queryPath + ".dfy"), Path.GetFileName(queryPath + ".result.json"),
-            resultSha256, result.Outcome));
+            resultSha256, result.Outcome), timeout.Token, deadline);
         }
         return (result.Outcome, result.Outcome == ContractQueryOutcome.Timeout ? "closed_query_timeout" :
           result.Outcome == ContractQueryOutcome.Error ? "closed_query_error" : null);

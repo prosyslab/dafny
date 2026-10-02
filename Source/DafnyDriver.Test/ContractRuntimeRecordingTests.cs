@@ -172,6 +172,29 @@ public class ContractRuntimeRecordingTests : IClassFixture<ContractRuntimeRecord
     Assert.Equal(Encoding.UTF8.GetBytes(string.Join("\n", lines) + "\n"), await File.ReadAllBytesAsync(path));
   }
 
+  // A completed runtime profile separates check, encoding and flushed record work without changing raw trace bytes.
+  [Fact]
+  public async Task WritesAggregateRuntimeProfileSidecar() {
+    var path = fixture.ObservationPath("profile");
+    var process = await fixture.Run("profile", path);
+    Assert.Equal(0, process.ExitCode);
+    Assert.Empty(process.StandardError);
+    var lines = await File.ReadAllLinesAsync(path);
+    Assert.Equal(new[] {
+      "{\"kind\":\"check\",\"id\":\"profile\",\"iteration\":0,\"passed\":true,\"values\":{\"value\":{\"kind\":\"integer\",\"value\":\"1\"}}}",
+      "{\"kind\":\"complete\"}"
+    }, lines);
+
+    var profile = JsonSerializer.Deserialize<ContractProfile>(
+      await File.ReadAllTextAsync(path + ".profile.json"), ContractJson.Options)!;
+    Assert.Equal(ContractJson.SchemaVersion, profile.SchemaVersion);
+    Assert.Equal("Stopwatch", profile.Clock);
+    Assert.Equal(new[] { "actual_contract_check", "record_encoding", "record_io", "value_encoding" },
+      profile.Metrics.Select(metric => metric.Name));
+    Assert.Equal(new long[] { 1, 2, 2, 2 }, profile.Metrics.Select(metric => metric.Count));
+    Assert.All(profile.Metrics, metric => Assert.True(metric.ElapsedMilliseconds >= 0));
+  }
+
   // Unassociated external fragments use the complete legacy object grammar and preserve duplicates.
   [Fact]
   public async Task ParsesCompleteExternalFragmentObject() {
@@ -317,7 +340,7 @@ public class ContractRuntimeRecordingTests : IClassFixture<ContractRuntimeRecord
     Assert.NotEmpty(record.RootElement.GetProperty("message").GetString()!);
   }
 
-  /// <summary>Compiles the production-generated bridge once and executes each scenario in its own process.</summary>
+  /// <summary>Compiles the production-generated runtime once and executes each scenario in its own process.</summary>
   public sealed class RuntimeFixture : IAsyncLifetime {
     private readonly string directory = Path.Combine("/workspace/tmp", "contract-runtime-recording-" + Guid.NewGuid().ToString("N"));
     private string assemblyPath = null!;
@@ -371,7 +394,7 @@ public class ContractRuntimeRecordingTests : IClassFixture<ContractRuntimeRecord
     using System.Text;
     using System.Threading;
     using DafnyContractRuntime;
-    using DafnyPbtBridgeRuntime;
+    using DafnyPbtRuntime;
     public static class RecordingFixture {
       private static Dafny.ISequence<Dafny.Rune> Text(string value) => Dafny.Sequence<Dafny.Rune>.UnicodeFromString(value);
       private static Dafny.ISequence<Dafny.Rune> Shape(string json) => Text(Convert.ToBase64String(Encoding.UTF8.GetBytes(json)));
@@ -382,14 +405,14 @@ public class ContractRuntimeRecordingTests : IClassFixture<ContractRuntimeRecord
         var scenario = args[Array.IndexOf(args, "--scenario") + 1];
         if (scenario == "text-scalars") {
           var text = Dafny.Sequence<Dafny.Rune>.FromElements(new Dafny.Rune(0), new Dafny.Rune(9), new Dafny.Rune(10), new Dafny.Rune(0xd7ff), new Dafny.Rune(0xe000), new Dafny.Rune(0xffff), new Dafny.Rune(0x10000), new Dafny.Rune(0x10ffff));
-          Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { array = ContractDiagnosticBridge.Text(text), concat = ContractDiagnosticBridge.Text(Dafny.Sequence<Dafny.Rune>.Concat(text, text)) }));
-          Bridge.Complete();
+          Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { array = Observation.Text(text), concat = Observation.Text(Dafny.Sequence<Dafny.Rune>.Concat(text, text)) }));
+          Checks.Complete();
           return;
         }
         if (scenario == "text-external") {
           var text = System.Reflection.DispatchProxy.Create<Dafny.ISequence<Dafny.Rune>, TextProxy>();
-          Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(ContractDiagnosticBridge.Text(text)));
-          Bridge.Complete();
+          Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(Observation.Text(text)));
+          Checks.Complete();
           return;
         }
         if (scenario == "values") {
@@ -397,22 +420,22 @@ public class ContractRuntimeRecordingTests : IClassFixture<ContractRuntimeRecord
           var shape = Shape("{\"kind\":\"array\",\"type\":\"array<int>\",\"element\":{\"kind\":\"integer\"}}");
           foreach (var value in new[] { 7, 7, 9 }) {
             items[0] = value;
-            var values = ContractDiagnosticBridge.SerializeNamed(Text("items"), items, shape);
-            var character = ContractDiagnosticBridge.SerializeNamed(Text("character"), new Dafny.Rune(0x1f642), Shape("{\"kind\":\"other\"}"));
-            Bridge.Check(Text("state"), BigInteger.Zero, true, Fragments(values, character));
+            var values = Observation.SerializeNamed(Text("items"), items, shape);
+            var character = Observation.SerializeNamed(Text("character"), new Dafny.Rune(0x1f642), Shape("{\"kind\":\"other\"}"));
+            Checks.Check(Text("state"), BigInteger.Zero, true, Fragments(values, character));
           }
-          Bridge.Complete();
+          Checks.Complete();
           return;
         }
         if (scenario == "shapes") {
           var template = Shape("{\"kind\":\"sequence\",\"element\":{\"kind\":\"parameter\",\"index\":0}}");
           foreach (var width in new[] { 7, 8, 7 }) {
             var parameter = Shape("{\"kind\":\"bitvector\",\"width\":" + width + "}");
-            var concrete = ContractDiagnosticBridge.InstantiateShape(template, Dafny.Sequence<Dafny.ISequence<Dafny.Rune>>.FromElements(parameter));
-            var values = ContractDiagnosticBridge.SerializeNamed(Text("result"), Dafny.Sequence<byte>.FromElements(7), concrete);
-            Bridge.Check(Text("shape"), BigInteger.Zero, true, Fragments(values));
+            var concrete = Observation.InstantiateShape(template, Dafny.Sequence<Dafny.ISequence<Dafny.Rune>>.FromElements(parameter));
+            var values = Observation.SerializeNamed(Text("result"), Dafny.Sequence<byte>.FromElements(7), concrete);
+            Checks.Check(Text("shape"), BigInteger.Zero, true, Fragments(values));
           }
-          Bridge.Complete();
+          Checks.Complete();
           return;
         }
         if (scenario == "datatypes") {
@@ -421,10 +444,10 @@ public class ContractRuntimeRecordingTests : IClassFixture<ContractRuntimeRecord
             var map = Dafny.Map<BigInteger, byte>.FromElements(new Dafny.Pair<BigInteger, byte>(BigInteger.One, item.Value));
             var value = item.Value == 7 ? shared : Fixture.Box<Dafny.IMap<BigInteger, byte>>.create_Box(map);
             var shape = Shape("{\"kind\":\"datatype\",\"arguments\":[{\"kind\":\"map\",\"key\":{\"kind\":\"integer\"},\"value\":{\"kind\":\"bitvector\",\"width\":" + item.Width + "}}]}");
-            var values = ContractDiagnosticBridge.SerializeNamed(Text("result"), value, shape);
-            Bridge.Check(Text("datatype"), BigInteger.Zero, true, Fragments(values));
+            var values = Observation.SerializeNamed(Text("result"), value, shape);
+            Checks.Check(Text("datatype"), BigInteger.Zero, true, Fragments(values));
           }
-          Bridge.Complete();
+          Checks.Complete();
           return;
         }
         if (scenario == "mutable-datatype") {
@@ -433,10 +456,10 @@ public class ContractRuntimeRecordingTests : IClassFixture<ContractRuntimeRecord
           var shape = Shape("{\"kind\":\"datatype\",\"arguments\":[{\"kind\":\"sequence\",\"element\":{\"kind\":\"integer\"}}]}");
           foreach (var number in new[] { 7, 9, 7 }) {
             items[0] = number;
-            var values = ContractDiagnosticBridge.SerializeNamed(Text("result"), value, shape);
-            Bridge.Check(Text("datatype"), BigInteger.Zero, true, Fragments(values));
+            var values = Observation.SerializeNamed(Text("result"), value, shape);
+            Checks.Check(Text("datatype"), BigInteger.Zero, true, Fragments(values));
           }
-          Bridge.Complete();
+          Checks.Complete();
           return;
         }
         if (scenario == "classes") {
@@ -444,10 +467,10 @@ public class ContractRuntimeRecordingTests : IClassFixture<ContractRuntimeRecord
           for (var index = 0; index < 3; index++) {
             if (index == 2) { cell = new Fixture.Cell(); }
             cell.@value = index == 0 ? 7 : 9;
-            var values = ContractDiagnosticBridge.SerializeNamed(Text("cell"), cell, Shape("{\"kind\":\"other\"}"));
-            Bridge.Check(Text("class"), BigInteger.Zero, true, Fragments(values));
+            var values = Observation.SerializeNamed(Text("cell"), cell, Shape("{\"kind\":\"other\"}"));
+            Checks.Check(Text("class"), BigInteger.Zero, true, Fragments(values));
           }
-          Bridge.Complete();
+          Checks.Complete();
           return;
         }
         if (scenario == "register-child") {
@@ -456,102 +479,109 @@ public class ContractRuntimeRecordingTests : IClassFixture<ContractRuntimeRecord
           var shape = Shape("{\"kind\":\"datatype\",\"arguments\":[{\"kind\":\"datatype\",\"arguments\":[{\"kind\":\"integer\"}]}]}");
           for (var index = 0; index < 2; index++) {
             if (index == 1) {
-              try { ContractDiagnosticBridge.Register(Text("registered-child"), Text("Fixture.Box"), child, Text(Convert.ToBase64String(Encoding.UTF8.GetBytes("{}")))); }
+              try { Observation.Register(Text("registered-child"), Text("Fixture.Box"), child, Text(Convert.ToBase64String(Encoding.UTF8.GetBytes("{}")))); }
               catch (NotSupportedException) { }
             }
-            var values = ContractDiagnosticBridge.SerializeNamed(Text("parent"), parent, shape);
-            Bridge.Check(Text("registration"), BigInteger.Zero, true, Fragments(values));
+            var values = Observation.SerializeNamed(Text("parent"), parent, shape);
+            Checks.Check(Text("registration"), BigInteger.Zero, true, Fragments(values));
           }
-          Bridge.Complete();
+          Checks.Complete();
           return;
         }
         if (scenario == "named-fragments") {
           var value = Fixture.Box<BigInteger>.create_Box(BigInteger.One);
           var shape = Shape("{\"kind\":\"datatype\",\"arguments\":[{\"kind\":\"integer\"}]}");
           foreach (var name in new[] { "left", "right🙂", "left" }) {
-            var values = ContractDiagnosticBridge.SerializeNamed(Text(name), value, shape);
-            Bridge.Check(Text("names"), BigInteger.Zero, true, Fragments(values));
+            var values = Observation.SerializeNamed(Text(name), value, shape);
+            Checks.Check(Text("names"), BigInteger.Zero, true, Fragments(values));
           }
-          Bridge.Complete();
+          Checks.Complete();
           return;
         }
         if (scenario == "fragment-bytes") {
           var integer = Shape("{\"kind\":\"integer\"}");
-          Bridge.Check(Text("empty"), BigInteger.Zero, true, Fragments());
-          Bridge.Check(Text("one"), BigInteger.One, true,
-            Fragments(ContractDiagnosticBridge.SerializeNamed(Text("one"), BigInteger.One, integer)));
-          var unicode = ContractDiagnosticBridge.SerializeNamed(Text("right🙂"), new Dafny.Rune(0x1f642), Shape("{\"kind\":\"other\"}"));
-          var first = ContractDiagnosticBridge.SerializeNamed(Text("same"), BigInteger.One, integer);
-          var second = ContractDiagnosticBridge.SerializeNamed(Text("same"), new BigInteger(2), integer);
-          Bridge.Checkpoint(Text("many"), new BigInteger(2), Fragments(unicode, first, second));
-          Bridge.Complete();
+          Checks.Check(Text("empty"), BigInteger.Zero, true, Fragments());
+          Checks.Check(Text("one"), BigInteger.One, true,
+            Fragments(Observation.SerializeNamed(Text("one"), BigInteger.One, integer)));
+          var unicode = Observation.SerializeNamed(Text("right🙂"), new Dafny.Rune(0x1f642), Shape("{\"kind\":\"other\"}"));
+          var first = Observation.SerializeNamed(Text("same"), BigInteger.One, integer);
+          var second = Observation.SerializeNamed(Text("same"), new BigInteger(2), integer);
+          Checks.Checkpoint(Text("many"), new BigInteger(2), Fragments(unicode, first, second));
+          Checks.Complete();
           return;
         }
         if (scenario == "external-fragments") {
-          Bridge.Check(Text("external"), BigInteger.Zero, true,
+          Checks.Check(Text("external"), BigInteger.Zero, true,
             Fragments(Text("\"first\":1,\"duplicate\":2"), Text("\"duplicate\":3")));
-          Bridge.Complete();
+          Checks.Complete();
+          return;
+        }
+        if (scenario == "profile") {
+          var passed = Checks.Evaluated(Checks.BeginCheck() && true);
+          var value = Observation.SerializeNamed(Text("value"), BigInteger.One, Shape("{\"kind\":\"integer\"}"));
+          Checks.Check(Text("profile"), BigInteger.Zero, passed, Fragments(value));
+          Checks.Complete();
           return;
         }
         if (scenario == "fragment-identity") {
           var value = Fixture.Box<BigInteger>.create_Box(BigInteger.One);
           var integerShape = Shape("{\"kind\":\"datatype\",\"arguments\":[{\"kind\":\"integer\"}]}");
           var bitvectorShape = Shape("{\"kind\":\"datatype\",\"arguments\":[{\"kind\":\"bitvector\",\"width\":8}]}");
-          var first = ContractDiagnosticBridge.SerializeNamed(Text("value"), value, integerShape);
-          var same = ContractDiagnosticBridge.SerializeNamed(Text("value"), value, integerShape);
-          var label = ContractDiagnosticBridge.SerializeNamed(Text("other"), value, integerShape);
-          var shape = ContractDiagnosticBridge.SerializeNamed(Text("value"), value, bitvectorShape);
+          var first = Observation.SerializeNamed(Text("value"), value, integerShape);
+          var same = Observation.SerializeNamed(Text("value"), value, integerShape);
+          var label = Observation.SerializeNamed(Text("other"), value, integerShape);
+          var shape = Observation.SerializeNamed(Text("value"), value, bitvectorShape);
           var array = new BigInteger[] { BigInteger.One };
           var arrayShape = Shape("{\"kind\":\"array\",\"type\":\"array<int>\",\"element\":{\"kind\":\"integer\"}}");
-          var arrayFirst = ContractDiagnosticBridge.SerializeNamed(Text("array"), array, arrayShape);
-          var arraySecond = ContractDiagnosticBridge.SerializeNamed(Text("array"), array, arrayShape);
+          var arrayFirst = Observation.SerializeNamed(Text("array"), array, arrayShape);
+          var arraySecond = Observation.SerializeNamed(Text("array"), array, arrayShape);
           var items = new System.Collections.Generic.List<BigInteger> { BigInteger.One };
           var externalValue = Fixture.Box<System.Collections.Generic.List<BigInteger>>.create_Box(items);
           var externalShape = Shape("{\"kind\":\"datatype\",\"arguments\":[{\"kind\":\"sequence\",\"element\":{\"kind\":\"integer\"}}]}");
-          var externalFirst = ContractDiagnosticBridge.SerializeNamed(Text("external"), externalValue, externalShape);
-          var externalSecond = ContractDiagnosticBridge.SerializeNamed(Text("external"), externalValue, externalShape);
+          var externalFirst = Observation.SerializeNamed(Text("external"), externalValue, externalShape);
+          var externalSecond = Observation.SerializeNamed(Text("external"), externalValue, externalShape);
           var cell = new Fixture.Cell();
-          var referenceFirst = ContractDiagnosticBridge.SerializeNamed(Text("cell"), cell, Shape("{\"kind\":\"other\"}"));
-          var referenceSecond = ContractDiagnosticBridge.SerializeNamed(Text("cell"), cell, Shape("{\"kind\":\"other\"}"));
+          var referenceFirst = Observation.SerializeNamed(Text("cell"), cell, Shape("{\"kind\":\"other\"}"));
+          var referenceSecond = Observation.SerializeNamed(Text("cell"), cell, Shape("{\"kind\":\"other\"}"));
           Console.WriteLine(System.Text.Json.JsonSerializer.Serialize(new {
             same = Object.ReferenceEquals(first, same), label = Object.ReferenceEquals(first, label),
             shape = Object.ReferenceEquals(first, shape), array = Object.ReferenceEquals(arrayFirst, arraySecond),
             external = Object.ReferenceEquals(externalFirst, externalSecond), reference = Object.ReferenceEquals(referenceFirst, referenceSecond)
           }));
-          Bridge.Complete();
+          Checks.Complete();
           return;
         }
         if (scenario == "bad-fragment" || scenario == "bad-mixed-fragment") {
           var fragments = scenario == "bad-fragment"
             ? Fragments(Text("\"broken\":"))
-            : Fragments(ContractDiagnosticBridge.SerializeNamed(Text("valid"), BigInteger.One, Shape("{\"kind\":\"integer\"}")), Text("\"broken\":"));
-          Bridge.Check(Text("malformed"), BigInteger.Zero, true, fragments);
+            : Fragments(Observation.SerializeNamed(Text("valid"), BigInteger.One, Shape("{\"kind\":\"integer\"}")), Text("\"broken\":"));
+          Checks.Check(Text("malformed"), BigInteger.Zero, true, fragments);
           return;
         }
         if (scenario == "error") {
-          Bridge.Complete();
-          Bridge.Location(Text("fixture:1"));
+          Checks.Complete();
+          Checks.Location(Text("fixture:1"));
           throw new InvalidOperationException("fixture failure");
         }
-        Bridge.Generated();
+        Checks.Generated();
         if (scenario == "hold") {
           Console.WriteLine("ready");
           Console.Out.Flush();
           Thread.Sleep(Timeout.Infinite);
         } else if (scenario == "stop") {
-          Bridge.Stop();
+          Checks.Stop();
         } else if (scenario == "precondition") {
-          Bridge.Check(Text("outer"), BigInteger.Zero,
-            Bridge.Check(Text("call_precondition:fixture"), BigInteger.Zero, false,
-              Fragments(ContractDiagnosticBridge.SerializeNamed(Text("nested"), new BigInteger(7), Shape("{\"kind\":\"integer\"}")))),
-            Fragments(ContractDiagnosticBridge.SerializeNamed(Text("unreachable"), BigInteger.Zero, Shape("{\"kind\":\"integer\"}"))));
+          Checks.Check(Text("outer"), BigInteger.Zero,
+            Checks.Check(Text("call_precondition:fixture"), BigInteger.Zero, false,
+              Fragments(Observation.SerializeNamed(Text("nested"), new BigInteger(7), Shape("{\"kind\":\"integer\"}")))),
+            Fragments(Observation.SerializeNamed(Text("unreachable"), BigInteger.Zero, Shape("{\"kind\":\"integer\"}"))));
         } else {
-          ContractDiagnosticBridge.Serialize(BigInteger.One, Shape("{\"kind\":\"integer\"}"));
+          Observation.Serialize(BigInteger.One, Shape("{\"kind\":\"integer\"}"));
           var bad = scenario == "bad-base64" ? Text("!") : scenario == "bad-json" ? Shape("{") : Shape("{\"kind\":\"parameter\",\"index\":0}");
-          ContractDiagnosticBridge.Serialize(BigInteger.One, bad);
+          Observation.Serialize(BigInteger.One, bad);
         }
         Console.WriteLine("unreachable");
-        Bridge.Complete();
+        Checks.Complete();
       }
     }
     public class TextProxy : System.Reflection.DispatchProxy {

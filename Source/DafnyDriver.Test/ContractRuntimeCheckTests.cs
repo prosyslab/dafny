@@ -146,6 +146,16 @@ public class ContractRuntimeCheckTests {
     Assert.Equal(2, result.Violations.Count);
   }
 
+  // A generator syntax error is reported at its model-relative path with line and column.
+  [Fact]
+  public async Task LocatesGeneratorSyntaxError() {
+    const string source = "module M { method Goal(x: int) {} }";
+    const string generator = "method {:pbt_generator \"M.Goal\"} Generate(r: PbtRandom.Source) returns (x: int) {\n  x := ;\n}";
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() =>
+      Run(source, generator, generatorPath: ".top-down-pbt/generators/Goal.dfy"));
+    Assert.Contains(".top-down-pbt/generators/Goal.dfy:2:8: invalid Rhs", error.Message);
+  }
+
   // A missing generator is surfaced before compilation or sample execution.
   [Fact]
   public async Task RequiresGenerator() {
@@ -1184,11 +1194,11 @@ public class ContractRuntimeCheckTests {
   private const string ConstantGenerator = "method {:pbt_generator \"M.Goal\"} Generate(r: PbtRandom.Source) returns (x: int) { x := 1; }";
 
   private static async Task<ContractRuntimeCampaignResult> Run(string source, string? generator, int maxClosedQueries = 0, ContractRuntimeDraft? draft = null, int sampleTimeout = 5000, int? replay = null,
-    int sampleCount = 2, IReadOnlyList<ContractRuntimeDraft>? drafts = null, string? artifactDirectory = null) {
+    int sampleCount = 2, IReadOnlyList<ContractRuntimeDraft>? drafts = null, string? artifactDirectory = null, string generatorPath = "G.dfy") {
     var directory = artifactDirectory ?? Path.Combine("/workspace/tmp", "contract-runtime-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(directory);
     var request = new ContractRuntimeCampaignRequest(1, [new("M.dfy", source, ContractHarnessBuilder.Hash(source))],
-      new("M.Goal"), "17", Generator: generator == null ? null : new("G.dfy", generator, ContractHarnessBuilder.Hash(generator)),
+      new("M.Goal"), "17", Generator: generator == null ? null : new(generatorPath, generator, ContractHarnessBuilder.Hash(generator)),
       SampleCount: sampleCount, TimeoutMilliseconds: 60000, MaxClosedQueries: maxClosedQueries, Drafts: drafts ?? (draft == null ? null : [draft]),
       SampleTimeoutMilliseconds: sampleTimeout, ReplayOrdinal: replay);
     var options = new DafnyOptions(DafnyOptions.Default);

@@ -115,7 +115,8 @@ public static class ContractRuntimeSourcePreparation {
     var parsed = await ContractSourceSnapshot.ParseAsync(reporter, [source], cancellationToken, resolve: false);
     if (reporter.ErrorCount != 0) {
       throw new NotSupportedException("Invalid diagnostic declaration source: " +
-        string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+        string.Join("\n", reporter.AllMessages.Where(message => message.Level == ErrorLevel.Error).Select(message =>
+          source.Path + ":" + message.Range.StartToken.line + ":" + message.Range.StartToken.col + ": " + message.Message)));
     }
     return parsed;
   }

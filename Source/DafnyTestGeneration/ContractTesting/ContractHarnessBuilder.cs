@@ -26,7 +26,13 @@ public static class ContractHarnessBuilder {
   private enum PreparationMode { Execution, InitialState, ObservedHeap }
 
   public const string MainName = "ContractDiagnosticMain";
-  public const string BridgeName = "ContractDiagnosticBridge";
+  /// <summary>Dafny class name of the runtime observation and value-encoding externs inserted into source modules.</summary>
+  public const string ObservationName = "PbtObservation";
+  /// <summary>Dafny class name of the externs that request SMT from the parent process, inserted into source modules.</summary>
+  public const string SmtName = "PbtSmt";
+  // Declares the compiled C# observation and SMT classes to Dafny; inserted before the first member of each source module.
+  private static readonly string RuntimeDeclaration = "\n" + ContractRuntimeLibrary.Read("PbtObservation.dfy") +
+    "\n" + ContractRuntimeLibrary.Read("PbtSmt.dfy");
   public static string Hash(string content) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
 
   public static void ValidateRequest(ContractTestRequest request) {
@@ -195,7 +201,7 @@ public static class ContractHarnessBuilder {
     request = ExecutionRequest(request);
     if (prepared.Program.RawModules().SelectMany(module => module.TopLevelDecls)
         .OfType<TopLevelDeclWithMembers>().SelectMany(type => type.Members)
-        .Any(member => member.Name is MainName or BridgeName)) {
+        .Any(member => member.Name is MainName or ObservationName or SmtName)) {
       throw new ArgumentException("Source declares a reserved diagnostic harness name.");
     }
     var arguments = string.Join(", ", prepared.Method.Ins.Select(formal => InputExpression(prepared, request, formal.Name)));
@@ -209,33 +215,11 @@ public static class ContractHarnessBuilder {
       "<" + string.Join(", ", prepared.ConcreteTypeArguments) + ">";
     var call = (outputs.Count == 0 ? "" : "var " + string.Join(", ", outputs) + " := ") + target + prepared.Method.Name + typeArguments + "(" + arguments + ");";
     var captures = string.Join("\n", prepared.Method.Outs.Select((formal, index) =>
-      $"{BridgeName}.Capture(\"{formal.Name}\", {outputs[index]}, {TypeShapeLiteral(formal.Type)});"));
-    var bridgeDeclaration = $"\nclass {{:extern \"DafnyContractRuntime\", \"ContractDiagnosticBridge\"}} {BridgeName} {{\n" +
-      "static method {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"Capture\"} Capture<T>(name: string, value: T, shape: string)\n" +
-      "static method {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"Register\"} Register<T>(name: string, typeName: string, value: T, logicalBase64: string)\n" +
-      "static method {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"Snapshot\"} Snapshot(phase: string)\n" +
-      "static method {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"Begin\"} Begin(name: string)\n" +
-      "static method {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"Input\"} Input<T>(name: string, value: T, shape: string)\n" +
-      "static method {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"End\"} End()\n" +
-      "static method {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"AssertionFailed\"} AssertionFailed()\n" +
-      "static method {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"EnterFrame\"} EnterFrame(name: string, frame: string)\n" +
-      "static method {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"ExitFrame\"} ExitFrame()\n" +
-      "static function {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"Write\"} Write<T>(receiver: T, field: string): T\n" +
-      "static function {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"CheckPrecondition\"} CheckPrecondition(name: string, arguments: string): bool\n" +
-      "static function {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"Trace\"} Trace(symbol: string, position: int, line: int, column: int, value: bool): bool\n" +
-      "static function {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"Unreachable\"} Unreachable<T>(): T\n" +
-      "static function {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"Serialize\"} Serialize<T>(value: T, shape: string): string\n" +
-      "static function {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"Realize\"} Realize(name: string, arguments: string, pure: bool): string\n" +
-      "static function {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"Output\"} Output<T>(realization: string, outputName: string): T\n" +
-      "static function {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"Choose\"} Choose<T>(name: string, arguments: string, outputName: string, pure: bool): T\n}\n";
-    bridgeDeclaration = bridgeDeclaration[..^2] +
-      "static function {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"StartTarget\"} StartTarget(symbol: string, arguments: string, invocation: int): int\n" +
-      "static method {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"EndTarget\"} EndTarget(token: int, outputs: string)\n" +
-      "static function {:extern \"DafnyContractRuntime.ContractDiagnosticBridge\", \"EndTargetValue\"} EndTargetValue<T>(token: int, outputName: string, value: T, shape: string): T\n}\n";
+      $"{ObservationName}.Capture(\"{formal.Name}\", {outputs[index]}, {TypeShapeLiteral(formal.Type)});"));
     var declarations =
       $"method {MainName}() {{\n{prepared.Heap?.AllocationStatements}\n" +
-      string.Join("\n", (request.Heap ?? []).Select(item => $"{BridgeName}.Register(\"{item.Id}\", \"{item.Type}\", {prepared.Heap!.ReferenceExpression(item.Id)}, \"{prepared.Heap.LogicalFieldsBase64(item.Id)}\");")) +
-      $"\n{BridgeName}.Snapshot(\"initial\");\n{call}\n{BridgeName}.Snapshot(\"final\");\n{captures}\n}}\n";
+      string.Join("\n", (request.Heap ?? []).Select(item => $"{ObservationName}.Register(\"{item.Id}\", \"{item.Type}\", {prepared.Heap!.ReferenceExpression(item.Id)}, \"{prepared.Heap.LogicalFieldsBase64(item.Id)}\");")) +
+      $"\n{ObservationName}.Snapshot(\"initial\");\n{call}\n{ObservationName}.Snapshot(\"final\");\n{captures}\n}}\n";
     var sourceUri = ContractSourceSnapshot.UriFor(sourceSnapshot.Path);
     var edits = new List<(int Position, string Text)>();
     if (sourceUri == prepared.Method.Origin.Uri) {
@@ -248,7 +232,7 @@ public static class ContractHarnessBuilder {
     var instrumentedWrites = new HashSet<(int Start, int End)>();
     var tracedGuards = new HashSet<(string Symbol, int Start, int End)>();
     var reachable = ReachableCallables(prepared.Program, prepared.Callable);
-    // The runtime bridge can observe compiled fields only.  Audit reachable
+    // The runtime observation can observe compiled fields only.  Audit reachable
     // implementation bodies before applying instrumentation so a ghost heap
     // write cannot disappear and leave Q checked against a fabricated state.
     ContractLogicalEffectAnalyzer.EnsureExecutableHeapEffectsSupported(
@@ -263,7 +247,7 @@ public static class ContractHarnessBuilder {
     foreach (var firstMember in allSourceMembers.GroupBy(member => member.EnclosingClass.EnclosingModuleDefinition).Select(group => group.First())
                .Where(member => member.Origin.Uri == sourceUri)) {
       edits.Add((firstMember.EnclosingClass is DefaultClassDecl ? firstMember.StartToken.pos : firstMember.EnclosingClass.StartToken.pos,
-        bridgeDeclaration));
+        RuntimeDeclaration));
     }
     if (reachable.OfType<MethodOrFunction>().Any(callable => callable.Origin.line > 0 && !allSourceMembers.Contains(callable))) {
       throw new NotSupportedException("A reachable body is outside the immutable source snapshot.");
@@ -283,9 +267,9 @@ public static class ContractHarnessBuilder {
         var invocationName = invocationPrefix + method.StartToken.pos;
         var methodEntry = "";
         var methodExit = "";
-        var targetStart = isTarget ? $"var {invocationName} := {BridgeName}.StartTarget(\"{prepared.ReachableTarget!.FullDafnyName}\", {SerializedInputs(method.Ins, !method.IsStatic)}, {requestedInvocation});\n" : "";
+        var targetStart = isTarget ? $"var {invocationName} := {SmtName}.StartTarget(\"{prepared.ReachableTarget!.FullDafnyName}\", {SerializedInputs(method.Ins, !method.IsStatic)}, {requestedInvocation});\n" : "";
         string TargetEnd(IEnumerable<string> values) => isTarget
-          ? $"{BridgeName}.EndTarget({invocationName}, {SerializedValues(prepared.ReachableTarget!.Outs.Zip(values,
+          ? $"{SmtName}.EndTarget({invocationName}, {SerializedValues(prepared.ReachableTarget!.Outs.Zip(values,
             (output, expression) => (output.Name, expression, output.Type)))});\n" : "";
         if (!reachable.Contains(method) && (isExternal || method.Body != null)) {
           continue;
@@ -306,7 +290,7 @@ public static class ContractHarnessBuilder {
                 throw new NotSupportedException("Ghost body assertion observation is not implemented at " + method.FullDafnyName);
               }
               edits.Add((assertion.StartToken.pos, "if !(" + Printer.ExprToString(prepared.Program.Options, assertion.Expr) +
-                $") {{ {BridgeName}.AssertionFailed(); }}\n"));
+                $") {{ {ObservationName}.AssertionFailed(); }}\n"));
             }
             if (!statement.IsGhost) {
               if (statement is IfStmt { IsBindingGuard: false, Guard: { } condition }) {
@@ -329,7 +313,7 @@ public static class ContractHarnessBuilder {
                   var arrayStart = arrayRange.StartToken.pos;
                   var arrayEnd = arrayStart + arrayRange.Length;
                   if (instrumentedWrites.Add((arrayStart, arrayEnd))) {
-                    edits.Add((arrayStart, BridgeName + ".Write(("));
+                    edits.Add((arrayStart, ObservationName + ".Write(("));
                     edits.Add((arrayEnd, "), \"element\")"));
                   }
                   continue;
@@ -343,7 +327,7 @@ public static class ContractHarnessBuilder {
                 if (selected.Obj is ImplicitThisExpr) {
                   var position = assignmentTarget.EntireRange.StartToken.pos;
                   if (instrumentedWrites.Add((position, position))) {
-                    edits.Add((position, $"{BridgeName}.Write(this, \"{field.Name}\")."));
+                    edits.Add((position, $"{ObservationName}.Write(this, \"{field.Name}\")."));
                   }
                   continue;
                 }
@@ -351,7 +335,7 @@ public static class ContractHarnessBuilder {
                   throw new NotSupportedException("The field write has no explicit receiver source range at " + method.FullDafnyName);
                 }
                 if (instrumentedWrites.Add((start, end))) {
-                  edits.Add((start, BridgeName + ".Write(("));
+                  edits.Add((start, ObservationName + ".Write(("));
                   edits.Add((end, $"), \"{field.Name}\")"));
                 }
               }
@@ -368,10 +352,10 @@ public static class ContractHarnessBuilder {
                   var temporaries = method.Outs.Select((output, index) => (Name: returnPrefix + range.StartToken.pos + "_" + index, output.Type)).ToList();
                   returnWrappers.Add(range.StartToken.pos, (
                     "{ var " + string.Join(", ", temporaries.Select(output => output.Name + ": " + output.Type)) + " := ",
-                    " " + TargetEnd(temporaries.Select(output => output.Name)) + $" {BridgeName}.ExitFrame(); return " + string.Join(", ", temporaries.Select(output => output.Name)) + "; }"));
+                    " " + TargetEnd(temporaries.Select(output => output.Name)) + $" {ObservationName}.ExitFrame(); return " + string.Join(", ", temporaries.Select(output => output.Name)) + "; }"));
                   replacements.Add((range.StartToken.pos, range.Length, ""));
                 } else {
-                  edits.Add((returned.StartToken.pos, TargetEnd(method.Outs.Select(output => output.Name)) + BridgeName + ".ExitFrame();\n"));
+                  edits.Add((returned.StartToken.pos, TargetEnd(method.Outs.Select(output => output.Name)) + ObservationName + ".ExitFrame();\n"));
                 }
               }
             }
@@ -384,20 +368,20 @@ public static class ContractHarnessBuilder {
             if (frame.Any(expression => expression.FieldName != null || ExpressionTester.UsesSpecFeatures(expression.E))) {
               throw new NotSupportedException("Unsupported runtime frame expression at " + method.FullDafnyName);
             }
-            var frameValues = frame.Select(expression => BridgeName + ".Serialize(" +
+            var frameValues = frame.Select(expression => ObservationName + ".Serialize(" +
               Printer.ExprToString(prepared.Program.Options, expression.E) + ", " + OtherTypeShapeLiteral + ")").ToList();
             var frameJson = frameValues.Count == 0 ? "\"[]\"" : "\"[\" + " + string.Join(" + \",\" + ", frameValues) + " + \"]\"";
-            methodEntry = $"\n{BridgeName}.EnterFrame(\"{method.FullDafnyName}\", {frameJson});\n";
-            methodExit = "\n" + BridgeName + ".ExitFrame();\n";
+            methodEntry = $"\n{ObservationName}.EnterFrame(\"{method.FullDafnyName}\", {frameJson});\n";
+            methodExit = "\n" + ObservationName + ".ExitFrame();\n";
           }
         }
         if (method.Body == null || isExternal) {
           if (method.Outs.Any(formal => !SupportedType(ConcreteType(method, formal.Type)))) {
             throw new NotSupportedException("Unsupported absent-body result type at " + method.FullDafnyName);
           }
-          var returns = method.Outs.Select(formal => $"{formal.Name} := {BridgeName}.Output<{formal.Type}>({modelName}, \"{formal.Name}\");");
+          var returns = method.Outs.Select(formal => $"{formal.Name} := {SmtName}.Output<{formal.Type}>({modelName}, \"{formal.Name}\");");
           var modelBody = " { " + targetStart +
-            $"var {modelName} := {BridgeName}.Realize(\"{method.FullDafnyName}\", {SerializedInputs(method.Ins, !method.IsStatic)}, false); " +
+            $"var {modelName} := {SmtName}.Realize(\"{method.FullDafnyName}\", {SerializedInputs(method.Ins, !method.IsStatic)}, false); " +
             string.Join(" ", returns) + TargetEnd(method.Outs.Select(output => output.Name)) + " }\n";
           if (method.Body == null) {
             edits.Add((method.EndToken.pos + method.EndToken.val.Length, modelBody));
@@ -409,9 +393,9 @@ public static class ContractHarnessBuilder {
           if (method.Ins.Any(formal => formal.IsGhost || !SupportedType(ConcreteType(method, formal.Type)) && !formal.Type.IsRefType)) {
             throw new NotSupportedException("Unsupported call precondition input at " + method.FullDafnyName);
           }
-          var argumentsToCapture = (method.IsStatic ? "" : $"{BridgeName}.Input(\"$this\", this, {OtherTypeShapeLiteral});\n") + string.Join("\n", method.Ins.Select(formal =>
-            $"{BridgeName}.Input(\"{formal.Name}\", {formal.Name}, {TypeShapeLiteral(formal.Type)});"));
-          methodEntry = $"\n{BridgeName}.Begin(\"{method.FullDafnyName}\");\n{argumentsToCapture}\n{BridgeName}.End();\n" + methodEntry;
+          var argumentsToCapture = (method.IsStatic ? "" : $"{SmtName}.Input(\"$this\", this, {OtherTypeShapeLiteral});\n") + string.Join("\n", method.Ins.Select(formal =>
+            $"{SmtName}.Input(\"{formal.Name}\", {formal.Name}, {TypeShapeLiteral(formal.Type)});"));
+          methodEntry = $"\n{SmtName}.Begin(\"{method.FullDafnyName}\");\n{argumentsToCapture}\n{SmtName}.End();\n" + methodEntry;
         }
         if (isTarget && method.Body != null && !isExternal) {
           methodEntry = "\n" + targetStart + methodEntry;
@@ -431,8 +415,8 @@ public static class ContractHarnessBuilder {
         var isExternal = Attributes.Contains(function.Attributes, "extern");
         var isTarget = prepared.ReachableTarget?.FunctionFromWhichThisIsByMethodDecl == function && function.ByMethodBody == null;
         var invocationName = invocationPrefix + function.StartToken.pos;
-        var targetPrefix = isTarget ? $"var {invocationName} := {BridgeName}.StartTarget(\"{function.FullDafnyName}\", {SerializedInputs(function.Ins, !function.IsStatic)}, {requestedInvocation}); " +
-          $"{BridgeName}.EndTargetValue({invocationName}, \"{prepared.ReachableTarget!.Outs.Single().Name}\", (" : "";
+        var targetPrefix = isTarget ? $"var {invocationName} := {SmtName}.StartTarget(\"{function.FullDafnyName}\", {SerializedInputs(function.Ins, !function.IsStatic)}, {requestedInvocation}); " +
+          $"{SmtName}.EndTargetValue({invocationName}, \"{prepared.ReachableTarget!.Outs.Single().Name}\", (" : "";
         var targetSuffix = isTarget ? $"), {TypeShapeLiteral(prepared.ReachableTarget!.Outs.Single().Type)})" : "";
         if (!reachable.Contains(function) && (isExternal || function.Body != null)) {
           continue;
@@ -442,7 +426,7 @@ public static class ContractHarnessBuilder {
         }
         if (function.Body == null || isExternal) {
           var modelBody = " { " + targetPrefix +
-            $"{BridgeName}.Choose<{function.ResultType}>(\"{function.FullDafnyName}\", {SerializedInputs(function.Ins, !function.IsStatic)}, \"{ContractCallableSelector.FunctionResultName(prepared.Program, function)}\", true)" +
+            $"{SmtName}.Choose<{function.ResultType}>(\"{function.FullDafnyName}\", {SerializedInputs(function.Ins, !function.IsStatic)}, \"{ContractCallableSelector.FunctionResultName(prepared.Program, function)}\", true)" +
             targetSuffix + " }\n";
           if (function.Body == null) {
             edits.Add((function.EndToken.pos + function.EndToken.val.Length, modelBody));
@@ -455,14 +439,14 @@ public static class ContractHarnessBuilder {
             throw new NotSupportedException("Unsupported actual function precondition inputs at " + function.FullDafnyName);
           }
           if (function.ByMethodBody != null) {
-            var inputs = (function.IsStatic ? "" : $"{BridgeName}.Input(\"$this\", this, {OtherTypeShapeLiteral});\n") + string.Join("\n", function.Ins.Select(formal =>
-              $"{BridgeName}.Input(\"{formal.Name}\", {formal.Name}, {TypeShapeLiteral(formal.Type)});"));
+            var inputs = (function.IsStatic ? "" : $"{SmtName}.Input(\"$this\", this, {OtherTypeShapeLiteral});\n") + string.Join("\n", function.Ins.Select(formal =>
+              $"{SmtName}.Input(\"{formal.Name}\", {formal.Name}, {TypeShapeLiteral(formal.Type)});"));
             edits.Add((function.ByMethodBody.StartToken.pos + 1,
-              $"\n{BridgeName}.Begin(\"{function.FullDafnyName}\");\n{inputs}\n{BridgeName}.End();\n"));
+              $"\n{SmtName}.Begin(\"{function.FullDafnyName}\");\n{inputs}\n{SmtName}.End();\n"));
           } else {
             var range = function.Body.EntireRange;
-            edits.Add((range.StartToken.pos, $"if {BridgeName}.CheckPrecondition(\"{function.FullDafnyName}\", {SerializedInputs(function.Ins, !function.IsStatic)}) then ("));
-            edits.Add((range.StartToken.pos + range.Length, $") else {BridgeName}.Unreachable<{function.ResultType}>()"));
+            edits.Add((range.StartToken.pos, $"if {SmtName}.CheckPrecondition(\"{function.FullDafnyName}\", {SerializedInputs(function.Ins, !function.IsStatic)}) then ("));
+            edits.Add((range.StartToken.pos + range.Length, $") else {ObservationName}.Unreachable<{function.ResultType}>()"));
           }
         }
         if (function.Body != null && function.ByMethodBody == null && !isExternal) {
@@ -516,7 +500,7 @@ public static class ContractHarnessBuilder {
       var token = range.StartToken;
       var end = token.pos + range.Length;
       if (tracedGuards.Add((symbol, token.pos, end))) {
-        edits.Add((token.pos, $"{BridgeName}.Trace(\"{symbol}\", {token.pos}, {token.line}, {token.col}, ("));
+        edits.Add((token.pos, $"{ObservationName}.Trace(\"{symbol}\", {token.pos}, {token.line}, {token.col}, ("));
         edits.Add((end, "))"));
       }
     }
@@ -549,16 +533,16 @@ public static class ContractHarnessBuilder {
       : ContractModelCodec.ToDafny(request.Inputs[name], prepared.Method.EnclosingClass.EnclosingModuleDefinition.FullDafnyName);
 
   private static string SerializedInputs(IEnumerable<Formal> formals, bool receiver = false) {
-    var parts = formals.Select(formal => "\"\\\"" + formal.Name + "\\\":\" + " + BridgeName + ".Serialize(" +
+    var parts = formals.Select(formal => "\"\\\"" + formal.Name + "\\\":\" + " + ObservationName + ".Serialize(" +
       formal.Name + ", " + TypeShapeLiteral(formal.Type) + ")").ToList();
     if (receiver) {
-      parts.Add("\"\\\"$this\\\":\" + " + BridgeName + ".Serialize(this, " + OtherTypeShapeLiteral + ")");
+      parts.Add("\"\\\"$this\\\":\" + " + ObservationName + ".Serialize(this, " + OtherTypeShapeLiteral + ")");
     }
     return parts.Count == 0 ? "\"{}\"" : "\"{\" + " + string.Join(" + \",\" + ", parts) + " + \"}\"";
   }
 
   private static string SerializedValues(IEnumerable<(string Name, string Expression, Microsoft.Dafny.Type Type)> values) {
-    var parts = values.Select(value => "\"\\\"" + value.Name + "\\\":\" + " + BridgeName + ".Serialize(" +
+    var parts = values.Select(value => "\"\\\"" + value.Name + "\\\":\" + " + ObservationName + ".Serialize(" +
       value.Expression + ", " + TypeShapeLiteral(value.Type) + ")").ToList();
     return parts.Count == 0 ? "\"{}\"" : "\"{\" + " + string.Join(" + \",\" + ", parts) + " + \"}\"";
   }

@@ -23,6 +23,46 @@ public sealed record ContractRuntimeHeapCheck(ContractPreparedProgram Prepared, 
 
 /// <summary>Validates captured runtime heaps before they can become fixed-state contract queries.</summary>
 public static class ContractRuntimeHeapChecking {
+  /// <summary>Matches one returned invocation in an ordered prefix, rejecting malformed or crossed call boundaries.</summary>
+  public static (JsonElement Entry, JsonElement Return)? MatchCallCaptures(IReadOnlyList<JsonElement> prefix,
+    string scope, int invocation) {
+    var active = new Stack<(string Scope, int Invocation)>();
+    var seen = new HashSet<int>();
+    JsonElement entry = default;
+    JsonElement returned = default;
+    foreach (var record in prefix) {
+      if (Text(record, "kind") != "heap_capture") { continue; }
+      var phase = Text(record, "phase");
+      if (phase is not ("call_entry" or "call_return")) { continue; }
+      var actualScope = Text(record, "scope");
+      if (actualScope == null || !record.TryGetProperty("invocation", out var encoded) ||
+          encoded.ValueKind != JsonValueKind.Number || !encoded.TryGetInt32(out var actualInvocation) || actualInvocation <= 0 ||
+          !record.TryGetProperty("heap", out var heap) || heap.ValueKind != JsonValueKind.Array ||
+          !record.TryGetProperty(phase == "call_entry" ? "inputs" : "outputs", out var values) || values.ValueKind != JsonValueKind.Object) {
+        return null;
+      }
+      if (phase == "call_entry") {
+        if (!seen.Add(actualInvocation)) { return null; }
+        active.Push((actualScope, actualInvocation));
+        if (actualInvocation == invocation) {
+          if (actualScope != scope) { return null; }
+          entry = record;
+        }
+      } else {
+        if (!active.TryPop(out var opened) || opened != (actualScope, actualInvocation)) { return null; }
+        if (actualInvocation == invocation) {
+          if (actualScope != scope) { return null; }
+          returned = record;
+        }
+      }
+    }
+    return entry.ValueKind != JsonValueKind.Undefined && returned.ValueKind != JsonValueKind.Undefined
+      ? (entry, returned) : null;
+
+    static string? Text(JsonElement value, string property) => value.ValueKind == JsonValueKind.Object &&
+      value.TryGetProperty(property, out var field) && field.ValueKind == JsonValueKind.String ? field.GetString() : null;
+  }
+
   internal static IReadOnlyList<ConstantField> StaticConstants(Program program) =>
     ContractRuntimeObligationTransformer.Members(program).OfType<ConstantField>()
       .Where(field => field.IsStatic && field.EnclosingClass.EnclosingModuleDefinition != program.SystemModuleManager.SystemModule).ToList();

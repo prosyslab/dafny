@@ -25,3 +25,11 @@
 | [2026-09-13-symbolic-entry-contract-checking](2026-09-13-symbolic-entry-contract-checking.md) | done | ghost·외부 상태를 구체화하지 않고 일반 Dafny 진입점 구현 계약을 SMT로 검사 | 2026-09-13 |
 | [2026-09-13-symbolic-extern-contracts](2026-09-13-symbolic-extern-contracts.md) | done | 외부 구현을 호출하지 않고 원래 계약·프레임으로 SMT 후상태를 실현 | 2026-09-13 |
 | [2026-09-12-expecto-residual-constraint-solving](2026-09-12-expecto-residual-constraint-solving.md) | done | 범용 타입/힙·구현 경로 생성·부분 평가·실제 실행·잔여 SMT를 연결 | 2026-09-12 |
+# Current work
+
+- [PBT Runtime/SMT naming](2026-10-02-pbt-runtime-smt-naming.md) — done; replace ambiguous Bridge names with Runtime/Smt/Random roles.
+- [PBT runtime library command](2026-10-02-pbt-runtime-library-command.md) — done; print embedded PbtRuntime.dfy and locate generator/draft parse errors.
+- [Static contract-runtime library](2026-10-02-static-contract-runtime-library.md) — done; task-independent PBT Dafny/C# runtime text moved to checked-in, ahead-of-time-checked library files.
+- [PBT call-state evidence, fact reuse and profiling](2026-10-01-pbt-call-state-memo-profile.md) — done; independent native65 plus corrective15, artifact13, supported packaging/integration4, root all15 and exact replay acceptance.
+- [Bounded call heaps and exact successful facts](2026-10-01-call-heap-facts-implementation.md) — done; invocation-bound old/current evidence, exact successful facts and quantifier source-edit correction independently accepted.
+- [Runtime profiling sidecars](2026-10-01-runtime-profile-sidecars.md) — done; aggregate runtime and campaign costs without changing raw observations.

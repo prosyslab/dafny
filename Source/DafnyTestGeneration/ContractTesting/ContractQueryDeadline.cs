@@ -1,11 +1,22 @@
 using System;
 using System.Diagnostics;
+using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 
 namespace DafnyTestGeneration.ContractTesting;
 
 /// <summary>Monotonic wall-clock deadlines independent of delayed cancellation callbacks.</summary>
 public static class ContractQueryDeadline {
+  /// <summary>Reads existing evidence only if the caller's current boundary still holds before and after lookup.</summary>
+  public static bool TryReadCached<T>(IReadOnlyDictionary<string, T> cache, string key, Action requireCurrentBoundary,
+    [MaybeNullWhen(false)] out T value) {
+    requireCurrentBoundary();
+    var found = cache.TryGetValue(key, out value);
+    requireCurrentBoundary();
+    return found;
+  }
+
   /// <summary>Creates an absolute timestamp for a query whose complete construction and checking fit this budget.</summary>
   public static long AfterMilliseconds(long milliseconds) => checked(Stopwatch.GetTimestamp() +
     (long)Math.Ceiling(milliseconds * (double)Stopwatch.Frequency / 1000));

@@ -11,7 +11,7 @@ using Xunit;
 namespace DafnyTestGeneration.Test;
 
 public class ContractEntryTests {
-  // Runtime source removes a reachable extern binding and body marker before installing the model bridge body.
+  // Runtime source removes a reachable extern binding and body marker before installing the model realization body.
   [Fact]
   public async Task ReachableExternalBodyCannotInvokeNativeImplementation() {
     const string source = "method {:extern \"NativeMarker\", \"Invoke\"} External(x:int) returns(r:int) ensures r == x+1 { print \"NATIVE_MARKER\"; r := -1; } method Entry(x:int) returns(r:int) { r := External(x); }";
@@ -26,7 +26,7 @@ public class ContractEntryTests {
     var prepared = ContractHarnessBuilder.Prepare(program, request);
     var runtime = ContractHarnessBuilder.RuntimeSource(prepared, request);
     Assert.DoesNotContain("NativeMarker", runtime);
-    Assert.Contains("ContractDiagnosticBridge.Realize(\"External\"", runtime);
+    Assert.Contains("PbtSmt.Realize(\"External\"", runtime);
     Assert.DoesNotContain("r := -1", runtime);
     var runtimeReporter = new BatchErrorReporter(options);
     _ = await ContractSourceSnapshot.ParseAsync(runtimeReporter,
@@ -34,7 +34,7 @@ public class ContractEntryTests {
     Assert.Equal(0, runtimeReporter.ErrorCount);
   }
 
-  // Runtime source replaces an external function's expression and by-method bodies with one model bridge body.
+  // Runtime source replaces an external function's expression and by-method bodies with one model realization body.
   [Fact]
   public async Task ReachableExternalByMethodCannotInvokeNativeImplementation() {
     const string source = "function {:extern \"NativeFunction\"} External(x:int):int ensures External(x) == x+1 { x-1 } by method { print \"BY_METHOD_MARKER\"; return x-2; } method Entry(x:int) returns(r:int) { r := External(x); }";
@@ -51,14 +51,14 @@ public class ContractEntryTests {
     Assert.DoesNotContain("NativeFunction", runtime);
     Assert.DoesNotContain("BY_METHOD_MARKER", runtime);
     Assert.DoesNotContain("return x-2", runtime);
-    Assert.Contains("ContractDiagnosticBridge.Choose<int>(\"External\"", runtime);
+    Assert.Contains("PbtSmt.Choose<int>(\"External\"", runtime);
     var runtimeReporter = new BatchErrorReporter(options);
     _ = await ContractSourceSnapshot.ParseAsync(runtimeReporter,
       [new(request.Sources[0].Path, runtime, ContractHarnessBuilder.Hash(runtime))], CancellationToken.None);
     Assert.Equal(0, runtimeReporter.ErrorCount);
   }
 
-  // A reachable internal body that writes a ghost field is rejected before the runtime bridge can erase it.
+  // A reachable internal body that writes a ghost field is rejected before the runtime observation can erase it.
   [Fact]
   public async Task InternalGhostHeapWriteIsUnsupported() {
     const string source = "class Box { ghost var proof:int } method Entry(box:Box) requires box == null { if box != null { box.proof := 1; } }";
@@ -95,7 +95,7 @@ public class ContractEntryTests {
     var runtime = ContractHarnessBuilder.RuntimeSource(prepared, request);
 
     Assert.Contains("ghost var proof", runtime);
-    Assert.DoesNotContain("ContractDiagnosticBridge.Write", runtime);
+    Assert.DoesNotContain("PbtObservation.Write", runtime);
     var runtimeReporter = new BatchErrorReporter(options);
     _ = await Utils.Parse(runtimeReporter, runtime, uri: new Uri("file:///tmp/contract-ghost-local-runtime.dfy"));
     Assert.Equal(0, runtimeReporter.ErrorCount);
@@ -314,7 +314,7 @@ public class ContractEntryTests {
     Assert.Equal("contractResult", prepared.Method.Outs.Single().Name);
   }
 
-  // A reachable helper in another source module retains a resolvable local precondition bridge.
+  // A reachable helper in another source module retains a resolvable local precondition check.
   [Fact]
   public async Task RuntimeInstrumentationResolvesAcrossSourceModules() {
     const string source = "module Helpers { function Positive(x:int):int requires x>0 {x} } " +

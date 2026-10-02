@@ -345,6 +345,13 @@ removed on replaced diagnostic declarations. Generator formals match the goal's
 inputs, including compilable ghost formals and an instance receiver. Diagnostic
 source mapping uses byte-offset segments to recover the supplied original source
 path, line, column and hash after draft/generator insertion.
+Syntax errors in a draft or generator are reported while parsing that source alone,
+as `<supplied path, e.g. .top-down-pbt/generators/X.dfy>:line:col: message` per error
+(`ContractRuntimeSourcePreparation.ParseDeclarations`); the command layer still maps the
+`NotSupportedException` to `unsupported`. `dafny contract-runtime-library` (no arguments)
+prints the embedded `PbtRuntime.dfy` byte-for-byte to stdout (UTF-8, no BOM, ends with one
+LF), so Cosyn's model-visible copy has a single engine source (plan
+`plan/2026-10-02-pbt-runtime-library-command.md`).
 
 The first full build passed with zero warnings/errors. The initial behavioral
 checkpoint passed 20 Driver execution tests, 7 transformation/wire tests, and 9
@@ -398,7 +405,7 @@ these limits.
   `forall e :: e in r ==> A && B` then prints as a conjunction of separately ranged implications, which is not
   compilable. Ghost inference silently turns such a check's local into ghost code, so the check disappears from the
   compiled program without a resolver error. Runtime rendering therefore rebuilds the unsplit quantifier.
-- Structural safety net: after each diagnostic resolve the runner collects `PbtBridge.Check`/`Checkpoint` id literals
+- Structural safety net: after each diagnostic resolve the runner collects `PbtChecks.Check`/`Checkpoint` id literals
   from compiled (non-ghost) code. Any obligation missing there is re-transformed as a closed query, then as unchecked
   (`runtime_check_not_compiled`); a rendered check that fails to resolve falls back the same way. Valid samples
   support `no_violation_found` only when a goal obligation was decided in them.
@@ -1311,7 +1318,10 @@ reachable preparation keep their previous restrictions. Ghost outputs remain
 unsupported. Every input is selected exactly, even when irrelevant to the clause;
 entry and return heaps retain distinct observation roles, original aliases,
 old/current values, type/omission checks, frame and source/dependency/trust gates.
-This does not add per-callee entry/return/receiver/occurrence snapshots.
+This historical stage did not add per-callee entry/return/receiver/occurrence snapshots.
+That limitation is superseded for the supported fragment by
+[invocation-bound callee heaps](#invocation-bound-callee-heaps-fact-reuse-and-profiles-2026-10-01);
+the original type/dependency limitations still apply.
 
 Independent native133/133 and Driver12/12 controls pass, including both original
 postcondition polarities, unsupported/missing values, ghost/reference aliasing,
@@ -1472,3 +1482,154 @@ Plan: [recursive and nested heap construction](../plan/2026-09-29-recursive-and-
   (generator loops); trait-typed references other than `object`, generic or trait
   classes, and recursive default allocation are unsupported. Unit-mode hybrid testing,
   including model heap realization/replay, still rejects cyclic heaps.
+
+
+### Invocation-bound callee heaps, fact reuse and profiles (2026-10-01)
+
+Status: bounded implementation independently verified; historical fifteen-case
+outcomes are owned by the root comparison and must be reported separately.
+Origin: [owner plan](../plan/2026-10-01-pbt-call-state-memo-profile.md), linked
+[root comparison plan](../../../plan/2026-10-01-pbt-call-state-memo-profile.md).
+Verified 2026-10-01 at engine HEAD `12065bbe85c4e20b9b5f8bb4b159f6394779fdb3`
+with the retained dirty-source hashes. Formal independent evidence:
+`/workspace/tmp/experiment/pbt-optimization-20261001/independent-final/engine-acceptance.json`
+(SHA-256 `d58ba07d8bf03a23c0c96611d18bd13e7ce797e4579d06d21e0b952ade88dbbc`).
+
+Supported non-runtime callee heap clauses now bind to a unique invocation's
+actual entry and return captures, original declaration, receiver, inputs and
+outputs. If a goal changes `c.n` to10 then calls a child twice that increments it,
+the children's `old(c.n)` values are10 and11, not the goal's original entry value.
+`ContractRuntimeObligationTransformer` and `ContractRuntimeInstrumentation` emit
+the captures; `ContractRuntimeHeapChecking.MatchCallCaptures` matches an ordered,
+well-shaped nested stack within the retained prefix; the campaign runner builds
+the original closed query with call-local state. Missing returns, crossed or
+duplicate IDs and malformed captures remain unavailable. Heap topology, exact
+formal values, types, original P, frames and specification dependencies retain
+the existing conservative gates. Concrete P is not a proof of a universally
+invalid specification function; arbitrary strings cannot be assumed to satisfy
+a `seq<RawByte>` result type merely because sampled strings are ASCII.
+
+`ContractNativeFactCache` identifies exact native query text, source bytes and
+canonical paths, query name and role. It records only SAT premise consistency
+or UNSAT clause proofs (including the distinct negative polarity); unknown and
+error outcomes establish no fact. Native decisions, specification attempts and
+initial-heap reuse also check the current cancellation/deadline before and after
+lookup through `ContractQueryDeadline.TryReadCached`. External cancellation
+propagates; explicit campaign expiry stays unchecked. Hits consume no new query
+budget and do not replace state admission. The runner hash in the acceptance
+receipt is `d9a071a31eedb5ff1802dc8ae7746f878428fa65407aa8c31ac20ee1d01d7e6a`.
+
+`ContractPhaseRecorder` supplies atomic aggregate profiles. The campaign writes
+`campaign-profile.json` (`sample_process`, `result_classification`); the bridge
+and stub runtime write `sample-<ordinal>.jsonl.profile.json` with
+`actual_contract_check`, `value_encoding`, `record_encoding`, `record_io`.
+Predicate timing surrounds actual evaluation before serialization. Nested checks
+count separately while elapsed spans are inclusive at the outer boundary.
+These categories can overlap, so they are not an additive runtime partition.
+Process exit attempts a final flush; killed processes may lack a profile, which
+is unknown rather than zero. Complete raw record semantics remain covered.
+
+The generic nested statement-expression deghosting now removes proof statements
+through the existing statement removal path and preserves executable expression
+tails/sibling edits. It addresses overlapping source replacements without
+guessing nonconstructive witnesses or weakening original native obligations.
+A timeout can preserve an independently validated invariant-failure prefix;
+records after its endpoint never certify that prefix, and no final Q or
+termination is inferred without a return.
+
+Independent checks:49 TestGeneration tests,16 Driver tests,13 artifact controls
+passed. The formal receipt retains an initial wrong-cwd artifact-control failure
+and its corrected run. Root supported `make build-dafny` has zero warnings/errors
+and Cosyn integration4/4 passes. This establishes the bounded implementation and
+reporting contracts; it does not establish all historical bugs are detected or
+a broad performance improvement. General unknown-length sequence solving and
+topdown process/preflight optimization remain deferred.
+
+
+The full original h06 request exposed an additional source-edit collision after
+the generic statement-expression control passed. `QuantifierExpr.SubExpressions`
+includes original source expressions and resolver-created `SplitQuantifier`
+copies with the same tokens. Source instrumentation tried to replace one
+`FoldSpec.StepColumn` token twice. `SourceExpressions` now traverses
+`QuantifierExpr.PreResolveSubExpressions` only for the two source-edit purposes
+(function-call instrumentation and proof erasure); logical/native dependency
+traversal retains the original `Expressions` path including split content.
+Overlap rejection remains strict and now identifies both spans. The real
+ColumnTraceRelation/StepColumn regression reparses transformed code and requires
+one source wrapper. Corrective independent checks10 native/5 Driver pass;
+receipt `independent-final/engine-acceptance-02.json` SHA-256
+`72734a625d5807438f4d1a1242c2b1be6441530953859abe559654a393434c5c`.
+Final transformer hash is
+`84f28a82d83ccb9b6165dc8d5985b21be7479fd935958fbb859190f297a62034`.
+The new common-version all15 root run and its exact witness replays remain
+separate acceptance evidence.
+
+Root comparison acceptance is now complete: all15 original requests under frozen02
+retain six logical counterexample cases including new h06, and seven exact
+replays cover eight distinct obligations plus the h13 sentinel (nine full-object
+checks). [Root report](../../../pbt-draft-exp/optimization-20261001.md) links raw
+results, coverage and inclusive profiles; formal final receipt
+`independent-final/final-artifact-acceptance.json` SHA-256
+`792348039174b050d6dd96225e17170c3471832296b3534364229da6c1602b03`
+and its closure addendum remain under the root task artifacts. Original public
+request modes are0444 and all bytes/source/frozen identities match. Root/owner
+plans are done. This does not settle the two unsupported or four inconclusive
+cases, certify unchecked clauses, or establish general performance improvement.
+
+## Static runtime library (2026-10-02, implementation checks)
+
+Status: file and class names superseded by "Runtime/Smt/Random role names" below (the hash-pin
+values `8709e5ac...420f` and `eb8b901d...4f6f` and the names `ContractDiagnosticBridge`, `PbtBridge`,
+`BridgeSource`, `ContractBridge.cs` are historical); implementation-verified locally; independent review pending. Originating plan:
+[static contract-runtime library](../plan/2026-10-02-static-contract-runtime-library.md).
+
+The task-independent text of the PBT/contract-runtime engine lives in
+`Source/DafnyTestGeneration/ContractTesting/Library/` instead of C# string literals:
+
+- `PbtRuntime.dfy` (modules `PbtRuntime`, `PbtRandom`) and `ContractDiagnosticBridge.dfy`
+  (the extern bridge class inserted into every source module) are real Dafny files; tests
+  resolve each standalone with zero errors.
+- `PbtRuntime.cs` and `ContractDiagnosticRuntime.cs` are C# files. They are not compiled
+  into `DafnyTestGeneration.dll` (the project has `Compile Remove`); `DafnyTestGeneration.Test`
+  links them so the build type-checks them against `DafnyRuntime`, using the test-only
+  `ContractRuntimeConfigurationStub.cs`.
+- All four ship as embedded resources named
+  `DafnyTestGeneration.ContractTesting.Library.<file name>` and are read by
+  `ContractRuntimeLibrary`, which throws on a missing resource or any `\r`
+  (`.gitattributes` forces LF for the directory).
+
+Invariants. The Dafny text is byte-identical to the pre-refactor strings because its hash
+reaches `transformed-sources.json` and proof `sourceSetSha256`: `PbtRuntime.dfy` is
+`DafnySource` plus one final LF (`ReadWithoutTerminator` strips exactly one);
+`ContractDiagnosticBridge.dfy` is prefixed with `"\n"` when inserted. Tests pin SHA-256
+`8709e5ac...420f` and `eb8b901d...4f6f`. Editing either `.dfy` file changes source-set
+hashes and must be a deliberate, hash-updating change. Task-specific values
+(`RuntimeReferences`, `ProfileRuntime`, `ObservationPath`, `ConcreteTypes`, `HeapShapes`,
+`DatatypeShapes`) are no longer substituted textually: `ContractStubRuntime.BridgeSource`
+appends a generated `DafnyContractRuntime.ContractRuntimeConfiguration` class of `internal
+const` values after the library text, so a user identifier such as `DATATYPE_SHAPES` cannot
+corrupt the bridge. Limits: C# text is not hashed and may be reformatted; `Library/*.cs`
+changes are checked only by the test build and the compile-and-run tests.
+
+### Runtime/Smt/Random role names (2026-10-02, implementation checks)
+
+Status: implementation-verified locally; independent review pending. Originating plan:
+[PBT runtime/SMT naming](../plan/2026-10-02-pbt-runtime-smt-naming.md). Supersedes the
+`Bridge` names above; behaviour (observation JSONL, RPC files, verdicts, random stream) is unchanged.
+
+| Role | Dafny (class in module) | C# (namespace.class), file in `Library/` | Former name |
+| --- | --- | --- | --- |
+| Generator random stream | `PbtRandom.Source`, `New()` (unchanged) | `DafnyPbtRandom.Source`, `PbtRandom.cs` | `DafnyPbtRuntime.Source` |
+| Runtime check recorder (JSONL checks, calls, heap captures) | `PbtRuntime.PbtChecks` | `DafnyPbtRuntime.Checks`, `PbtChecks.cs` | `PbtBridge`, `DafnyPbtBridgeRuntime.Bridge` |
+| Value/heap encoding and observation records | `PbtObservation` (inlined into every source module; `PbtChecks.Serialize*` re-export it) | `DafnyPbtRuntime.Observation`, `PbtObservation.cs` | non-SMT part of `ContractDiagnosticBridge` |
+| SMT requests to the parent (`Realize`, `Choose`, `Output`, `CheckPrecondition`, `Begin`/`Input`/`End`, `StartTarget`, `EndTarget`, `EndTargetValue`) | `PbtSmt` (inlined) | `DafnyPbtSmt.Oracle`, `PbtSmt.cs` | RPC part of `ContractDiagnosticBridge` |
+| Profile counters | n/a | `DafnyContractRuntime.ContractRuntimeProfile`, `ContractRuntimeProfile.cs` | unchanged |
+
+`Begin`/`Input`/`End` build and send the `precondition` request, so they live in `Oracle`; `Oracle` reaches
+heap state only through `Observation.Encode/Shape/SnapshotHeap/ApplyHeap/Decode/ConcreteTypes/Unsupported`
+(internal). Engine helpers: `ContractHarnessBuilder.ObservationName`/`SmtName`,
+`ContractStubRuntime.RuntimeSource`, `ContractRuntimeInstrumentation.RuntimeSource`, generated `ContractRuntime.cs`.
+The generated C# is `PbtObservation.cs` (the only file with `using` directives) + `ContractRuntimeProfile.cs` +
+`PbtSmt.cs` + configuration (+ `PbtChecks.cs` + `PbtRandom.cs` in the runtime path); the later files must stay fully
+qualified. `PbtObservation.dfy` + `PbtSmt.dfy` replace `ContractDiagnosticBridge.dfy`; the pinned texts are the
+Dafny source (`PbtRuntime.dfy`) and `"\n" + PbtObservation.dfy + "\n" + PbtSmt.dfy` (values in the plan).

@@ -1,5 +1,9 @@
 # Implementation knowledge
 
+2026-10-02: [static runtime library](contract-testing.md#static-runtime-library-2026-10-02-implementation-checks) moves the PBT Dafny/C# runtime text into checked-in, ahead-of-time-checked files with pinned byte identity; implementation checks only, independent review pending.
+
+2026-10-01: [invocation-bound callee heaps, successful fact reuse and profiles](contract-testing.md#invocation-bound-callee-heaps-fact-reuse-and-profiles-2026-10-01) pass independent native49/Driver16 plus corrective10/5 and artifact13 controls. Original P/type/WD/frame/dependency and finite-prefix gates remain; root all15/six logical cases/seven exact replays and package closure are independently accepted.
+
 2026-09-29 heap construction: [recursive and nested heap construction](contract-testing.md#recursive-and-nested-heap-construction-2026-09-29) accepts `object`-typed representation sets and cyclic fixed-state heaps, and nested `pbt_heap_constructor` paths with default object allocation; M2 cat with a one-annotation generator matches the existing generator.
 
 2026-09-29 sequential stage4: [runtime classification deadline boundaries](contract-testing.md#runtime-classification-deadline-boundaries-2026-09-29) independently pass23 Driver controls, h11 deadline/result audit and exact h13 sentinel replay. h11 returns a result while expired initial states remain unchecked; goal coverage limits remain.
@@ -8,7 +12,7 @@
 
 2026-09-29 sequential stage3a: [exact native membership proof reuse](contract-testing.md#exact-native-membership-proof-reuse-2026-09-29) independently passes21 campaign controls, raw artifact audit and cancellation-during-hit control. State admission remains separate from reusable pure proofs.
 
-2026-09-29 sequential stage2: [captured ghost goal heap observations](contract-testing.md#captured-ghost-goal-heap-observations-2026-09-29) independently pass native133/Driver12. Actual h15 return capture is available; its original dependency proof still blocks Q. Per-callee heap capture remains unsupported.
+2026-09-29 sequential stage2: [captured ghost goal heap observations](contract-testing.md#captured-ghost-goal-heap-observations-2026-09-29) independently pass native133/Driver12. Actual h15 return capture is available; its original dependency proof still blocks Q. At this historical stage per-callee capture was unsupported; the bounded 2026-10-01 extension above supersedes that limitation.
 
 2026-09-29 bounded follow-up: [captured ghost inputs and closed-clause names](contract-testing.md#captured-ghost-inputs-and-closed-clause-names-2026-09-29) and quantified heap reduction boundaries pass fresh independent44 native/42 Core/7 Driver/12 final type checks. Historical reruns are complete with no additional counterexamples; general existential support and full M2 acceptance remain open.
 

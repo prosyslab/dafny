@@ -18,4 +18,11 @@
     <ProjectReference Include="..\DafnyPipeline\DafnyPipeline.csproj" />
   </ItemGroup>
 
+  <!-- The library text is shipped, not compiled: the C# files target the generated contract program and are
+       type-checked by DafnyTestGeneration.Test instead. -->
+  <ItemGroup>
+    <Compile Remove="ContractTesting/Library/**" />
+    <EmbeddedResource Include="ContractTesting/Library/*" LogicalName="DafnyTestGeneration.ContractTesting.Library.%(Filename)%(Extension)" />
+  </ItemGroup>
+
 </Project>

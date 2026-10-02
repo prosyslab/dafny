@@ -71,6 +71,58 @@ public class ContractRuntimeObligationTests {
     Assert.Equal(ContractRuntimeDecisionMethod.Unchecked, Assert.Single(result.Clauses, c => c.Expression is UnaryOpExpr { Op: UnaryOpExpr.Opcode.Fresh }).Obligation.DecisionMethod);
   }
 
+  // Nested proof statements in a ghost function preserve both surviving expression branches during deghosting.
+  [Fact]
+  public async Task NestedStatementExpressionsKeepSiblingExpressions() {
+    var result = await Transform("ghost function Plus(x:int):int { assert true; " +
+      "if x>=0 then (assert true; x+1) else (assert true; x-1) } " +
+      "method Goal(x:int) ensures Plus(x)==(if x>=0 then x+1 else x-1) {}");
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    var reporter = new BatchErrorReporter(options);
+    var parsed = await ContractSourceSnapshot.ParseAsync(reporter, result.Sources, CancellationToken.None);
+    Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+    var plus = ContractRuntimeObligationTransformer.Members(parsed).OfType<Function>().Single(function => function.Name == "Plus");
+    Assert.False(plus.IsGhost);
+    var branch = Assert.IsType<ITEExpr>(plus.Body!.Resolved);
+    Assert.IsType<BinaryExpr>(branch.Thn.Resolved);
+    Assert.IsType<BinaryExpr>(branch.Els.Resolved);
+  }
+
+  // Split verification quantifiers share source tokens and must not create competing runtime call wrappers.
+  [Fact]
+  public async Task ColumnTraceQuantifierInstrumentsOriginalCallOnce() {
+    var result = await Transform("function StepColumn(byteMode:bool,ch:char,column:nat):nat { if byteMode then column+1 else column } " +
+      "ghost predicate ColumnTraceRelation(byteMode:bool,data:seq<char>,initialColumn:nat,columns:seq<nat>) { " +
+      "|columns|==|data|+1 && columns[0]==initialColumn && " +
+      "forall i :: 0<=i<|data| ==> columns[i+1]==StepColumn(byteMode,data[i],columns[i]) } " +
+      "method Goal(x:int) ensures ColumnTraceRelation(true,[],0,[0]) {}");
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    var reporter = new BatchErrorReporter(options);
+    var parsed = await ContractSourceSnapshot.ParseAsync(reporter, result.Sources, CancellationToken.None);
+    Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+    var members = ContractRuntimeObligationTransformer.Members(parsed).ToList();
+    var wrapper = Assert.Single(members.OfType<Function>().Where(function => function.Name.StartsWith("StepColumn__pbt_site_")));
+    var relation = members.OfType<Function>().Single(function => function.Name == "ColumnTraceRelation");
+    Assert.False(relation.IsGhost);
+    var quantifier = Assert.IsType<ForallExpr>(Assert.IsType<BinaryExpr>(relation.Body!.Resolved).E1.Resolved);
+    Assert.Contains(quantifier.Term.Descendants().OfType<FunctionCallExpr>(), call => call.Function == wrapper);
+  }
+
+  // Logical method callee postconditions retain their original index and owner for per-invocation heap queries.
+  [Fact]
+  public async Task ClassifiesInternalMethodHeapPostcondition() {
+    var result = await Transform("class Cell { var value:int } " +
+      "twostate predicate Changed(cell:Cell) reads cell { cell.value == old(cell.value)+1 } " +
+      "method Step(cell:Cell) modifies cell ensures Changed(cell) { cell.value:=cell.value+1; } " +
+      "method Goal(x:int) { var cell:=new Cell; cell.value:=x; Step(cell); }");
+    var clause = Assert.Single(result.Clauses.Where(item => item.Obligation.Kind == ContractRuntimeObligationKind.CalleePostcondition));
+    Assert.Equal(ContractRuntimeDecisionMethod.ClosedSmt, clause.Obligation.DecisionMethod);
+    Assert.Equal(0, clause.EntryHeapPostcondition);
+    Assert.Equal("M.Step", clause.CallHeapScope);
+  }
+
   private static async Task<ContractRuntimeTransformation> Transform(string text) {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();

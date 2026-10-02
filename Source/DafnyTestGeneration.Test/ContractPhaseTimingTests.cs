@@ -99,6 +99,52 @@ public class ContractPhaseTimingTests {
     }
   }
 
+  // Aggregate profiles replace one deterministic sidecar while retaining every completed measurement.
+  [Fact]
+  public void AggregateProfilePersistsSortedMetrics() {
+    var directory = Path.Combine(Path.GetTempPath(), "contract-profile-test-" + Guid.NewGuid().ToString("N"));
+    var path = Path.Combine(directory, "profile.json");
+    try {
+      var recorder = new ContractProfileRecorder(path);
+      Assert.Equal(3, recorder.Measure("sample_process", () => 3));
+      Assert.Equal(4, recorder.Measure("result_classification", () => 4));
+      Assert.Equal(5, recorder.Measure("sample_process", () => 5));
+      recorder.Flush();
+
+      var profile = JsonSerializer.Deserialize<ContractProfile>(File.ReadAllText(path), ContractJson.Options)!;
+      Assert.Equal(ContractJson.SchemaVersion, profile.SchemaVersion);
+      Assert.Equal("Stopwatch", profile.Clock);
+      Assert.Equal(new[] { "result_classification", "sample_process" }, profile.Metrics.Select(metric => metric.Name));
+      Assert.Equal(new long[] { 1, 2 }, profile.Metrics.Select(metric => metric.Count));
+      Assert.All(profile.Metrics, metric => Assert.True(metric.ElapsedMilliseconds >= 0));
+    }
+    finally {
+      if (Directory.Exists(directory)) { Directory.Delete(directory, recursive: true); }
+    }
+  }
+
+  // A failed measured operation retains its spent time without changing the propagated exception.
+  [Fact]
+  public async Task AggregateProfileMeasuresFailure() {
+    var directory = Path.Combine(Path.GetTempPath(), "contract-profile-failure-test-" + Guid.NewGuid().ToString("N"));
+    var path = Path.Combine(directory, "profile.json");
+    try {
+      var recorder = new ContractProfileRecorder(path);
+      await Assert.ThrowsAsync<InvalidOperationException>(() => recorder.MeasureAsync("result_classification",
+        () => Task.FromException<bool>(new InvalidOperationException("classification failed"))));
+      recorder.Flush();
+
+      var profile = JsonSerializer.Deserialize<ContractProfile>(File.ReadAllText(path), ContractJson.Options)!;
+      var metric = Assert.Single(profile.Metrics);
+      Assert.Equal("result_classification", metric.Name);
+      Assert.Equal(1, metric.Count);
+      Assert.True(metric.ElapsedMilliseconds >= 0);
+    }
+    finally {
+      if (Directory.Exists(directory)) { Directory.Delete(directory, recursive: true); }
+    }
+  }
+
   // Cancellation during original-source resolution preserves its terminal phase instead of a false completion.
   [Fact]
   public async Task CancelledResolutionRetainsPhaseBoundary() {

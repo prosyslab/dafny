@@ -33,10 +33,10 @@ public static class ContractCompilerWorker {
     var source = ContractSourceSnapshot.Find(sources, prepared.Method.Origin.Uri).Content;
     var observationPath = Path.Combine(request.OutputDirectory, "observations.jsonl");
     await File.WriteAllTextAsync(observationPath, "", cancellationToken);
-    var bridgePath = Path.Combine(request.OutputDirectory, "ContractBridge.cs");
-    await File.WriteAllTextAsync(bridgePath, ContractStubRuntime.BridgeSource(observationPath, prepared), cancellationToken);
+    var runtimePath = Path.Combine(request.OutputDirectory, "ContractRuntime.cs");
+    await File.WriteAllTextAsync(runtimePath, ContractStubRuntime.RuntimeSource(observationPath, prepared), cancellationToken);
     return await CompileSourcesAsync(sources, source, request.Test.Dependencies, request.OutputDirectory,
-      bridgePath, observationPath, prepared.Location,
+      runtimePath, observationPath, prepared.Location,
       ContractHarnessBuilder.QualifiedDiagnosticName(prepared, ContractHarnessBuilder.MainName), options, cancellationToken);
   }
 
@@ -49,20 +49,20 @@ public static class ContractCompilerWorker {
       "<Project><PropertyGroup><UseSharedCompilation>false</UseSharedCompilation></PropertyGroup></Project>", cancellationToken);
     options.Set(CommonOptionBag.OptimizeErasableDatatypeWrapper, false);
     var observationPath = Path.Combine(outputDirectory, "observations.jsonl");
-    var bridgePath = Path.Combine(outputDirectory, "ContractBridge.cs");
-    await File.WriteAllTextAsync(bridgePath,
-      ContractRuntimeInstrumentation.BridgeSource(observationPath, transformation), cancellationToken);
+    var runtimePath = Path.Combine(outputDirectory, "ContractRuntime.cs");
+    await File.WriteAllTextAsync(runtimePath,
+      ContractRuntimeInstrumentation.RuntimeSource(observationPath, transformation), cancellationToken);
     var source = ContractSourceSnapshot.Find(transformation.Sources, transformation.Prepared.Method.Origin.Uri).Content;
     return await CompileSourcesAsync(transformation.Sources, source, request.Dependencies, outputDirectory,
-      bridgePath, observationPath, transformation.Prepared.Location, transformation.MainName, options, cancellationToken);
+      runtimePath, observationPath, transformation.Prepared.Location, transformation.MainName, options, cancellationToken);
   }
 
   private static async Task<ContractCompileResult> CompileSourcesAsync(IReadOnlyList<ContractSource> sources,
     string source, IReadOnlyList<ContractDependency> sourceDependencies, string outputDirectory,
-    string bridgePath, string observationPath, ContractSourceLocation location, string mainName,
+    string runtimePath, string observationPath, ContractSourceLocation location, string mainName,
     DafnyOptions options, CancellationToken cancellationToken) {
-    var dependencies = new List<string> { bridgePath };
-    var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ContractBridge.cs", "diagnostic.dll", "DafnyRuntime.dll" };
+    var dependencies = new List<string> { runtimePath };
+    var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "ContractRuntime.cs", "diagnostic.dll", "DafnyRuntime.dll" };
     foreach (var dependency in sourceDependencies ?? []) {
       var name = Path.GetFileName(dependency.Path);
       if (Path.GetExtension(name) is not (".cs" or ".dll") || !names.Add(name)) {

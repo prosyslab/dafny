@@ -705,7 +705,7 @@ public static class ContractHeapFactory {
         ? [(Id: slot.Object.Id, Name: "$length", Access: slot.VariableName + ".Length",
           Shape: "eyJraW5kIjoiaW50ZWdlciJ9")]
         : []));
-    return string.Join("\n", captures.Select(cell => $"{ContractHarnessBuilder.BridgeName}.Capture(\"" +
+    return string.Join("\n", captures.Select(cell => $"{ContractHarnessBuilder.ObservationName}.Capture(\"" +
       (initial ? ContractHeapPlan.InitialObservationKey(cell.Id, cell.Name) :
         ContractHeapPlan.FinalObservationKey(cell.Id, cell.Name)) + $"\", {cell.Access}, \"{cell.Shape}\");"));
   }

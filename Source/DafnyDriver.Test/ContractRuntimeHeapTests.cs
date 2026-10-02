@@ -800,6 +800,123 @@ public class ContractRuntimeHeapTests {
     Assert.Equal(value < 0 ? 0 : 1, result.Population.Valid);
   }
 
+  // Each nested call proves its own old/current transition after the goal has already changed the aliased receiver.
+  [Theory]
+  [InlineData(1, true)]
+  [InlineData(2, false)]
+  public async Task InternalHeapCallsUseTheirOwnEntryState(int increment, bool validCallee) {
+    var source = """
+      module Client {
+        class Cell {
+          var value:int
+          constructor(value:int) { this.value:=value; }
+          twostate predicate Changed(amount:int) reads this { value == old(value) + amount }
+          method Step(alias:Cell) returns(result:int)
+            requires alias == this
+            modifies this
+            ensures Changed(1) && result == alias.value
+          { value:=value+INCREMENT; result:=value; }
+          method Twice(alias:Cell) returns(result:int)
+            requires alias == this
+            modifies this
+            ensures Changed(2) && result == alias.value
+          { result:=Step(alias); result:=Step(alias); }
+        }
+        method Goal(cell:Cell) modifies cell ensures false {
+          cell.value:=cell.value+10;
+          var result:=cell.Twice(cell);
+        }
+      }
+      """.Replace("INCREMENT", increment.ToString());
+    var directory = Path.Combine("/workspace/tmp", "contract-call-heaps-" + Guid.NewGuid().ToString("N"));
+    var result = await Run(source, TwoStateGenerator, maxQueries: 20, artifactDirectory: directory);
+    Assert.Equal(validCallee ? 1 : 0, result.Population.Valid);
+    Assert.True(result.Population.CalleeContractViolations == (validCallee ? 0 : 1), Detail(result));
+    Assert.Equal(validCallee ? 1 : 0, result.Violations.Count);
+    Assert.Contains(result.Obligations, obligation => obligation.Kind == ContractRuntimeObligationKind.CalleePostcondition &&
+      obligation.Evaluations.ClosedSmt > 0);
+    var records = File.ReadAllLines(Path.Combine(directory, "sample-0.jsonl"))
+      .Select(line => System.Text.Json.JsonDocument.Parse(line).RootElement.Clone()).ToList();
+    var entries = records.Where(record => record.GetProperty("kind").GetString() == "heap_capture" &&
+      record.GetProperty("phase").GetString() == "call_entry").ToList();
+    Assert.Equal(3, entries.Count);
+    Assert.Equal(3, entries.Select(record => record.GetProperty("invocation").GetInt32()).Distinct().Count());
+    Assert.All(entries, record => Assert.Equal(record.GetProperty("inputs").GetProperty("receiver").GetRawText(),
+      record.GetProperty("inputs").GetProperty("alias").GetRawText()));
+  }
+
+  // A proved first invocation cannot authorize a later invocation whose different heap violates the same clause.
+  [Fact]
+  public async Task InternalHeapFactDoesNotCrossChangedCallState() {
+    var source = TwoStateSource.Replace("method Goal(cell: Cell) modifies cell ensures Changed(cell) { cell.value := cell.value + 1; }",
+      "method Step(cell:Cell) modifies cell ensures Changed(cell) { " +
+      "cell.value:=cell.value+(if cell.value==7 then 2 else 1); } " +
+      "method Goal(cell:Cell) modifies cell ensures false { Step(cell); Step(cell); }");
+    var result = await Run(source, TwoStateGenerator, maxQueries: 16);
+    Assert.True(result.Population.CalleeContractViolations == 1, Detail(result));
+    Assert.Equal(0, result.Population.Valid);
+    Assert.Empty(result.Violations);
+    Assert.Contains(result.CalleeViolations, violation => violation.Values.Any(pair =>
+      pair.Key.StartsWith("$initial/") && pair.Value.Value == "9"));
+  }
+
+  // A killed invocation with no return snapshot cannot establish a callee contract or a goal violation.
+  [Fact]
+  public async Task InternalHeapCallWithoutReturnRemainsIncomplete() {
+    var source = TwoStateSource.Replace("method Goal(cell: Cell) modifies cell ensures Changed(cell) { cell.value := cell.value + 1; }",
+      "method Step(cell:Cell) modifies cell ensures Changed(cell) decreases * { while true decreases * {} } " +
+      "method Goal(cell:Cell) modifies cell ensures false decreases * { Step(cell); }");
+    var result = await Run(source, TwoStateGenerator, maxQueries: 12);
+    Assert.True(result.Population.Valid == 0, Detail(result));
+    Assert.Equal(1, result.Population.Timeouts);
+    Assert.Empty(result.Violations);
+    Assert.Empty(result.CalleeViolations);
+  }
+
+  // A callee's absent modifies permission cannot be supplied by the goal's wider frame.
+  [Fact]
+  public async Task InternalHeapCallRetainsOriginalFrame() {
+    var source = TwoStateSource.Replace("method Goal(cell: Cell) modifies cell ensures Changed(cell) { cell.value := cell.value + 1; }",
+      "method Step(cell:Cell) ensures Changed(cell) { cell.value:=cell.value+2; } " +
+      "method Goal(cell:Cell) modifies cell ensures false { Step(cell); }");
+    var result = await Run(source, TwoStateGenerator, maxQueries: 12);
+    Assert.True(result.Population.Valid == 0, Detail(result));
+    Assert.Equal(1, result.Population.CalleeContractUnchecked);
+    Assert.Empty(result.Violations);
+  }
+
+  // A concrete successful call never certifies an invalid universal specification function contract.
+  [Fact]
+  public async Task InternalHeapCallRetainsSpecificationDependencyChecks() {
+    var source = TwoStateSource.Replace("twostate predicate Changed", "function Bad():int ensures false { 2 } twostate predicate Changed")
+      .Replace("old(cell.value) + 2", "old(cell.value) + Bad()")
+      .Replace("method Goal(cell: Cell) modifies cell ensures Changed(cell) { cell.value := cell.value + 1; }",
+        "method Step(cell:Cell) modifies cell ensures Changed(cell) { cell.value:=cell.value+2; } " +
+        "method Goal(cell:Cell) modifies cell ensures false { Step(cell); }");
+    var result = await Run(source, TwoStateGenerator, maxQueries: 12);
+    Assert.True(result.Population.Valid == 0, Detail(result));
+    Assert.Equal(1, result.Population.CalleeContractUnchecked);
+    Assert.Empty(result.Violations);
+  }
+
+  // Two different clauses on the same observed state reuse a successful native premise rather than spending its budget twice.
+  [Fact]
+  public async Task ExactHeapFactsAreReusedAcrossClauses() {
+    var source = TwoStateSource.Replace("ensures Changed(cell)", "ensures Changed(cell) ensures Changed(cell) && cell.value > 0")
+      .Replace("cell.value + 1", "cell.value + 2");
+    var directory = Path.Combine("/workspace/tmp", "contract-heap-facts-" + Guid.NewGuid().ToString("N"));
+    var result = await Run(source, TwoStateGenerator, maxQueries: 4, artifactDirectory: directory);
+    Assert.True(result.Population.Valid == 1, Detail(result));
+    Assert.All(result.Obligations.Where(item => item.Kind == ContractRuntimeObligationKind.Postcondition),
+      item => Assert.Equal(1, item.Evaluations.ClosedSmt));
+    Assert.NotEmpty(Directory.GetFiles(directory, "heap-fact-reuse-*.json"));
+    var profile = System.Text.Json.JsonSerializer.Deserialize<ContractProfile>(
+      await File.ReadAllTextAsync(Path.Combine(directory, "campaign-profile.json")), ContractJson.Options)!;
+    Assert.Equal(new[] { "result_classification", "sample_process" }, profile.Metrics.Select(metric => metric.Name));
+    Assert.All(profile.Metrics, metric => { Assert.Equal(1, metric.Count); Assert.True(metric.ElapsedMilliseconds >= 0); });
+    Assert.True(File.Exists(Path.Combine(directory, "sample-0.jsonl.profile.json")));
+  }
+
   internal static string Detail(ContractRuntimeCampaignResult result) =>
     System.Text.Json.JsonSerializer.Serialize(result, ContractJson.Options);
 

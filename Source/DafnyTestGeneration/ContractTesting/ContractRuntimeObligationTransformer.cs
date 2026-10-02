@@ -10,7 +10,7 @@ namespace DafnyTestGeneration.ContractTesting;
 
 public sealed record ContractRuntimeClause(ContractRuntimeObligation Obligation, Expression Expression,
   IReadOnlyList<IVariable> Variables, Method Owner, bool UnvalidatedCallees = false,
-  int? EntryHeapPostcondition = null, bool TypeConstraint = false, string? OriginalSourceHash = null, string? OriginalSourceSetHash = null);
+  int? EntryHeapPostcondition = null, bool TypeConstraint = false, string? OriginalSourceHash = null, string? OriginalSourceSetHash = null, string? CallHeapScope = null);
 public sealed record ContractRuntimeTransformation(IReadOnlyList<ContractSource> Sources,
   IReadOnlyList<ContractRuntimeClause> Clauses, IReadOnlyList<ContractRuntimeDeghostExclusion> Exclusions,
   string MainName, ContractPreparedProgram Prepared, IReadOnlySet<Field> CompiledGhostFields);
@@ -262,6 +262,15 @@ public sealed class ContractRuntimeObligationTransformer {
       foreach (var descendant in Expressions(child)) { yield return descendant; }
     }
   }
+  // Verification splits retain original token positions; only the unsplit tree owns source edits.
+  private static IEnumerable<Expression> SourceExpressions(Expression expression) {
+    expression = expression.Resolved;
+    yield return expression;
+    var children = expression is QuantifierExpr quantifier ? quantifier.PreResolveSubExpressions : expression.SubExpressions;
+    foreach (var child in children) {
+      foreach (var descendant in SourceExpressions(child)) { yield return descendant; }
+    }
+  }
   // Generic diagnostic values are executable; concrete Dafny shape tokens retain their erased type arguments.
   public static bool CompilableType(Type type) {
     if (type.IsRefType || type.AsTypeParameter != null || ContractHarnessBuilder.SupportedType(type)) { return true; }
@@ -373,7 +382,9 @@ public sealed class ContractRuntimeObligationTransformer {
       if (member is Function f && functions.Contains(f)) {
         RemoveKeyword(f, "ghost"); RemoveKeyword(f, "opaque"); RemoveAttribute(f.Attributes, "opaque");
         foreach (var formal in f.Ins.Where(v => v.IsGhost && variables.Contains(v))) { RemoveKeyword(formal, "ghost"); }
-        foreach (var statementExpression in Expressions(f.Body!).OfType<StmtExpr>()) { Replace(statementExpression, Text(statementExpression.E)); }
+        // Erase only the proof statement: replacing its entire tail overlaps nested statement
+        // expressions and discards independent instrumentation inside the surviving expression.
+        foreach (var statementExpression in SourceExpressions(f.Body!).OfType<StmtExpr>()) { RemoveStatement(statementExpression.S); }
       }
       if (member is Field field && fields.Contains(field) && field.IsGhost && CompilableType(field.Type)) {
         RemoveKeyword(field, "ghost");
@@ -386,7 +397,7 @@ public sealed class ContractRuntimeObligationTransformer {
         foreach (var statement in body.Descendants().OfType<Statement>().Distinct()) {
           if (statement is VarDeclStmt declaration && declaration.Locals.All(variables.Contains)) { RemoveKeyword(declaration, "ghost"); }
           if (statement is AssertStmt assertion) {
-            Replace(statement, assertion.Expr.Resolved is LiteralExpr { Value: false } ? "PbtBridge.Unreachable();" : "");
+            Replace(statement, assertion.Expr.Resolved is LiteralExpr { Value: false } ? "PbtChecks.Unreachable();" : "");
           } else if (statement is AssumeStmt or CalcStmt or HideRevealStmt || statement is CallStmt { Method.IsGhost: true, Lhs.Count: 0 } ghostCall && ghostCall.Method is not Constructor ||
                      statement is ForallStmt { Kind: ForallStmt.BodyKind.Proof }) {
             RemoveStatement(statement);
@@ -428,18 +439,18 @@ public sealed class ContractRuntimeObligationTransformer {
     }
     var target = goal.IsStatic ? (goal.EnclosingClass is DefaultClassDecl ? "" : goal.EnclosingClass.Name + ".") : "receiver.";
     var inputs = (goal.IsStatic ? Enumerable.Empty<string>() : ["receiver"]).Concat(goal.Ins.Select(f => f.Name)).ToList();
-    var captures = "PbtBridge.InputValues(" + SerializeValues(goal.Ins) + ");";
+    var captures = "PbtChecks.InputValues(" + SerializeValues(goal.Ins) + ");";
     if (!goal.IsStatic) {
-      captures = "PbtBridge.InputValues(\"{\" + " + SerializeNamed("receiver", UserDefinedType.FromTopLevelDecl(goal.Origin, goal.EnclosingClass)) + " + \"}\");\n" + captures;
+      captures = "PbtChecks.InputValues(\"{\" + " + SerializeNamed("receiver", UserDefinedType.FromTopLevelDecl(goal.Origin, goal.EnclosingClass)) + " + \"}\");\n" + captures;
     }
     var outputNames = goal.Outs.Select((_, i) => "pbtOutput" + i).ToList();
     var generator = Members().OfType<Method>().Single(m => m.Name == "Generate" && m.EnclosingClass.EnclosingModuleDefinition == goal.EnclosingClass.EnclosingModuleDefinition);
     var main = "\nmethod PbtMain()" + (goal.AllowsNontermination || generator.AllowsNontermination ? " decreases *" : "") +
       " {\nvar pbtRandom := PbtRandom.New();\n" + Location(generator.Origin) +
       (inputs.Count == 0 ? "" : "var " + string.Join(", ", inputs) + " := ") + "Generate(pbtRandom);\n" +
-      "PbtBridge.Generated();\n" + captures + "\n" +
+      "PbtChecks.Generated();\n" + captures + "\n" +
       (outputNames.Count == 0 ? "" : "var " + string.Join(", ", outputNames) + " := ") + target + goal.Name + "__pbt_goal(" +
-      string.Join(", ", goal.Ins.Select(f => f.Name)) + ");\nPbtBridge.Complete();\n}\n";
+      string.Join(", ", goal.Ins.Select(f => f.Name)) + ");\nPbtChecks.Complete();\n}\n";
     var insertion = goal.EnclosingClass is DefaultClassDecl ? goal.StartToken : goal.EnclosingClass.StartToken;
     Insert(goal.Origin.Uri, insertion.pos, main);
     var transformed = Apply(sources, edits);
@@ -460,23 +471,23 @@ public sealed class ContractRuntimeObligationTransformer {
       var assignments = new List<string>();
       foreach (var field in ((TopLevelDeclWithMembers)constructor.EnclosingClass).Members.OfType<Field>().Where(f => !f.IsStatic && f.Origin.line > 0)) {
         if (!field.IsGhost || fields.Contains(field) && CompilableType(field.Type)) {
-          assignments.Add("this." + field.Name + " := PbtBridge.UnreachableValue<" + field.Type + ">();");
+          assignments.Add("this." + field.Name + " := PbtChecks.UnreachableValue<" + field.Type + ">();");
         } else {
           var local = "pbtOmitted" + nextName++;
           assignments.Add("ghost var " + local + ": " + field.Type + " :| true; this." + field.Name + " := " + local + ";");
         }
       }
       RemoveKeyword(constructor, "ghost");
-      Replace(constructorBody, "{ " + string.Join("\n", assignments) + " new; PbtBridge.UnreachableBody(); }");
+      Replace(constructorBody, "{ " + string.Join("\n", assignments) + " new; PbtChecks.UnreachableBody(); }");
       return;
     }
     if (callable.IsGhost || callable.OverriddenMember != null) { return; }
     if (callable is Method { Body: { } body }) {
-      Replace(body, "{ PbtBridge.UnreachableBody(); }");
+      Replace(body, "{ PbtChecks.UnreachableBody(); }");
     } else if (callable is Function { ByMethodBody: { } byMethodBody }) {
-      Replace(byMethodBody, "{ PbtBridge.UnreachableBody(); }");
+      Replace(byMethodBody, "{ PbtChecks.UnreachableBody(); }");
     } else if (callable is Function { Body: { } expression }) {
-      Replace(expression, "PbtBridge.UnreachableValue()");
+      Replace(expression, "PbtChecks.UnreachableValue()");
     }
   }
 
@@ -484,6 +495,7 @@ public sealed class ContractRuntimeObligationTransformer {
     WithShapes(method.TypeArgs, () => WrapperCore(method, name, entry, site, goalSite));
 
   private string WrapperCore(Method method, string name, bool entry, IOrigin? site, bool goalSite) {
+    var firstClause = clauses.Count;
     oldDeclarations[method] = "";
     oldNames.Clear();
     var ins = ShapedFormals(method.TypeArgs, method.Ins);
@@ -496,10 +508,10 @@ public sealed class ContractRuntimeObligationTransformer {
     var after = string.Join("\n", method.Ens.Select(c => Check(c.E, outputKind, method, "-1", null))) + "\n" +
       TypeConstraintChecks(method.Outs, outputKind, method, null);
     if (entry) {
-      before += "\nPbtBridge.CaptureHeap(\"entry\", \"{}\");\n";
+      before += "\nPbtChecks.CaptureHeap(\"entry\", \"{}\");\n";
     }
     if (entry && clauses.Any(clause => clause.EntryHeapPostcondition != null)) {
-      after = "\nPbtBridge.CaptureHeap(\"return\", " + SerializeValues(method.Outs) + ");\n" + after;
+      after = "\nPbtChecks.CaptureHeap(\"return\", " + SerializeValues(method.Outs) + ");\n" + after;
     }
     if (method.FunctionFromWhichThisIsByMethodDecl is { ByMethodBody: not null, Body: { } definition } function) {
       // A function-by-method implementation must return exactly the value of the original function definition.
@@ -508,11 +520,23 @@ public sealed class ContractRuntimeObligationTransformer {
       after += "\n" + Check(equality, outputKind, method, "-1", definition.StartToken, Text(definition),
         (label, definition, function.ResultType), definingFunction: function);
     }
+    var invocation = "pbtCall" + nextName++;
+    var captureCall = !entry && clauses.Skip(firstClause).Any(clause => clause.CallHeapScope != null);
+    var beginCall = "";
+    if (captureCall) {
+      var inputValues = method.Ins.Select(formal => SerializeNamed(formal.Name, formal.Type)).ToList();
+      if (!method.IsStatic) {
+        inputValues.Add(SerializeNamed("receiver", "this", UserDefinedType.FromTopLevelDecl(method.Origin, method.EnclosingClass)));
+      }
+      beginCall = "var " + invocation + " := PbtChecks.BeginCall(" + Quote(method.FullDafnyName) + ", " + Encode(inputValues) + ");\n";
+      after = "PbtChecks.EndCall(" + Quote(method.FullDafnyName) + ", " + invocation + ", " + SerializeValues(method.Outs) + ");\n" +
+        after + "\nPbtChecks.LeaveCall(" + invocation + ");";
+    }
     var call = (method.Outs.Count == 0 ? "" : string.Join(", ", method.Outs.Select(f => f.Name)) + " := ") + method.Name + "(" + ShapedArguments(method, method.Ins) + ");";
     return "\n" + (method.HasStaticKeyword ? "static " : "") + "method " + name + TypeParameters(method.TypeArgs) + "(" + ins + ")" +
       (outs.Length == 0 ? "" : " returns (" + outs + ")") + (method.AllowsNontermination ? "\n decreases *" : "") +
-      "\n{\n" + oldDeclarations.GetValueOrDefault(method, "") + before +
-      (entry ? "\nPbtBridge.Executed();\n" : "\n") + call + "\n" + after + "\n}\n";
+      "\n{\n" + beginCall + oldDeclarations.GetValueOrDefault(method, "") + before +
+      (entry ? "\nPbtChecks.Executed();\n" : "\n") + call + "\n" + after + "\n}\n";
   }
 
   private void InstrumentLoops() {
@@ -567,7 +591,7 @@ public sealed class ContractRuntimeObligationTransformer {
         Add(token.Uri, token.pos, token.val.Length, name);
       }
       var roots = context.Body is Expression bodyExpression ? [bodyExpression] : context.Body.Descendants().OfType<Statement>().SelectMany(s => s.NonSpecificationSubExpressions);
-      var calls = roots.SelectMany(Expressions).OfType<FunctionCallExpr>().Distinct()
+      var calls = roots.SelectMany(SourceExpressions).OfType<FunctionCallExpr>().Distinct()
         .Where(c => (!c.Function.IsGhost || functions.Contains(c.Function)) && HasContract(c.Function));
       foreach (var call in calls) {
         var name = call.Function.Name + "__pbt_site_" + index++;
@@ -604,7 +628,7 @@ public sealed class ContractRuntimeObligationTransformer {
 
   private string InternalPrecondition(Expression expression, ModuleDefinition scope) {
     if (Reason(expression, false) != null) { throw new NotSupportedException("A nested callee precondition is not executable: " + Printer.ExprToString(program.Options, expression)); }
-    return "var pbtDomain" + nextName++ + " := PbtBridge.Require(" + Printer.ExprToString(program.Options, Render(expression, scope, true)) + ");";
+    return "var pbtDomain" + nextName++ + " := PbtChecks.Require(" + Printer.ExprToString(program.Options, Render(expression, scope, true)) + ");";
   }
 
   private string Check(Expression expression, ContractRuntimeObligationKind kind, Method owner, string iteration, IOrigin? site,
@@ -632,12 +656,15 @@ public sealed class ContractRuntimeObligationTransformer {
     var decision = reason == null && !unavailable ? ContractRuntimeDecisionMethod.Runtime :
       noClosedForm ? ContractRuntimeDecisionMethod.Unchecked : ContractRuntimeDecisionMethod.ClosedSmt;
     int? heapPostcondition = null;
-    if (kind == ContractRuntimeObligationKind.Postcondition && owner == goal && goalFunction == null &&
+    if ((kind == ContractRuntimeObligationKind.Postcondition && owner == goal && goalFunction == null ||
+         kind == ContractRuntimeObligationKind.CalleePostcondition && owner.FunctionFromWhichThisIsByMethodDecl == null &&
+         owner.TypeArgs.Count == 0 && owner.EnclosingClass.TypeArgs.Count == 0 &&
+         (owner.IsStatic || owner.Ins.All(formal => formal.Name != "receiver"))) &&
         decision != ContractRuntimeDecisionMethod.Runtime && !typeConstraint && reason != "fresh_or_allocated" &&
-        goal.Ins.All(formal => CompilableType(formal.Type) && (!formal.IsGhost || variables.Contains(formal))) &&
-        goal.Outs.All(formal => !formal.IsGhost && CompilableType(formal.Type)) &&
-        (heap || !goal.IsStatic || goal.Ins.Concat(goal.Outs).Any(formal => formal.Type.IsRefType))) {
-      var index = goal.Ens.FindIndex(clause => clause.E == expression);
+        owner.Ins.All(formal => CompilableType(formal.Type) && (!formal.IsGhost || variables.Contains(formal))) &&
+        owner.Outs.All(formal => !formal.IsGhost && CompilableType(formal.Type)) &&
+        (heap || !owner.IsStatic || owner.Ins.Concat(owner.Outs).Any(formal => formal.Type.IsRefType))) {
+      var index = owner.Ens.FindIndex(clause => clause.E == expression);
       if (index >= 0) {
         heapPostcondition = index;
         decision = ContractRuntimeDecisionMethod.ClosedSmt;
@@ -668,7 +695,8 @@ public sealed class ContractRuntimeObligationTransformer {
         // still cannot validate an unexecuted function implementation's explicit contract.
         .Any(function => function.Req.Count > 0 || function.Ens.Count > 0 || function.ByMethodBody != null)
       : specificationRoots.Any(HasContract));
-    clauses.Add(new(obligation, evaluated, values, owner, unvalidated, heapPostcondition, typeConstraint, location.Sha256, originalSourceSetHash));
+    clauses.Add(new(obligation, evaluated, values, owner, unvalidated, heapPostcondition, typeConstraint, location.Sha256, originalSourceSetHash,
+      heapPostcondition != null && kind == ContractRuntimeObligationKind.CalleePostcondition ? owner.FullDafnyName : null));
     var encodedValues = values.Where(v => CompilableType(v.Type) && (!v.IsGhost || variables.Contains(v))).Select(v => SerializeNamed(v.Name, v.Name, v.Type)).ToList();
     string check;
     if (decision == ContractRuntimeDecisionMethod.Runtime) {
@@ -677,12 +705,12 @@ public sealed class ContractRuntimeObligationTransformer {
       if (extra is { } named) {
         encodedValues.Add(SerializeNamed(named.Label, "(" + Printer.ExprToString(program.Options, Render(named.Value, owner.EnclosingClass.EnclosingModuleDefinition, true, definingFunction)) + ")", named.Type));
       }
-      check = $"PbtBridge.Check({Quote(id)}, {iteration}, ({text}), {EncodeFragments(encodedValues)})";
+      check = $"PbtChecks.Check({Quote(id)}, {iteration}, PbtChecks.Evaluated(PbtChecks.BeginCheck() && ({text})), {EncodeFragments(encodedValues)})";
     } else {
-      check = $"PbtBridge.Checkpoint({Quote(id)}, {iteration}, {EncodeFragments(encodedValues)})";
+      check = $"PbtChecks.Checkpoint({Quote(id)}, {iteration}, {EncodeFragments(encodedValues)})";
     }
     return Location(origin) + (decision == ContractRuntimeDecisionMethod.Runtime && kind == ContractRuntimeObligationKind.EntryPrecondition
-      ? "if !" + check + " { PbtBridge.Stop(); }"
+      ? "if !" + check + " { PbtChecks.Stop(); }"
       : "var pbtCheck" + nextName++ + " := " + check + ";");
   }
 
@@ -831,13 +859,13 @@ public sealed class ContractRuntimeObligationTransformer {
   private Expression ShapeExpression(Type type) {
     var token = new StringLiteralExpr(Token.NoToken, ContractStubRuntime.TypeShapeToken(type, shapeParameters), false) { Type = new SeqType(Type.Char) };
     if (shapeParameters.Count == 0) { return token; }
-    var bridge = Members(program).OfType<Function>().Single(function => function.Name == "InstantiateShape" && function.EnclosingClass.Name == "PbtBridge");
+    var instantiateShape = Members(program).OfType<Function>().Single(function => function.Name == "InstantiateShape" && function.EnclosingClass.Name == "PbtChecks");
     var arguments = new SeqDisplayExpr(Token.NoToken, shapeParameters.Select((_, index) =>
       (Expression)new IdentifierExpr(Token.NoToken, ShapeName(index)) { Type = new SeqType(Type.Char) }).ToList()) { Type = new SeqType(new SeqType(Type.Char)) };
-    var receiverType = new UserDefinedType(Token.NoToken, "PbtBridge", bridge.EnclosingClass, []);
+    var receiverType = new UserDefinedType(Token.NoToken, "PbtChecks", instantiateShape.EnclosingClass, []);
     return new FunctionCallExpr(Token.NoToken, new Name(Token.NoToken, "InstantiateShape"), new StaticReceiverExpr(Token.NoToken, receiverType, false) { Type = receiverType },
       Token.NoToken, null, [token, arguments]) {
-      Function = bridge,
+      Function = instantiateShape,
       Type = new SeqType(Type.Char),
       TypeApplication_AtEnclosingClass = [],
       TypeApplication_JustFunction = []
@@ -933,8 +961,8 @@ public sealed class ContractRuntimeObligationTransformer {
       descriptor.Ins.Concat(descriptor.Outs).All(f => ImmutableContractKey(f.Type)) ? "true" :
       "(" + Check(Expression.CreateBoolLiteral(function.Origin, true), ContractRuntimeObligationKind.CalleePostcondition,
         descriptor, "-1", function.Origin, "recursive callee contract", explicitValues: [], forceUncheckedReason: "recursive_heap_contract") + " true)";
-    return "var pbtValidate" + nextName++ + " := if PbtBridge.EnterContract(" + identity + ", " + key + ") then (" + checks +
-      "\nvar pbtExit" + nextName++ + " := PbtBridge.ExitContract(" + identity + ", " + key + "); true) else " + repeated + ";";
+    return "var pbtValidate" + nextName++ + " := if PbtChecks.EnterContract(" + identity + ", " + key + ") then (" + checks +
+      "\nvar pbtExit" + nextName++ + " := PbtChecks.ExitContract(" + identity + ", " + key + "); true) else " + repeated + ";";
   }
 
   // Datatypes and type parameters may hide references; only these recursively immutable types identify a state.
@@ -963,7 +991,7 @@ public sealed class ContractRuntimeObligationTransformer {
     // Domain uncertainty invalidates the sample just like an unchecked callee postcondition.
     var before = TypeConstraintChecks(descriptor.Ins, ContractRuntimeObligationKind.CalleePostcondition, descriptor, null) +
       string.Join("\n", descriptor.Req.Select(c => Reason(c.E, false) == null
-      ? "var pbtDomain" + nextName++ + " := PbtBridge.RequireInSpec(" + Printer.ExprToString(program.Options, Render(c.E, function.EnclosingClass.EnclosingModuleDefinition, true)) + ");"
+      ? "var pbtDomain" + nextName++ + " := PbtChecks.RequireInSpec(" + Printer.ExprToString(program.Options, Render(c.E, function.EnclosingClass.EnclosingModuleDefinition, true)) + ");"
       : Check(c.E, ContractRuntimeObligationKind.CalleePostcondition, descriptor, "-1", c.E.Origin)));
     var after = GuardContracts(function, descriptor, CalleePostconditions(function, descriptor));
     Insert(function.Origin.Uri, function.StartToken.pos, FunctionWrapper(function, descriptor, name, before, after, decreasesStar: false));
@@ -1074,7 +1102,7 @@ public sealed class ContractRuntimeObligationTransformer {
   public static string Literal(string id) => Quote(id)[1..^1];
   public static bool IsCompiled(IReadOnlySet<string> literals, string id) => literals.Contains(Literal(id));
 
-  /// <summary>Literal ids of bridge checks that remain in compiled (non-ghost) code of a resolved diagnostic program.</summary>
+  /// <summary>Literal ids of runtime checks that remain in compiled (non-ghost) code of a resolved diagnostic program.</summary>
   public static IReadOnlySet<string> CompiledCheckLiterals(Program program) {
     var literals = new HashSet<string>(StringComparer.Ordinal);
     foreach (var member in Members(program)) {
@@ -1092,7 +1120,7 @@ public sealed class ContractRuntimeObligationTransformer {
     void Visit2(Expression expression) {
       if (!expression.WasResolved()) { return; }
       expression = expression.Resolved;
-      if (expression is FunctionCallExpr { Function: { Name: "Check" or "Checkpoint", EnclosingClass.Name: "PbtBridge" } } call &&
+      if (expression is FunctionCallExpr { Function: { Name: "Check" or "Checkpoint", EnclosingClass.Name: "PbtChecks" } } call &&
           call.Args.Count > 0 && call.Args[0].Resolved is StringLiteralExpr { Value: string literal }) {
         literals.Add(literal);
       }
@@ -1111,13 +1139,13 @@ public sealed class ContractRuntimeObligationTransformer {
   private static string Quote(string text) => JsonSerializer.Serialize(text, new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
   private string Location(IOrigin origin) {
     var location = sourceMap?.ResolveLocation(origin.Uri, origin.pos);
-    return "var pbtLocation" + nextName++ + " := PbtBridge.Location(" + Quote(location == null ? origin.Uri + ":" + origin.line + ":" + origin.col : location.Path + ":" + location.Line + ":" + location.Column) + ");\n";
+    return "var pbtLocation" + nextName++ + " := PbtChecks.Location(" + Quote(location == null ? origin.Uri + ":" + origin.line + ":" + origin.col : location.Path + ":" + location.Line + ":" + location.Column) + ");\n";
   }
   private string SerializeNamed(string name, Type type) => SerializeNamed(name, name, type);
-  private string SerializeNamed(string label, string value, Type type) => "PbtBridge.SerializeNamed(" + Quote(label) + ", " + value + ", " + ShapeText(type) + ")";
+  private string SerializeNamed(string label, string value, Type type) => "PbtChecks.SerializeNamed(" + Quote(label) + ", " + value + ", " + ShapeText(type) + ")";
   private static string Encode(IReadOnlyList<string> parts) => parts.Count == 0 ? "\"{}\"" : "\"{\" + " + string.Join(" + \",\" + ", parts) + " + \"}\"";
   private static string EncodeFragments(IReadOnlyList<string> parts) => "[" + string.Join(", ", parts) + "]";
-  private string Serialize(string name, Type type) => "PbtBridge.Serialize(" + name + ", " + ShapeText(type) + ")";
+  private string Serialize(string name, Type type) => "PbtChecks.Serialize(" + name + ", " + ShapeText(type) + ")";
   private string SerializeValues(IEnumerable<IVariable> values) => Encode(values.Select(v => SerializeNamed(v.Name, v.Type)).ToList());
   private string Text(Node node) {
     var source = ContractSourceSnapshot.Find(sources, node.Origin.Uri).Content;
@@ -1157,8 +1185,11 @@ public sealed class ContractRuntimeObligationTransformer {
       ? other.Start < e.Start && e.Start < other.Start + other.Length
       : e.Start >= other.Start && e.Start + e.Length <= other.Start + other.Length)));
     foreach (var left in selected.Where(e => e.Length > 0)) {
-      if (selected.Any(right => !ReferenceEquals(left, right) && right.Length > 0 && left.Start < right.Start + right.Length && right.Start < left.Start + left.Length)) {
-        throw new NotSupportedException("Overlapping diagnostic source replacements are not supported.");
+      var right = selected.FirstOrDefault(right => !ReferenceEquals(left, right) && right.Length > 0 && left.Start < right.Start + right.Length && right.Start < left.Start + left.Length);
+      if (right != null) {
+        throw new NotSupportedException("Overlapping diagnostic source replacements are not supported. " +
+          source.Path + ": [" + left.Start + ", " + (left.Start + left.Length) + ") -> " + JsonSerializer.Serialize(left.Text) +
+          " overlaps [" + right.Start + ", " + (right.Start + right.Length) + ") -> " + JsonSerializer.Serialize(right.Text));
       }
     }
     foreach (var edit in selected.OrderByDescending(e => e.Start).ThenByDescending(e => e.Length)) {

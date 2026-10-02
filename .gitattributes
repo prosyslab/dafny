@@ -32,3 +32,5 @@ Binaries/dafny-server text eol=lf
 *.xcf binary
 *.snk binary
 *.doo binary merge=keepMine
+# Library text is hashed and embedded; the loader rejects carriage returns.
+Source/DafnyTestGeneration/ContractTesting/Library/* text eol=lf

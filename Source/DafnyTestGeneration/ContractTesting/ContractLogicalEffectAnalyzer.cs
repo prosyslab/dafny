@@ -9,7 +9,7 @@ namespace DafnyTestGeneration.ContractTesting;
 
 /// <summary>
 /// Audits the boundary between executable state and Dafny's logical heap before a
-/// diagnostic body is compiled.  The runtime bridge observes only compiled fields;
+/// diagnostic body is compiled.  The runtime observation observes only compiled fields;
 /// silently dropping a ghost field write would therefore make the later Q check
 /// unsound.
 /// </summary>
