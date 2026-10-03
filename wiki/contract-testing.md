@@ -1673,3 +1673,58 @@ Kept shared helpers: `ContractHarnessBuilder` (`Hash`, `ValidateRequest` now rej
 `PrepareInitial`, `PrepareObservedHeap`, `SupportedType`, `Insert`, `InputExpression`, `ReachableCallables`),
 `ContractHeapFactory.PrepareFixedState` (query-only source edits; no allocation or capture statements),
 `ContractHeapPlan.ModifiedFields`, `ContractBodyNames`, `ContractSpecificationChecker` trust helpers.
+
+
+## Shared-campaign runtime test pattern (2026-10-03, implementation checks)
+
+Status: implementation checks per the [fixture merge plan](../plan/2026-10-03-contract-test-fixture-merge.md)
+(mapping: [old test -> new test/bucket](../plan/2026-10-03-contract-test-fixture-merge-mapping.csv)); independent
+verification pending. Applies to `Source/DafnyDriver.Test/ContractRuntime/` (runtime campaign tests only).
+
+Cost model: one runtime campaign compiles one C# diagnostic (~4.3-4.6 s of a ~4.9 s small campaign); a sample process
+costs ~0.2 s, a closed query ~0.1 s (median) and a heap query ~0.25 s. A request has one `Entry` and the generator must be
+unique in the goal module, so one compiled program serves exactly one goal. Savings therefore come from putting many
+scenarios into one goal's campaign and from running each fixture class's campaigns concurrently.
+
+Harness (`ContractRuntime/CampaignHarness.cs`): `CampaignSpec` (request settings; `Buckets(n)` sets
+`SampleCount = 4n` and `MaxViolationsPerObligation = SampleCount` because the default 3 truncates violations),
+`Campaign.RunAsync` (content-keyed cache of one task per distinct spec JSON, global throttle
+`max(2, ProcessorCount/4)`, `campaign-result.json` written next to the artifacts), `CampaignRun` slice helpers
+(`Obligation(clause, kind)`, `Violations(bucket, clause, kind)`, `CalleeViolations(bucket)`, `Errors(bucket)`,
+`Records(ordinal)`, `AssertViolated/AssertHolds/AssertCalleeViolated`), and `CampaignFixture`
+(`IClassFixture` + `IAsyncLifetime`, starts all campaigns of a class concurrently; failures surface in the awaiting test).
+Fixture programs are `ContractRuntime/Fixtures/*.dfy` content items with `// == source NAME ==` /
+`// == generator NAME ==` sections (each section starts at line 1 of its request file).
+
+Bucket pattern: `PbtRandom.Source.Size()` is `2 + ordinal / 4` (capped at 32) and does not advance the stream, so the
+generator sets `tag := r.Size() - 2` and bucket `b` owns ordinals `4b..4b+3`. Each scenario runs only its own code
+under `if tag == b` and owns a distinct guarded clause (`ensures tag == b ==> ...`); invalid generated values are produced
+only in the owning bucket. A marker clause such as `ensures tag < 0` makes every valid sample observable as a violation.
+Per-bucket observables are violations, callee violations and runtime errors by `SampleOrdinal`, and raw sample records
+(`rejected`, `heap_capture`, `check`); `Population` is asserted once per campaign against the bucket table.
+
+Rules found while merging (all evidenced by failing first attempts or coverage):
+- Never share a campaign between scenarios needing different campaign-wide settings (budgets, timeouts, drafts that
+  change classification, replay) or whole-program declarations (inconsistent/extern globals, datatype or class constant
+  equations, omitted-field witnesses, membership/fact-reuse caches, a bodyless dependency that turns the whole request into
+  `DraftsRequired`, a goal `requires` that is erased/unchecked for every sample).
+- `old(...)` captures are evaluated at entry in every sample: guard inside the capture
+  (`ensures old(tag == 7 ==> F(o) == 0)`), otherwise `F`'s contract is checked in all buckets.
+- A closed or heap clause is decided in every sample (trivially true outside its bucket): budgets must cover one decision
+  per bucket, obligation evaluation counts are campaign-wide, and identical samples of a bucket hit decision caches (only the
+  first ordinal writes `observed-type-certificate-*`).
+- Callee-invalid and goal-evidence scenarios never share a sample; status branches have dedicated campaigns
+  (`SampleClassification` Excluded/Accepted/Mixed, `UndecidedObligations`).
+- Replace `Assert.Single(result.Obligations)` by clause/kind/callee-filtered obligations; distinct scenarios need distinct
+  clause texts.
+- Constant type constraints can be guarded by short-circuit (`n == 0 || Accept(n)`) so the constraint function runs only for
+  the owning bucket's value.
+- Apparent duplicates must be checked by coverage: supplying drafts for abstract trait members exercises
+  `ContractRuntimeSourcePreparation.NeedsDraft`'s trait guard, which no other test reaches, so it stays a separate scenario.
+
+Evidence (2026-10-03, engine HEAD 2d8e11dcc + uncommitted legacy removal and this merge): DafnyDriver `~Contract`
+256 cases/10 min 8 s/220 compiled campaigns -> 254 cases/84 s/70 compiled campaigns (80 campaigns including
+pre-compilation rejections); union coverage of DafnyTestGeneration.Test + DafnyDriver.Test (`~Contract`, coverlet
+cobertura on engine contract classes) after ⊇ before except three deleted dead lines. Coverage needs a build without
+`ContinuousIntegrationBuild`/`PathMap` (the Cosyn `make build-dafny` PDBs map sources to `/_/`, so coverlet instruments
+nothing).

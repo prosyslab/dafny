@@ -28,6 +28,7 @@
 # Current work
 
 - [Remove legacy contract testing](2026-10-03-remove-legacy-contract-testing.md) — done; keep only the runtime PBT campaign mode and its shared helpers.
+- [Contract test fixture merge](2026-10-03-contract-test-fixture-merge.md) — done; merge runtime tests onto shared fixtures, one check per behaviour.
 - [PBT Runtime/SMT naming](2026-10-02-pbt-runtime-smt-naming.md) — done; replace ambiguous Bridge names with Runtime/Smt/Random roles.
 - [PBT runtime library command](2026-10-02-pbt-runtime-library-command.md) — done; print embedded PbtRuntime.dfy and locate generator/draft parse errors.
 - [Static contract-runtime library](2026-10-02-static-contract-runtime-library.md) — done; task-independent PBT Dafny/C# runtime text moved to checked-in, ahead-of-time-checked library files.

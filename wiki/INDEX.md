@@ -1,5 +1,7 @@
 # Implementation knowledge
 
+2026-10-03: [shared-campaign runtime test pattern](contract-testing.md#shared-campaign-runtime-test-pattern-2026-10-03-implementation-checks) merges DafnyDriver runtime tests onto bucketed fixture campaigns (220 -> 70 compiles, 10 min -> 84 s, coverage preserved); implementation checks only, independent verification pending.
+
 2026-10-03: [legacy fixed-input removal](contract-testing.md#legacy-fixed-input-removal-2026-10-03-implementation-checks) leaves `test-contracts --runtime-check` as the only mode; fixed-input, generation and symbolic sections are marked STALE. Implementation checks only, independent verification pending.
 
 2026-10-02: [static runtime library](contract-testing.md#static-runtime-library-2026-10-02-implementation-checks) moves the PBT Dafny/C# runtime text into checked-in, ahead-of-time-checked files with pinned byte identity; implementation checks only, independent review pending.
