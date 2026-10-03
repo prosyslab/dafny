@@ -99,12 +99,12 @@ public class ContractClosedClauseTypeTests {
       new ContractEntry("Client.Entry"), new Dictionary<string, ContractValue>());
     var program = await ContractSourceSnapshot.ParseAsync(reporter, request.Sources, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
-    var prepared = ContractHarnessBuilder.Prepare(program, request);
+    var prepared = ContractHarnessBuilder.PrepareObservedHeap(program, request);
     var captureMethod = prepared.Method;
     if (detachedCapture) {
       var capturedProgram = await ContractSourceSnapshot.ParseAsync(reporter, request.Sources, CancellationToken.None);
       Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
-      captureMethod = ContractHarnessBuilder.Prepare(capturedProgram, request).Method;
+      captureMethod = ContractHarnessBuilder.PrepareObservedHeap(capturedProgram, request).Method;
     }
     var local = captureMethod.Body!.Body.OfType<VarDeclStmt>().Single().Locals.Single();
     var assertion = prepared.Method.Body.Body.OfType<AssertStmt>().Single();

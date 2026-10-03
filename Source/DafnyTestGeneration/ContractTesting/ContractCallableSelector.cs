@@ -6,67 +6,6 @@ using Microsoft.Dafny;
 namespace DafnyTestGeneration.ContractTesting;
 
 public static class ContractCallableSelector {
-  public static IReadOnlyDictionary<string, ContractConcreteMethod> ConcreteCalls(ContractPreparedProgram prepared) {
-    var result = new Dictionary<string, ContractConcreteMethod>(StringComparer.Ordinal);
-    var pending = new Queue<(MethodOrFunction Callable, Dictionary<TypeParameter, Microsoft.Dafny.Type> Substitution)>();
-    var visited = new HashSet<MethodOrFunction>();
-    if (prepared.Method is ContractConcreteMethod root) {
-      result.Add(root.FullDafnyName, root);
-    }
-    pending.Enqueue((prepared.Callable, prepared.TypeSubstitution.ToDictionary(pair => pair.Key, pair => pair.Value)));
-    while (pending.TryDequeue(out var context)) {
-      if (!visited.Add(context.Callable)) {
-        continue;
-      }
-      INode? body = context.Callable switch {
-        Method method => method.Body,
-        Function function => (INode?)function.ByMethodBody ?? function.Body,
-        _ => null
-      };
-      foreach (var node in body?.Descendants().Prepend(body) ?? []) {
-        var (callee, arguments) = node switch {
-          FunctionCallExpr call => ((MethodOrFunction)call.Function, call.TypeApplication_JustFunction),
-          CallStmt call => ((MethodOrFunction)call.Method, call.MethodSelect.TypeApplicationJustMember),
-          _ => ((MethodOrFunction?)null, null)
-        };
-        if (callee == null) {
-          continue;
-        }
-        var concreteArguments = (arguments ?? []).Select(type => type.Subst(context.Substitution)).ToList();
-        if (callee.TypeArgs.Count == 0) {
-          pending.Enqueue((callee, []));
-          continue;
-        }
-        if (callee.EnclosingClass.TypeArgs.Count != 0 || concreteArguments.Count != callee.TypeArgs.Count ||
-            concreteArguments.Any(type => !ContractHarnessBuilder.SupportedType(type))) {
-          throw new NotSupportedException("A generic call does not have supported concrete type evidence: " + callee.FullDafnyName);
-        }
-        if (result.TryGetValue(callee.FullDafnyName, out var previous)) {
-          if (previous.ConcreteTypeArguments.Where((type, index) => !type.Equals(concreteArguments[index], true)).Any()) {
-            throw new NotSupportedException("Multiple concrete instantiations of one callable require per-call-site dispatch: " + callee.FullDafnyName);
-          }
-          continue;
-        }
-        // Resolve the exported syntax in the callee's actual source scope. A caller's
-        // private/imported type name must not silently become another declaration.
-        Method selected;
-        try {
-          selected = SelectMethod(prepared.Program, new ContractEntry(callee.FullDafnyName,
-            concreteArguments.Select(type => type.ToString()).ToList()), requireConcreteReceiver: false);
-        } catch (ArgumentException exception) {
-          throw new NotSupportedException("Concrete call types are inaccessible in the callee's diagnostic scope: " + callee.FullDafnyName, exception);
-        }
-        var concrete = (ContractConcreteMethod)selected;
-        if (concrete.ConcreteTypeArguments.Where((type, index) => !type.Equals(concreteArguments[index], true)).Any()) {
-          throw new NotSupportedException("Concrete type syntax changes identity in the callee's diagnostic scope: " + callee.FullDafnyName);
-        }
-        result.Add(callee.FullDafnyName, concrete);
-        pending.Enqueue((callee, concrete.TypeSubstitution.ToDictionary(pair => pair.Key, pair => pair.Value)));
-      }
-    }
-    return result;
-  }
-
   public static Method SelectMethod(Program program, ContractEntry entry, bool requireConcreteReceiver = true) {
     var matches = program.RawModules().SelectMany(module => module.TopLevelDecls)
       .OfType<TopLevelDeclWithMembers>().SelectMany(declaration => declaration.Members)
@@ -167,18 +106,13 @@ public static class ContractCallableSelector {
 /// <summary>A detached concrete view; compilation still executes OriginalCallable.</summary>
 public sealed class ContractConcreteMethod : Method {
   public MethodOrFunction OriginalCallable { get; }
-  public IReadOnlyList<Microsoft.Dafny.Type> ConcreteTypeArguments { get; }
-  public IReadOnlyDictionary<TypeParameter, Microsoft.Dafny.Type> TypeSubstitution { get; }
 
-  private ContractConcreteMethod(Cloner cloner, Method descriptor, MethodOrFunction original,
-    IReadOnlyList<Microsoft.Dafny.Type> arguments, Dictionary<TypeParameter, Microsoft.Dafny.Type> substitution)
+  private ContractConcreteMethod(Cloner cloner, Method descriptor, MethodOrFunction original)
     : base(cloner, descriptor) {
     TypeArgs = [];
     EnclosingClass = descriptor.EnclosingClass;
     FunctionFromWhichThisIsByMethodDecl = descriptor.FunctionFromWhichThisIsByMethodDecl;
     OriginalCallable = original;
-    ConcreteTypeArguments = arguments;
-    TypeSubstitution = substitution;
     InheritVisibility(original);
   }
 
@@ -190,7 +124,7 @@ public sealed class ContractConcreteMethod : Method {
     foreach (var formal in descriptor.Ins.Concat(descriptor.Outs)) {
       cloner.CloneFormal(formal, false);
     }
-    return new ContractConcreteMethod(cloner, descriptor, original, arguments, substitution);
+    return new ContractConcreteMethod(cloner, descriptor, original);
   }
 
   private sealed class ConcreteCloner(Dictionary<TypeParameter, Microsoft.Dafny.Type> substitution)

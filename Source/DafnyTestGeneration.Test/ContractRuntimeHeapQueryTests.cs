@@ -986,21 +986,6 @@ public class ContractRuntimeHeapQueryTests {
     Assert.Contains("amount", error.Message);
   }
 
-  // Ordinary executable harness preparation continues to reject the same ghost-input signature.
-  [Fact]
-  public async Task PublicPreparationStillRejectsGhostInput() {
-    const string source = "module Store { class Cell { var value:int } " +
-      "method Entry(cell:Cell, ghost amount:int) modifies cell " +
-      "ensures cell.value == old(cell.value) + amount {} }";
-    var (program, campaign) = await Parse(source);
-    var inputs = Values(("cell", Reference("cell")), ("amount", Integer(1)));
-    var request = new ContractTestRequest(campaign.SchemaVersion, campaign.Sources, campaign.Entry,
-      inputs, [Cell("cell", 4)], campaign.Dependencies, campaign.ClosedQueryTimeoutMilliseconds);
-    Assert.Throws<NotSupportedException>(() => ContractHarnessBuilder.Prepare(program, request));
-    Assert.NotNull(ContractRuntimeHeapChecking.Prepare(program, campaign, inputs,
-      [Cell("cell", 4)], [Cell("cell", 5)], Values()));
-  }
-
   // A captured transition does not make ghost outputs available to the original postcondition query.
   [Fact]
   public async Task ObservedPreparationStillRejectsGhostOutput() {

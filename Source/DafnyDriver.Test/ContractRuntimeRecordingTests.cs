@@ -122,23 +122,6 @@ public class ContractRuntimeRecordingTests : IClassFixture<ContractRuntimeRecord
     }
   }
 
-  // Explicit child registration invalidates an already observed parent's structural encoding.
-  [Fact]
-  public async Task RegistrationInvalidatesParentEncodingAfterCaughtMetadataFailure() {
-    var path = fixture.ObservationPath("register-child");
-    var process = await fixture.Run("register-child", path);
-    Assert.Equal(0, process.ExitCode);
-    var lines = await File.ReadAllLinesAsync(path);
-    Assert.Equal(3, lines.Length);
-    using var first = JsonDocument.Parse(lines[0]);
-    using var second = JsonDocument.Parse(lines[1]);
-    var firstChild = first.RootElement.GetProperty("values").GetProperty("parent").GetProperty("fields").GetProperty("value");
-    var secondChild = second.RootElement.GetProperty("values").GetProperty("parent").GetProperty("fields").GetProperty("value");
-    Assert.Equal("datatype", firstChild.GetProperty("kind").GetString());
-    Assert.Equal("reference", secondChild.GetProperty("kind").GetString());
-    Assert.Equal("registered-child", secondChild.GetProperty("value").GetString());
-  }
-
   // The same immutable value retains the exact requested Unicode field label on every observation.
   [Fact]
   public async Task NamedImmutableFragmentsKeepDistinctLabels() {
@@ -354,8 +337,12 @@ public class ContractRuntimeRecordingTests : IClassFixture<ContractRuntimeRecord
       var options = new DafnyOptions(DafnyOptions.Default);
       options.ApplyDefaultOptionsWithoutSettingsDefault();
       using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-      var prepared = await ContractCompilerWorker.ParseAsync(new(1, [snapshot], new("Fixture.Main"),
-        new Dictionary<string, ContractValue>()), options, timeout.Token);
+      var reporter = new BatchErrorReporter(options);
+      var program = await ContractSourceSnapshot.ParseAsync(reporter, [snapshot], timeout.Token);
+      Assert.Equal(0, reporter.ErrorCount);
+      var goal = ContractCallableSelector.SelectMethod(program, new("Fixture.Main"), requireConcreteReceiver: false);
+      var prepared = new ContractPreparedProgram(program, goal, snapshot,
+        new(snapshot.Path, goal.Origin.line, goal.Origin.col, goal.FullDafnyName, snapshot.Sha256), Sources: [snapshot]);
       var transformation = new ContractRuntimeTransformation([snapshot], [], [], "Fixture.Main", prepared, new HashSet<Field>());
       var request = new ContractRuntimeCampaignRequest(1, [snapshot], new("Fixture.Main"), "17",
         Dependencies: [new(dependencyPath, ContractHarnessBuilder.Hash(FixtureSource))]);
@@ -469,21 +456,6 @@ public class ContractRuntimeRecordingTests : IClassFixture<ContractRuntimeRecord
             cell.@value = index == 0 ? 7 : 9;
             var values = Observation.SerializeNamed(Text("cell"), cell, Shape("{\"kind\":\"other\"}"));
             Checks.Check(Text("class"), BigInteger.Zero, true, Fragments(values));
-          }
-          Checks.Complete();
-          return;
-        }
-        if (scenario == "register-child") {
-          var child = Fixture.Box<BigInteger>.create_Box(BigInteger.One);
-          var parent = Fixture.Box<Fixture._IBox<BigInteger>>.create_Box(child);
-          var shape = Shape("{\"kind\":\"datatype\",\"arguments\":[{\"kind\":\"datatype\",\"arguments\":[{\"kind\":\"integer\"}]}]}");
-          for (var index = 0; index < 2; index++) {
-            if (index == 1) {
-              try { Observation.Register(Text("registered-child"), Text("Fixture.Box"), child, Text(Convert.ToBase64String(Encoding.UTF8.GetBytes("{}")))); }
-              catch (NotSupportedException) { }
-            }
-            var values = Observation.SerializeNamed(Text("parent"), parent, shape);
-            Checks.Check(Text("registration"), BigInteger.Zero, true, Fragments(values));
           }
           Checks.Complete();
           return;

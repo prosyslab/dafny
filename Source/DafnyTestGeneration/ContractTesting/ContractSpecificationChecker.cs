@@ -8,6 +8,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Boogie;
 using Microsoft.Dafny;
+using Microsoft.Dafny.Auditor;
 using Declaration = Microsoft.Dafny.Declaration;
 using Function = Microsoft.Dafny.Function;
 using Program = Microsoft.Dafny.Program;
@@ -119,7 +120,7 @@ public sealed class ContractSpecificationChecker {
       declaration is ConstantField { Rhs: null, IsStatic: false });
     // A source skip is not a certificate. Re-enable it in the detached proof program below;
     // every actual trust dependency and every emitted native obligation still applies.
-    var trust = ContractSymbolicChecker.TrustDependencies(declarations.OfType<MethodOrFunction>()
+    var trust = TrustDependencies(declarations.OfType<MethodOrFunction>()
         .Where(callable => role != ContractSpecificationRole.Logical || callable is not Function))
       .Where(dependency => dependency.Kind != "verify_false").ToList();
     var failure = trust.Count == 0 ? null : string.Join(", ", trust.Select(item => item.Symbol + ":" + item.Kind));
@@ -130,7 +131,7 @@ public sealed class ContractSpecificationChecker {
         if (Attributes.Contains(function.Attributes, "only")) { failure ??= "verify_only: " + Name(function); }
         foreach (var assumption in ContractRuntimeObligationTransformer.LogicalNodes(function).OfType<Node>()
                    .SelectMany(node => node.Assumptions(function))) {
-          if (ContractSymbolicChecker.TrustKind(assumption.desc) is { } kind) { failure ??= Name(function) + ":" + kind; }
+          if (TrustKind(assumption.desc) is { } kind) { failure ??= Name(function) + ":" + kind; }
         }
       }
       var ancestors = new List<Declaration> { declaration };
@@ -146,7 +147,7 @@ public sealed class ContractSpecificationChecker {
       }
       if (declaration is not MethodOrFunction) {
         foreach (var assumption in declaration.Descendants().Prepend((INode)declaration).OfType<Node>().SelectMany(node => node.Assumptions(declaration))) {
-          if (ContractSymbolicChecker.TrustKind(assumption.desc) is { } kind) {
+          if (TrustKind(assumption.desc) is { } kind) {
             failure ??= Name(declaration) + ":" + kind;
           }
         }
@@ -155,6 +156,68 @@ public sealed class ContractSpecificationChecker {
     }
     return new(this, ScopeContext, role,
       declarations, declarations.SelectMany(NativeChecks).ToHashSet(), failure);
+  }
+
+  private sealed record TrustDependency(string Symbol, string Kind, string Reason);
+
+  private static IReadOnlyList<TrustDependency> TrustDependencies(IEnumerable<MethodOrFunction> callables) {
+    var result = new List<TrustDependency>();
+    foreach (var callable in callables) {
+      var symbol = callable.FullDafnyName;
+      var isExtern = Attributes.Contains(callable.Attributes, "extern");
+      if (isExtern) {
+        result.Add(new TrustDependency(symbol, "extern_contract",
+          "The external implementation was not checked; callers use its original contract and frame."));
+      }
+      if (callable.HasAxiomAttribute) {
+        result.Add(new TrustDependency(symbol, "axiom", "The declaration carries {:axiom}."));
+      }
+      if (callable.HasVerifyFalseAttribute) {
+        result.Add(new TrustDependency(symbol, "verify_false", "The declaration carries {:verify false}."));
+      }
+      var hasBody = callable switch {
+        Method method => method.Body != null,
+        Function function => function.ByMethodBody != null || function.Body != null,
+        _ => false
+      };
+      if (!isExtern && !hasBody) {
+        result.Add(new TrustDependency(symbol, "bodyless_contract",
+          "The declaration has no implementation and is used through its contract."));
+      }
+      foreach (var assumption in callable.Assumptions(callable)) {
+        var kind = TrustKind(assumption.desc);
+        if (kind != null) {
+          result.Add(new TrustDependency(symbol, kind, assumption.desc.Issue));
+        }
+      }
+    }
+    return result.Distinct().OrderBy(item => item.Symbol, StringComparer.Ordinal)
+      .ThenBy(item => item.Kind, StringComparer.Ordinal).ToList();
+  }
+
+  private static string? TrustKind(AssumptionDescription description) {
+    if (description == AssumptionDescription.MayNotTerminate) {
+      return "nontermination";
+    }
+    if (description == AssumptionDescription.ForallWithoutBody) {
+      return "forall_without_body";
+    }
+    if (description == AssumptionDescription.LoopWithoutBody) {
+      return "loop_without_body";
+    }
+    if (description == AssumptionDescription.AssertOnly) {
+      return "assert_only";
+    }
+    if (description == AssumptionDescription.MemberOnly) {
+      return "verify_only";
+    }
+    if (description.Issue.Contains("[assume", StringComparison.Ordinal)) {
+      return "assume";
+    }
+    if (description.Issue.Contains("assume_concurrent", StringComparison.Ordinal)) {
+      return "assume_concurrent";
+    }
+    return null;
   }
 
   /// <summary>Collects the original function and type dependencies of a resolved contract expression.</summary>
@@ -173,7 +236,7 @@ public sealed class ContractSpecificationChecker {
     // must be audited even when the expression contains no callable or constant references.
     var diagnosticOwner = (Declaration?)roots.FirstOrDefault() ?? original.DefaultModuleDef.TopLevelDecls.First();
     var failure = nodes.OfType<Node>().SelectMany(node => node.Assumptions(diagnosticOwner))
-      .Select(assumption => ContractSymbolicChecker.TrustKind(assumption.desc)).FirstOrDefault(kind => kind != null);
+      .Select(assumption => TrustKind(assumption.desc)).FirstOrDefault(kind => kind != null);
     return failure == null ? scope : new(this, ScopeContext,
       ContractSpecificationRole.Logical, scope.Declarations, scope.Checks, scope.Failure ?? "contract expression:" + failure);
   }

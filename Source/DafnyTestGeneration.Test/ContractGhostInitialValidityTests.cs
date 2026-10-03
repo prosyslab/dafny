@@ -12,9 +12,9 @@ using Xunit;
 namespace DafnyTestGeneration.Test;
 
 public class ContractGhostInitialValidityTests {
-  // A supported captured ghost input participates in the original initial certificate but remains unavailable to normal execution preparation.
+  // A supported captured ghost input participates in the original initial certificate.
   [Fact]
-  public async Task SupportedGhostInputIsInitialOnly() {
+  public async Task SupportedGhostInputParticipatesInInitialCertificate() {
     var (program, campaign) = await Parse("module Store { method Entry(ghost n: int) {} }");
     var value = Integer(2);
     var inputs = Values(("n", value));
@@ -28,7 +28,6 @@ public class ContractGhostInitialValidityTests {
     Assert.NotNull(proof);
     Assert.False(proof.RequiresNativeProof);
     Assert.Equal(1, proof.HostMembershipChecks);
-    Assert.Throws<NotSupportedException>(() => ContractHarnessBuilder.Prepare(program, initial.Request));
   }
 
   // Initial preparation rejects an absent ghost value before any type or premise proof can use the sample.

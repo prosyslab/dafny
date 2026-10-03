@@ -18,7 +18,6 @@ public enum ContractValueKind { Integer, Bitvector, Boolean, Character, Sequence
 public enum ContractTestStatus { Passed, Counterexample, InvalidInput, Unsupported, Inconclusive, Timeout, Cancelled, Error }
 public enum ContractQueryOutcome { Sat, Unsat, Unknown, Timeout, Error }
 public enum ContractQueryKind { PremiseConsistency, EntryPrecondition, ObservedPostcondition, CallPrecondition, ContractRealization, ClosedClause }
-public enum ContractViolationKind { Postcondition, CallPrecondition, Frame, BodyAssertion }
 
 public sealed record ContractMapEntry([property: JsonRequired] ContractValue Key,
   [property: JsonRequired] ContractValue Value);
@@ -37,26 +36,10 @@ public sealed record ContractEntry(string Symbol, IReadOnlyList<string>? TypeArg
 public sealed record ContractTestRequest(int SchemaVersion, IReadOnlyList<ContractSource> Sources,
   ContractEntry Entry, IReadOnlyDictionary<string, ContractValue> Inputs,
   IReadOnlyList<ContractHeapObject>? Heap = null, IReadOnlyList<ContractDependency>? Dependencies = null,
-  int TimeoutMilliseconds = 30000, IReadOnlyList<ContractAbstractChoice>? ReplayChoices = null,
-  bool ReplayPrefix = false);
+  int TimeoutMilliseconds = 30000);
 public sealed record ContractSourceLocation(string Path, int Line, int Column, string Symbol, string Sha256);
 public sealed record ContractQueryResult(ContractQueryKind Kind, ContractQueryOutcome Outcome, string Diagnostics);
-public sealed record ContractReachability(ContractSourceLocation OuterEntry, int Invocation,
-  IReadOnlyDictionary<string, ContractValue> Inputs, ContractValue? Receiver,
-  IReadOnlyList<ContractHeapObject> InitialHeap);
-public sealed record ContractExecutionEvidence(string AssemblySha256, string DiagnosticEntryPoint,
-  ContractSourceLocation CompiledFrom);
-public sealed record ContractTestResult(int SchemaVersion, ContractTestStatus Status, string Reason,
-  IReadOnlyDictionary<string, ContractValue>? Outputs = null,
-  IReadOnlyList<ContractQueryResult>? Queries = null, ContractSourceLocation? Entry = null,
-  string StandardOutput = "", string StandardError = "", bool UsedContractModels = false,
-  IReadOnlyList<ContractAbstractChoice>? AbstractChoices = null,
-  IReadOnlyList<ContractHeapObject>? InitialHeap = null, IReadOnlyList<ContractHeapObject>? FinalHeap = null,
-  ContractViolationKind? Violation = null, IReadOnlyList<ContractBranchObservation>? Branches = null,
-  ContractReachability? Reachability = null, ContractExecutionEvidence? Execution = null);
-
-// Process requests contain source snapshots and value data; resolved compiler objects never cross the boundary.
-public sealed record ContractCompileRequest(int SchemaVersion, ContractTestRequest Test, string OutputDirectory);
+// Process results contain only serializable evidence; resolved compiler objects never cross the boundary.
 public sealed record ContractCompileResult(int SchemaVersion, ContractTestStatus Status, string Reason,
   string? AssemblyPath = null, string? AssemblySha256 = null, string? ObservationPath = null,
   ContractSourceLocation? Entry = null);

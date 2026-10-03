@@ -13,33 +13,6 @@ using Microsoft.Dafny.Compilers;
 namespace Microsoft.Dafny;
 
 public static class ContractCompilerWorker {
-  public static async Task<ContractCompileResult> CompileAsync(ContractCompileRequest request,
-    DafnyOptions options, CancellationToken cancellationToken) {
-    if (request.SchemaVersion != ContractJson.SchemaVersion) {
-      return new ContractCompileResult(ContractJson.SchemaVersion, ContractTestStatus.InvalidInput, "Unsupported compile schema version.");
-    }
-    ContractHarnessBuilder.ValidateRequest(request.Test);
-    options.Backend = new CsharpBackend(options);
-    options.Set(CommonOptionBag.OptimizeErasableDatatypeWrapper, false);
-    Directory.CreateDirectory(request.OutputDirectory);
-    // Diagnostic builds use only the already-installed compiler/runtime packages.
-    // Missing cached prerequisites remain build errors; no package source is contacted.
-    await File.WriteAllTextAsync(Path.Combine(request.OutputDirectory, "NuGet.Config"),
-      "<configuration><packageSources><clear /></packageSources></configuration>", cancellationToken);
-    await File.WriteAllTextAsync(Path.Combine(request.OutputDirectory, "Directory.Build.props"),
-      "<Project><PropertyGroup><UseSharedCompilation>false</UseSharedCompilation></PropertyGroup></Project>", cancellationToken);
-    var prepared = await ParseAsync(request.Test, options, cancellationToken);
-    var sources = ContractHarnessBuilder.RuntimeSources(prepared, request.Test);
-    var source = ContractSourceSnapshot.Find(sources, prepared.Method.Origin.Uri).Content;
-    var observationPath = Path.Combine(request.OutputDirectory, "observations.jsonl");
-    await File.WriteAllTextAsync(observationPath, "", cancellationToken);
-    var runtimePath = Path.Combine(request.OutputDirectory, "ContractRuntime.cs");
-    await File.WriteAllTextAsync(runtimePath, ContractStubRuntime.RuntimeSource(observationPath, prepared), cancellationToken);
-    return await CompileSourcesAsync(sources, source, request.Test.Dependencies, request.OutputDirectory,
-      runtimePath, observationPath, prepared.Location,
-      ContractHarnessBuilder.QualifiedDiagnosticName(prepared, ContractHarnessBuilder.MainName), options, cancellationToken);
-  }
-
   public static async Task<ContractCompileResult> CompileRuntimeAsync(ContractRuntimeTransformation transformation,
     ContractRuntimeCampaignRequest request, string outputDirectory, DafnyOptions options, CancellationToken cancellationToken) {
     Directory.CreateDirectory(outputDirectory);
@@ -110,16 +83,5 @@ public static class ContractCompilerWorker {
     var assemblyHash = Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(assemblyPath, cancellationToken))).ToLowerInvariant();
     return new ContractCompileResult(ContractJson.SchemaVersion, ContractTestStatus.Passed, "Compiled diagnostic copy.",
       assemblyPath, assemblyHash, observationPath, location);
-  }
-
-  public static async Task<ContractPreparedProgram> ParseAsync(ContractTestRequest request,
-    DafnyOptions options, CancellationToken cancellationToken) {
-    ContractHarnessBuilder.ValidateRequest(request);
-    var reporter = new BatchErrorReporter(options);
-    var program = await ContractSourceSnapshot.ParseAsync(reporter, request.Sources, cancellationToken);
-    if (reporter.ErrorCount > 0) {
-      throw new ArgumentException(string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
-    }
-    return ContractHarnessBuilder.Prepare(program, request);
   }
 }

@@ -6,19 +6,13 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text.Json;
-using System.Threading;
 using DafnyContractRuntime;
 namespace DafnyPbtRuntime {
-  /// <summary>Encodes runtime values and the observed heap and appends observation records; it never contacts the SMT parent.</summary>
+  /// <summary>Encodes runtime values and the observed heap for generated runtime-check records; it never contacts the parent process.</summary>
   public static class Observation {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, JsonElement> shapeCache = new(StringComparer.Ordinal);
     private static readonly Dictionary<object, string> references = new(ReferenceEqualityComparer.Instance);
     private static readonly Dictionary<string, string> referenceTypes = new(StringComparer.Ordinal);
-    private static readonly Dictionary<string, Dictionary<string, JsonElement>> logicalFields = new(StringComparer.Ordinal);
-    private static readonly Stack<(string Symbol, HashSet<string> Allowed)> frames = new();
-    private static int writeCount;
-    private static int branchCount;
-    private static bool frameViolationRecorded;
     private static readonly JsonElement shapes = JsonDocument.Parse(ContractRuntimeConfiguration.DatatypeShapes).RootElement.Clone();
     private static readonly JsonElement heapShapes = JsonDocument.Parse(ContractRuntimeConfiguration.HeapShapes).RootElement.Clone();
     // Reflection metadata is independent of the values supplied to an observation.
@@ -31,7 +25,6 @@ namespace DafnyPbtRuntime {
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, object> immutableValues = new();
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, System.Collections.Concurrent.ConcurrentDictionary<(string Name, string Shape), Dafny.ISequence<Dafny.Rune>>> immutableNamedEncodings = new();
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<object, NamedFragment> namedFragments = new();
-    internal static readonly Dictionary<string, string[]> ConcreteTypes = JsonSerializer.Deserialize<Dictionary<string, string[]>>(ContractRuntimeConfiguration.ConcreteTypes);
     private sealed class NamedFragment {
       public JsonElement Values { get; }
       public NamedFragment(JsonElement values) { Values = values; }
@@ -266,7 +259,6 @@ namespace DafnyPbtRuntime {
         var reference = "pbt-reference-" + references.Count;
         references.Add(value, reference);
         referenceTypes.Add(reference, HeapShape(value).GetProperty("type").GetString());
-        logicalFields.Add(reference, new Dictionary<string, JsonElement>(StringComparer.Ordinal));
         return new { kind = "reference", value = reference };
       }
       throw Unsupported("Unsupported runtime observation type: " + value.GetType());
@@ -381,55 +373,6 @@ namespace DafnyPbtRuntime {
         ContractRuntimeProfile.RecordValueEncoding(profileStarted);
       }
     }
-    private static bool SameJson(JsonElement left, JsonElement right) {
-      if (left.ValueKind != right.ValueKind) { return false; }
-      if (left.ValueKind == JsonValueKind.Object) {
-        var count = 0;
-        foreach (var property in left.EnumerateObject()) {
-          count++;
-          if (!right.TryGetProperty(property.Name, out var other) || !SameJson(property.Value, other)) {
-            return false;
-          }
-        }
-        var otherCount = 0;
-        foreach (var ignored in right.EnumerateObject()) { otherCount++; }
-        return count == otherCount;
-      }
-      if (left.ValueKind == JsonValueKind.Array) {
-        if (left.GetArrayLength() != right.GetArrayLength()) { return false; }
-        for (var index = 0; index < left.GetArrayLength(); index++) {
-          if (!SameJson(left[index], right[index])) { return false; }
-        }
-        return true;
-      }
-      return left.GetRawText() == right.GetRawText();
-    }
-    public static void Register<T>(Dafny.ISequence<Dafny.Rune> name, Dafny.ISequence<Dafny.Rune> typeName,
-        T value, Dafny.ISequence<Dafny.Rune> logicalBase64) {
-      var id = Text(name);
-      references.Add(value, id);
-      // Registration changes the encoding identity, even if a caller catches a later metadata error.
-      immutableEncodings.Clear();
-      immutableValues.Clear();
-      immutableNamedEncodings.Clear();
-      namedFragments.Clear();
-      referenceTypes.Add(id, Text(typeName));
-      var shape = HeapShape(value);
-      var supplied = JsonDocument.Parse(System.Text.Encoding.UTF8.GetString(
-        Convert.FromBase64String(Text(logicalBase64)))).RootElement;
-      var state = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
-      foreach (var field in shape.GetProperty("logicalFields").EnumerateArray()) {
-        var fieldName = field.GetProperty("name").GetString();
-        if (!supplied.TryGetProperty(fieldName, out var initial)) {
-          throw Unsupported("Incomplete initial logical heap fields.");
-        }
-        state.Add(fieldName, initial.Clone());
-      }
-      var suppliedCount = 0;
-      foreach (var ignored in supplied.EnumerateObject()) { suppliedCount++; }
-      if (suppliedCount != state.Count) { throw Unsupported("Unexpected initial logical heap field."); }
-      logicalFields.Add(id, state);
-    }
     private static JsonElement HeapShape(object value) {
       foreach (var shape in heapShapes.EnumerateArray()) {
         if (shape.GetProperty("runtimeType").GetString() == value.GetType().FullName) { return shape; }
@@ -464,7 +407,6 @@ namespace DafnyPbtRuntime {
           if (member == null) { throw Unsupported("Missing concrete class runtime field."); }
           fields.Add(field.GetProperty("name").GetString(), Encode(member.GetValue(reference.Key), field.GetProperty("shape")));
         }
-        foreach (var field in logicalFields[reference.Value]) { fields.Add(field.Key, field.Value); }
         heap.Add(new { id = reference.Value, type = shape.GetProperty("type").GetString(), fields });
       }
       return heap;
@@ -478,166 +420,10 @@ namespace DafnyPbtRuntime {
         ContractRuntimeProfile.RecordValueEncoding(profileStarted);
       }
     }
-    internal static void ApplyHeap(JsonElement heap) {
-      if (heap.ValueKind == JsonValueKind.Null) { return; }
-      var updates = new List<(object Receiver, Action Store, string Name)>();
-      var seen = new HashSet<string>(StringComparer.Ordinal);
-      foreach (var item in heap.EnumerateArray()) {
-        var id = item.GetProperty("id").GetString();
-        if (!seen.Add(id)) { throw Unsupported("Duplicate modeled heap identity."); }
-        object receiver = null;
-        foreach (var pair in references) { if (pair.Value == id) { receiver = pair.Key; break; } }
-        if (receiver == null) { throw Unsupported("Modeled heap allocation is not implemented."); }
-        if (referenceTypes[id] != item.GetProperty("type").GetString()) { throw Unsupported("Modeled heap identity changed type."); }
-        if (receiver is Array array) {
-          var dimensions = item.GetProperty("dimensions");
-          var elements = item.GetProperty("elements");
-          if (array.Rank != 1 || dimensions.GetArrayLength() != 1 || dimensions[0].GetInt32() != array.Length ||
-              elements.GetArrayLength() != array.Length || item.GetProperty("fields").EnumerateObject().MoveNext()) {
-            throw Unsupported("Modeled array identity changed dimensions or fields.");
-          }
-          for (var index = 0; index < array.Length; index++) {
-            var targetIndex = index;
-            var decoded = Decode(elements[index], array.GetType().GetElementType());
-            if (JsonSerializer.Serialize(Encode(array.GetValue(index))) != JsonSerializer.Serialize(Encode(decoded))) {
-              updates.Add((receiver, () => array.SetValue(decoded, targetIndex), "element"));
-            }
-          }
-          continue;
-        }
-        var shape = HeapShape(receiver);
-        if (shape.GetProperty("type").GetString() != item.GetProperty("type").GetString()) {
-          throw Unsupported("Modeled heap identity changed type.");
-        }
-        var fields = item.GetProperty("fields");
-        var fieldCount = 0;
-        foreach (var field in shape.GetProperty("fields").EnumerateArray()) {
-          var name = field.GetProperty("name").GetString();
-          var member = receiver.GetType().GetProperty(field.GetProperty("runtimeName").GetString());
-          if (member == null || !fields.TryGetProperty(name, out var value)) { throw Unsupported("Incomplete modeled heap field."); }
-          var decoded = Decode(value, member.PropertyType);
-          var fieldShape = field.GetProperty("shape");
-          if (JsonSerializer.Serialize(Encode(member.GetValue(receiver), fieldShape)) !=
-              JsonSerializer.Serialize(Encode(decoded, fieldShape))) {
-            if (!field.GetProperty("mutable").GetBoolean()) {
-              throw Unsupported("Modeled immutable runtime field changed.");
-            }
-            updates.Add((receiver, () => member.SetValue(receiver, decoded), name));
-          }
-          fieldCount++;
-        }
-        foreach (var field in shape.GetProperty("logicalFields").EnumerateArray()) {
-          var name = field.GetProperty("name").GetString();
-          if (!fields.TryGetProperty(name, out var value)) {
-            throw Unsupported("Incomplete modeled logical heap field.");
-          }
-          var prior = logicalFields[id][name];
-          if (!SameJson(prior, value)) {
-            if (!field.GetProperty("mutable").GetBoolean()) {
-              throw Unsupported("Modeled immutable logical field changed.");
-            }
-            var update = value.Clone();
-            updates.Add((receiver, () => logicalFields[id][name] = update, name));
-          }
-          fieldCount++;
-        }
-        var actualCount = 0;
-        foreach (var field in fields.EnumerateObject()) { actualCount++; }
-        if (actualCount != fieldCount) { throw Unsupported("Unexpected modeled heap field."); }
-      }
-      if (seen.Count != references.Count) { throw Unsupported("Incomplete modeled heap identities."); }
-      // Decode the correlated tuple completely before committing any heap write.
-      foreach (var update in updates) {
-        Write(update.Receiver, Dafny.Sequence<Dafny.Rune>.UnicodeFromString(update.Name));
-        update.Store();
-      }
-    }
     internal static JsonElement Shape(Dafny.ISequence<Dafny.Rune> encoded) => shapeCache.GetOrAdd(Text(encoded), key => {
       using var document = JsonDocument.Parse(System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(key)));
       return document.RootElement.Clone();
     });
-    public static void Capture<T>(Dafny.ISequence<Dafny.Rune> name, T value,
-        Dafny.ISequence<Dafny.Rune> shape) {
-      File.AppendAllText(ContractRuntimeConfiguration.ObservationPath,
-        JsonSerializer.Serialize(new {
-          name = Text(name),
-          value = Encode(value, Shape(shape))
-        }) + "\n");
-    }
-    public static void Snapshot(Dafny.ISequence<Dafny.Rune> phase) {
-      var prefix = "$" + Text(phase) + "/";
-      var snapshot = JsonDocument.Parse(JsonSerializer.Serialize(SnapshotHeap())).RootElement;
-      foreach (var item in snapshot.EnumerateArray()) {
-        var id = item.GetProperty("id").GetString();
-        foreach (var field in item.GetProperty("fields").EnumerateObject()) {
-          File.AppendAllText(ContractRuntimeConfiguration.ObservationPath, JsonSerializer.Serialize(new {
-            name = prefix + id + "/" + field.Name,
-            value = field.Value
-          }) + "\n");
-        }
-        if (item.TryGetProperty("elements", out var elements)) {
-          File.AppendAllText(ContractRuntimeConfiguration.ObservationPath, JsonSerializer.Serialize(new {
-            name = prefix + id + "/$length",
-            value = new { kind = "integer", value = elements.GetArrayLength().ToString(CultureInfo.InvariantCulture) }
-          }) + "\n");
-          var index = 0;
-          foreach (var element in elements.EnumerateArray()) {
-            File.AppendAllText(ContractRuntimeConfiguration.ObservationPath, JsonSerializer.Serialize(new {
-              name = prefix + id + "/[" + index++ + "]",
-              value = element
-            }) + "\n");
-          }
-        }
-      }
-    }
-    public static bool Trace(Dafny.ISequence<Dafny.Rune> symbol, BigInteger position, BigInteger line, BigInteger column, bool value) {
-      File.AppendAllText(ContractRuntimeConfiguration.ObservationPath, JsonSerializer.Serialize(new {
-        name = "$branch/" + branchCount++ + "/" + Text(symbol) + "/" + position + "/" + line + "/" + column,
-        value = new { kind = "boolean", value = value ? "true" : "false" }
-      }) + "\n");
-      return value;
-    }
-    public static T Unreachable<T>() {
-      throw new InvalidOperationException("A successful precondition check must return true.");
-    }
-    public static void AssertionFailed() {
-      File.AppendAllText(ContractRuntimeConfiguration.ObservationPath,
-        JsonSerializer.Serialize(new { name = "$bodyAssertion", value = new { kind = "boolean", value = "false" } }) + "\n");
-      throw new InvalidOperationException("Diagnostic body assertion failed.");
-    }
-    public static void EnterFrame(Dafny.ISequence<Dafny.Rune> name, Dafny.ISequence<Dafny.Rune> modifies) {
-      var allowed = new HashSet<string>(StringComparer.Ordinal);
-      foreach (var value in JsonDocument.Parse(Text(modifies)).RootElement.EnumerateArray()) {
-        if (value.GetProperty("kind").GetString() != "reference") {
-          throw Unsupported("Unsupported runtime modifies value.");
-        }
-        allowed.Add(value.GetProperty("value").GetString());
-      }
-      frames.Push((Text(name), allowed));
-    }
-    public static void ExitFrame() {
-      frames.Pop();
-    }
-    public static T Write<T>(T receiver, Dafny.ISequence<Dafny.Rune> field) {
-      if (receiver == null || !references.TryGetValue(receiver, out var id)) {
-        throw Unsupported("Field write receiver is outside the finite observed heap.");
-      }
-      var fieldName = Text(field);
-      File.AppendAllText(ContractRuntimeConfiguration.ObservationPath, JsonSerializer.Serialize(new {
-        name = "$write/" + writeCount++ + "/" + fieldName,
-        value = new { kind = "reference", value = id }
-      }) + "\n");
-      foreach (var frame in frames) {
-        if (!frame.Allowed.Contains(id) && !frameViolationRecorded) {
-          frameViolationRecorded = true;
-          File.AppendAllText(ContractRuntimeConfiguration.ObservationPath, JsonSerializer.Serialize(new {
-            name = "$frameViolation/" + frame.Symbol + "/" + id + "/" + fieldName,
-            value = new { kind = "boolean", value = "false" }
-          }) + "\n");
-        }
-      }
-      return receiver;
-    }
     public static Dafny.ISequence<Dafny.Rune> Serialize<T>(T value, Dafny.ISequence<Dafny.Rune> shape) {
       var profileStarted = ContractRuntimeProfile.Start();
       try {
@@ -647,99 +433,6 @@ namespace DafnyPbtRuntime {
       finally {
         ContractRuntimeProfile.RecordValueEncoding(profileStarted);
       }
-    }
-    internal static object Decode(JsonElement observation, Type target) {
-      switch (observation.GetProperty("kind").GetString()) {
-        case "reference":
-          foreach (var reference in references) {
-            if (reference.Value == observation.GetProperty("value").GetString() && target.IsInstanceOfType(reference.Key)) { return reference.Key; }
-          }
-          throw Unsupported("Modeled reference does not name an existing compatible object.");
-        case "integer":
-          var integer = BigInteger.Parse(observation.GetProperty("value").GetString(), CultureInfo.InvariantCulture);
-          if (target == typeof(byte)) { return checked((byte)integer); }
-          if (target == typeof(sbyte)) { return checked((sbyte)integer); }
-          if (target == typeof(ushort)) { return checked((ushort)integer); }
-          if (target == typeof(short)) { return checked((short)integer); }
-          if (target == typeof(uint)) { return checked((uint)integer); }
-          if (target == typeof(int)) { return checked((int)integer); }
-          if (target == typeof(ulong)) { return checked((ulong)integer); }
-          if (target == typeof(long)) { return checked((long)integer); }
-          if (target == typeof(BigInteger)) { return integer; }
-          throw Unsupported("Modeled integer has an incompatible runtime type.");
-        case "bitvector":
-          var bitvector = BigInteger.Parse(observation.GetProperty("value").GetString(), CultureInfo.InvariantCulture);
-          if (target == typeof(byte)) { return checked((byte)bitvector); }
-          if (target == typeof(ushort)) { return checked((ushort)bitvector); }
-          if (target == typeof(uint)) { return checked((uint)bitvector); }
-          if (target == typeof(ulong)) { return checked((ulong)bitvector); }
-          if (target == typeof(BigInteger)) { return bitvector; }
-          throw Unsupported("Modeled bitvector has an incompatible runtime type.");
-        case "boolean": return observation.GetProperty("value").GetString() == "true";
-        case "character": return new Dafny.Rune(char.ConvertToUtf32(observation.GetProperty("value").GetString(), 0));
-        case "null" when !target.IsValueType: return null;
-        case "sequence" when target.IsGenericType && target.GetGenericTypeDefinition() == typeof(Dafny.ISequence<>):
-          var elementType = target.GetGenericArguments()[0];
-          var items = observation.GetProperty("items");
-          var array = Array.CreateInstance(elementType, items.GetArrayLength());
-          var index = 0;
-          foreach (var item in items.EnumerateArray()) { array.SetValue(Decode(item, elementType), index++); }
-          return typeof(Dafny.Sequence<>).MakeGenericType(elementType).GetMethod("FromArray").Invoke(null, new object[] { array });
-        case "set" when target.IsGenericType && target.GetGenericTypeDefinition() == typeof(Dafny.ISet<>):
-          var setElementType = target.GetGenericArguments()[0];
-          var setItems = observation.GetProperty("items");
-          var setArray = Array.CreateInstance(setElementType, setItems.GetArrayLength());
-          var setIndex = 0;
-          foreach (var item in setItems.EnumerateArray()) { setArray.SetValue(Decode(item, setElementType), setIndex++); }
-          return typeof(Dafny.Set<>).MakeGenericType(setElementType).GetMethod("FromElements").Invoke(null,
-            new object[] { setArray });
-        case "multiset" when target.IsGenericType && target.GetGenericTypeDefinition() == typeof(Dafny.IMultiSet<>):
-          var multisetElementType = target.GetGenericArguments()[0];
-          var multisetItems = observation.GetProperty("items");
-          var multisetArray = Array.CreateInstance(multisetElementType, multisetItems.GetArrayLength());
-          var multisetIndex = 0;
-          foreach (var item in multisetItems.EnumerateArray()) {
-            multisetArray.SetValue(Decode(item, multisetElementType), multisetIndex++);
-          }
-          return typeof(Dafny.MultiSet<>).MakeGenericType(multisetElementType).GetMethod("FromElements").Invoke(null,
-            new object[] { multisetArray });
-        case "map" when target.IsGenericType && target.GetGenericTypeDefinition() == typeof(Dafny.IMap<,>):
-          var mapTypes = target.GetGenericArguments();
-          var pairType = typeof(Dafny.IPair<,>).MakeGenericType(mapTypes);
-          var concretePairType = typeof(Dafny.Pair<,>).MakeGenericType(mapTypes);
-          var encodedEntries = observation.GetProperty("entries");
-          var pairs = Array.CreateInstance(pairType, encodedEntries.GetArrayLength());
-          var pairIndex = 0;
-          foreach (var entry in encodedEntries.EnumerateArray()) {
-            var pair = Activator.CreateInstance(concretePairType, new object[] {
-            Decode(entry.GetProperty("key"), mapTypes[0]),
-            Decode(entry.GetProperty("value"), mapTypes[1])
-          });
-            pairs.SetValue(pair, pairIndex++);
-          }
-          return typeof(Dafny.Map<,>).MakeGenericType(mapTypes).GetMethod("FromElements").Invoke(null,
-            new object[] { pairs });
-        case "datatype":
-          foreach (var shape in shapes.EnumerateArray()) {
-            if (shape.GetProperty("constructor").GetString() != observation.GetProperty("constructor").GetString()) { continue; }
-            var runtimeType = target.Assembly.GetType(shape.GetProperty("runtimeType").GetString());
-            if (runtimeType == null || !target.IsAssignableFrom(runtimeType)) { break; }
-            var fields = shape.GetProperty("fields");
-            foreach (var constructor in runtimeType.GetConstructors()) {
-              var parameters = constructor.GetParameters();
-              if (parameters.Length != fields.GetArrayLength()) { continue; }
-              var arguments = new object[parameters.Length];
-              var parameterIndex = 0;
-              foreach (var field in fields.EnumerateArray()) {
-                arguments[parameterIndex] = Decode(observation.GetProperty("fields").GetProperty(field.GetProperty("name").GetString()), parameters[parameterIndex].ParameterType);
-                parameterIndex++;
-              }
-              return constructor.Invoke(arguments);
-            }
-          }
-          break;
-      }
-      throw Unsupported("Unsupported contract-model runtime result type: " + target);
     }
   }
 }

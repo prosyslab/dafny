@@ -1,6 +1,6 @@
 # Contract testing boundaries
 
-- Status: verified bounded implementation; partial logical heap slice locally verified.
+- Status: runtime campaign (`test-contracts --runtime-check`) is the only mode since 2026-10-03; sections marked STALE below describe removed fixed-input, generation and symbolic modes ([removal plan](../plan/2026-10-03-remove-legacy-contract-testing.md)). Earlier status: verified bounded implementation; partial logical heap slice locally verified.
 - Verified: 2026-09-14, working tree based on `336ae4ce66176cf8360d107894d5a4ad5a7a3a2d`.
 - Origin: [implementation plan](../plan/2026-09-12-expecto-residual-constraint-solving.md).
 - Symbolic-entry extension: [implementation plan](../plan/2026-09-13-symbolic-entry-contract-checking.md).
@@ -34,6 +34,8 @@ All verifier errors must belong to the intended query assertion before classifyi
 Separate definedness errors remain query errors.
 
 ## Symbolic entry verification
+
+> STALE (removed 2026-10-03, [plan](../plan/2026-10-03-remove-legacy-contract-testing.md)): `ContractSymbolicChecker` and `--symbolic` were deleted; the trust-dependency detector (`TrustDependencies`/`TrustKind`) now lives privately in `ContractSpecificationChecker` and still rejects trust escapes in native proof scopes. Kept only for history; the code, CLI option and tests no longer exist.
 
 `ContractSymbolicChecker` uses the same closed `ContractSourceSnapshot`, but it does not synthesize
 inputs, a runtime wrapper, or a compiled assembly. It resolves the exact method entry, computes calls
@@ -70,6 +72,8 @@ negated quantified assertion. It does not bound the integer domain or install a
 global sequence-length axiom.
 
 ## Models and concrete observations
+
+> STALE (removed 2026-10-03, [plan](../plan/2026-10-03-remove-legacy-contract-testing.md)): `ContractModelRealizer`, `ContractHeapModelRealizer`, `ContractStateObserver`, `ContractTraceModels` and the fixed-input executor (`ContractTestRunner`, `--execute-worker`, `--compile-worker`) were deleted; `ModifiedFields` moved into `ContractHeapPlan` for runtime frame checks. Kept only for history; the code, CLI option and tests no longer exist.
 
 `ContractModelRealizer` keeps correlated outputs from one model state, then fixes
 them and rechecks the original relation. Primitive values omitted from a partial
@@ -130,6 +134,8 @@ and actual probes in `/tmp/contract-array-events` before the later A14 work.
 
 ## Actual execution and frames
 
+> STALE (removed 2026-10-03, [plan](../plan/2026-10-03-remove-legacy-contract-testing.md)): the legacy diagnostic harness (`ContractHarnessBuilder.RuntimeSource*`, `PreparationMode.Execution`, `ContractLogicalEffectAnalyzer`, frame/write counters in `PbtObservation.cs`) was deleted; runtime frame checking uses captured heaps instead. Kept only for history; the code, CLI option and tests no longer exist.
+
 Diagnostic compilation preserves source snapshots and maps the selected declaration
 to its original symbol, location, and hash. The generated entry must work both with
 and without a user `Main`. A method with a body executes that body; its unproved
@@ -149,6 +155,8 @@ Receiver method/function probes and the eight public stateful guard cases caught
 these metadata mistakes; the successful corrected run is recorded in the plan.
 
 ## Generation and source identity
+
+> STALE (removed 2026-10-03, [plan](../plan/2026-10-03-remove-legacy-contract-testing.md)): `--generate`, `ContractInputGenerator`, pattern/path/scenario/type-shape generators, `ContractTraceValidator` and `ContractBodyExpander` were deleted; only `ContractBodyNames` (identifier-family reservation) and the expression reducer remain. Kept only for history; the code, CLI option and tests no longer exist.
 
 `ContractTypeShapeGenerator`, `ContractPathExplorer`, and `ContractScenarioExtractor` supply bounded
 type/P, actual-body-path, and specification-case goals. Precondition-only inputs remain available even
@@ -301,7 +309,7 @@ are not proof or experiment results.
 
 ## Runtime obligation checking (verified development snapshot)
 
-- Status: authorized implementation complete with bounded independent verification; support limits below remain explicit. Original fixed/generation/symbolic modes remain separate.
+- Status: authorized implementation complete with bounded independent verification; support limits below remain explicit. The original fixed/generation/symbolic modes were removed on 2026-10-03 (see the final section).
 - Origin: [runtime obligation plan](../plan/2026-09-26-runtime-obligation-checking.md).
 - Verified locally: 2026-09-27, working tree based on `f775837e648a3aede8521a99904fa744b4b8d4c1`.
 
@@ -1633,3 +1641,35 @@ The generated C# is `PbtObservation.cs` (the only file with `using` directives) 
 `PbtSmt.cs` + configuration (+ `PbtChecks.cs` + `PbtRandom.cs` in the runtime path); the later files must stay fully
 qualified. `PbtObservation.dfy` + `PbtSmt.dfy` replace `ContractDiagnosticBridge.dfy`; the pinned texts are the
 Dafny source (`PbtRuntime.dfy`) and `"\n" + PbtObservation.dfy + "\n" + PbtSmt.dfy` (values in the plan).
+
+## Legacy fixed-input removal (2026-10-03, implementation checks)
+
+Status: implementation-verified locally per the [removal plan](../plan/2026-10-03-remove-legacy-contract-testing.md); independent verification pending.
+Supersedes the "Static runtime library" and "Runtime/Smt/Random role names" sections where they list removed roles.
+
+`dafny test-contracts` accepts only `--runtime-check` (and hidden `--runtime-check-worker`); a request without
+either flag returns a structured runtime `Error` result, and `--generate`, `--symbolic`, `--execute-worker`,
+`--compile-worker`, `--generation-checkpoint` are unknown options. Runtime wire shapes (`ContractEntry`,
+`ContractSource`, `ContractDependency`, runtime request/result) and observation JSONL are unchanged;
+`ContractTestRequest` lost `ReplayChoices`/`ReplayPrefix`, so its hash differs from earlier in-process artifacts.
+
+Runtime library roles after removal (only these files exist in `Library/`):
+
+| Role | Dafny | C# file | Notes |
+| --- | --- | --- | --- |
+| Generator random stream | `PbtRandom.Source` in `PbtRuntime.dfy` | `PbtRandom.cs` | unchanged |
+| Runtime check recorder | `PbtRuntime.PbtChecks` in `PbtRuntime.dfy` | `PbtChecks.cs` | unchanged |
+| Value/heap encoding | extern targets `Observation.Serialize/SerializeNamed/InstantiateShape` declared in `PbtRuntime.dfy` | `PbtObservation.cs` | only `Text`, `Encode`, `InstantiateShape`, `SerializeNamed`, `PrepareValues`, `SnapshotHeap`/`RuntimeHeap`, `Shape`, `Serialize`, `Unsupported`; no logical-field sidecar, frames, `Register`/`ApplyHeap`/`Decode`/`Capture`/`Snapshot`/`Trace`/`Write` |
+| Profile counters | n/a | `ContractRuntimeProfile.cs` | unchanged |
+
+Deleted: `PbtSmt.cs/.dfy`, `PbtObservation.dfy` (no per-module inlined declaration remains), the parent-side SMT RPC
+loop, and the `ConcreteTypes` configuration constant. `PbtRuntime.dfy` text is unchanged, so the SHA pin in
+`ContractRuntimeLibraryTests`/`ContractRuntimeLibraryCommandTests` still holds. The configuration class is generated by
+`ContractRuntimeInstrumentation.RuntimeSource` (always `RuntimeReferences = true`, `ProfileRuntime = true`, observation
+path with the `.legacy` suffix preserved for unsupported-record output; heap shapes carry no mutability or logical
+fields because runtime heaps track no ghost fields). `TypeShapeToken` lives there too.
+
+Kept shared helpers: `ContractHarnessBuilder` (`Hash`, `ValidateRequest` now rejecting reachable-mode entries,
+`PrepareInitial`, `PrepareObservedHeap`, `SupportedType`, `Insert`, `InputExpression`, `ReachableCallables`),
+`ContractHeapFactory.PrepareFixedState` (query-only source edits; no allocation or capture statements),
+`ContractHeapPlan.ModifiedFields`, `ContractBodyNames`, `ContractSpecificationChecker` trust helpers.

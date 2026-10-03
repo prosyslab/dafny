@@ -44,7 +44,7 @@ public class ContractHeapTests {
     var reporter = new BatchErrorReporter(options);
     var program = await ContractSourceSnapshot.ParseAsync(reporter, sources, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
-    return (ContractHarnessBuilder.Prepare(program, request), request);
+    return (ContractHarnessBuilder.PrepareObservedHeap(program, request), request);
   }
 
   private static Task<ContractQueryResult> CheckModules(ContractPreparedProgram prepared,
@@ -80,7 +80,7 @@ public class ContractHeapTests {
     var reporter = new BatchErrorReporter(options);
     var program = await ContractSourceSnapshot.ParseAsync(reporter, sources, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
-    return (ContractHarnessBuilder.Prepare(program, request), request);
+    return (ContractHarnessBuilder.PrepareObservedHeap(program, request), request);
   }
 
   // Hidden field bindings in another source must describe a satisfiable heap, including ghost cells.
@@ -114,7 +114,7 @@ public class ContractHeapTests {
   public async Task SameModuleHiddenFieldDeterminesPrecondition(bool ghost, int value, bool negate,
     ContractQueryOutcome expected) {
     var (prepared, request) = await PrepareSameModule(ghost, value);
-    Assert.DoesNotContain(prepared.Heap!.SourceEdits, edit => edit.Text.Contains(" provides ", StringComparison.Ordinal));
+    Assert.DoesNotContain(prepared.DiagnosticSourceSnapshots, source => source.Content.Contains(" provides ", StringComparison.Ordinal));
     var result = await CheckModules(prepared, request, ContractQueryKind.EntryPrecondition, negate);
     Assert.True(result.Outcome == expected, result.Diagnostics);
   }
@@ -143,28 +143,27 @@ public class ContractHeapTests {
     Assert.True(opposite.Outcome == ContractQueryOutcome.Unsat, opposite.Diagnostics);
   }
 
-  // Runtime constructors and field exports are inserted only into hash-bound diagnostic copies.
+  // Field exports are inserted only into hash-bound diagnostic copies.
   [Theory]
   [InlineData(true)]
   [InlineData(false)]
-  public async Task HiddenModuleFieldRuntimeSourcesResolveWithoutChangingSnapshots(bool ghost) {
+  public async Task HiddenModuleFieldDiagnosticSourcesResolveWithoutChangingSnapshots(bool ghost) {
     var (prepared, request) = await PrepareModules(ghost);
     var original = request.Sources.ToList();
-    var runtime = ContractHarnessBuilder.RuntimeSources(prepared, request);
+    var runtime = prepared.DiagnosticSourceSnapshots;
     var reporter = new BatchErrorReporter(prepared.Program.Options);
     _ = await ContractSourceSnapshot.ParseAsync(reporter, runtime, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
     Assert.Equal(original, request.Sources);
     Assert.Equal(original, prepared.SourceSnapshots);
     Assert.All(runtime, source => Assert.Equal(ContractHarnessBuilder.Hash(source.Content), source.Sha256));
-    Assert.All(prepared.Heap.SourceEdits, edit => Assert.Equal(ContractSourceSnapshot.UriFor("library.dfy"), edit.SourceUri));
   }
 
   // A wildcard default view already exports the synthetic members and must not receive duplicate entries.
   [Fact]
   public async Task HiddenModuleWildcardDefaultExportRemainsResolvable() {
     var (prepared, request) = await PrepareModules(true, export: "export reveals Box provides *");
-    var sources = ContractHarnessBuilder.RuntimeSources(prepared, request);
+    var sources = prepared.DiagnosticSourceSnapshots;
     var reporter = new BatchErrorReporter(prepared.Program.Options);
 
     _ = await ContractSourceSnapshot.ParseAsync(reporter, sources, CancellationToken.None);
@@ -182,7 +181,7 @@ public class ContractHeapTests {
     var reporter = new BatchErrorReporter(prepared.Program.Options);
 
     _ = await ContractSourceSnapshot.ParseAsync(reporter,
-      ContractHarnessBuilder.RuntimeSources(prepared, request), CancellationToken.None);
+      prepared.DiagnosticSourceSnapshots, CancellationToken.None);
 
     Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
   }
@@ -196,7 +195,7 @@ public class ContractHeapTests {
     var reporter = new BatchErrorReporter(prepared.Program.Options);
 
     _ = await ContractSourceSnapshot.ParseAsync(reporter,
-      ContractHarnessBuilder.RuntimeSources(prepared, request), CancellationToken.None);
+      prepared.DiagnosticSourceSnapshots, CancellationToken.None);
 
     Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
   }
@@ -244,7 +243,7 @@ public class ContractHeapTests {
     var program = await ContractSourceSnapshot.ParseAsync(reporter, request.Sources, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0,
       string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
-    return (ContractHarnessBuilder.Prepare(program, request), request);
+    return (ContractHarnessBuilder.PrepareObservedHeap(program, request), request);
   }
 
   private const string IrrelevantFunctionFieldSource = """
@@ -301,7 +300,7 @@ module Client {
     var program = await ContractSourceSnapshot.ParseAsync(reporter, sources, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0,
       string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
-    return (ContractHarnessBuilder.Prepare(program, request), request);
+    return (ContractHarnessBuilder.PrepareObservedHeap(program, request), request);
   }
 
   // An irrelevant unsupported ghost function field may be omitted while diagnostic source still resolves.
@@ -309,16 +308,11 @@ module Client {
   public async Task IrrelevantGhostFunctionFieldMayBeOmitted() {
     var (prepared, request) = await PreparePartialHeap(IrrelevantFunctionFieldSource, [PartialBox()]);
 
-    var constructor = Assert.Single(prepared.Heap!.SourceInsertions).Text;
-    Assert.Contains("constructor ContractDiagnosticCreate(value: int)", constructor);
-    Assert.Contains("ghost var contractOmittedGhostWitness0: int -> int :| true;", constructor);
-    Assert.DoesNotContain(prepared.Heap.InitialConstraints, constraint => constraint.Contains("callback"));
-    Assert.DoesNotContain("callback", prepared.Heap.InitialCaptureStatements);
+    Assert.DoesNotContain(prepared.Heap!.InitialConstraints, constraint => constraint.Contains("callback"));
     Assert.Equal("contractHeap0.value := 7;", prepared.Heap.QueryAssignments(
       new Dictionary<string, ContractValue> { ["$final/box/value"] = Integer(7) }));
     var reporter = new BatchErrorReporter(prepared.Program.Options);
-    _ = await ContractSourceSnapshot.ParseAsync(reporter,
-      ContractHarnessBuilder.RuntimeSources(prepared, request), CancellationToken.None);
+    _ = await ContractSourceSnapshot.ParseAsync(reporter, prepared.DiagnosticSourceSnapshots, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0,
       string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
   }
@@ -427,8 +421,7 @@ module PartialHeap {
   public async Task OmittedGhostFieldUsedByUnusedCrossModuleSubsetIsAllowed() {
     var (prepared, _) = await PrepareCrossModuleSubsetHeap(false);
 
-    Assert.Contains(prepared.Heap!.SourceEdits,
-      edit => edit.Text.Contains("contractOmittedGhostWitness", StringComparison.Ordinal));
+    Assert.NotNull(prepared.Heap);
   }
 
   // A reachable internal method's formal subset type is followed through the resolved type-dependency graph.
@@ -469,7 +462,7 @@ module PartialHeap {
 
     var (prepared, _) = await PreparePartialHeap(source, [PartialBox()]);
 
-    Assert.Contains("contractOmittedGhostWitness", Assert.Single(prepared.Heap!.SourceInsertions).Text);
+    Assert.NotNull(prepared.Heap);
   }
 
   // An omitted ghost field referenced by a reachable extern contract is rejected without inspecting its body.
@@ -495,7 +488,7 @@ module PartialHeap {
 
     var (prepared, _) = await PreparePartialHeap(source, [PartialBox()]);
 
-    Assert.Contains("contractOmittedGhostWitness", Assert.Single(prepared.Heap!.SourceInsertions).Text);
+    Assert.NotNull(prepared.Heap);
   }
 
   // A first-class function reference that occurs only in an extern source body remains irrelevant to omission safety.
@@ -511,7 +504,7 @@ module PartialHeap {
 
     var (prepared, _) = await PreparePartialHeap(source, [PartialBox()]);
 
-    Assert.Contains("contractOmittedGhostWitness", Assert.Single(prepared.Heap!.SourceInsertions).Text);
+    Assert.NotNull(prepared.Heap);
   }
 
   // A pure helper called from an extern contract remains transitively relevant and rejects its omitted field read.
@@ -609,7 +602,7 @@ module Heap {
       }, [Cell("first", 2), Cell("second", 10)]);
 
     var prepare = typeof(ContractHeapFactory).GetMethods(BindingFlags.Static | BindingFlags.NonPublic)
-      .Single(method => method.Name == nameof(ContractHeapFactory.Prepare) && method.GetParameters().Length == 3);
+      .Single(method => method.Name == "PrepareCore" && method.GetParameters().Length == 3);
     Func<Program, IReadOnlyDictionary<string, Microsoft.Dafny.Type>> rejectScan =
       _ => throw new InvalidOperationException("No-array heaps must not request the global array type index.");
     var plan = Assert.IsType<ContractHeapPlan>(prepare.Invoke(null, [program, request, rejectScan]));
@@ -617,9 +610,9 @@ module Heap {
     Assert.Equal("contractHeap0: Cell, contractHeap1: Cell", plan.QueryParameters);
   }
 
-  // Produces resolvable diagnostic constructors and distinct allocations for two concrete objects.
+  // Binds two distinct concrete objects to separate query parameters in resolvable diagnostic source.
   [Fact]
-  public async Task DistinctHeapObjectsProduceResolvableDiagnosticSource() {
+  public async Task DistinctHeapObjectsProduceResolvableQuerySource() {
     var inputs = new Dictionary<string, ContractValue> {
       ["a"] = Reference("first"),
       ["b"] = Reference("second")
@@ -627,18 +620,12 @@ module Heap {
     var (program, request) = await Resolve(CellSource, "Heap.Entry", inputs,
       [Cell("first", 2), Cell("second", 10)]);
 
-    var plan = ContractHeapFactory.Prepare(program, request);
+    var plan = ContractHeapFactory.PrepareFixedState(program, request);
 
-    Assert.Single(plan.SourceInsertions);
-    Assert.Contains("constructor ContractDiagnosticCreate(value: int)", plan.SourceInsertions[0].Text);
-    Assert.Contains("new Cell.ContractDiagnosticCreate(2)", plan.AllocationStatements);
-    Assert.Contains("new Cell.ContractDiagnosticCreate(10)", plan.AllocationStatements);
     Assert.NotEqual(plan.InputExpression("a"), plan.InputExpression("b"));
     Assert.Contains(plan.InitialConstraints, constraint => constraint.Contains(" != ") &&
       constraint.Contains("contractHeap0") && constraint.Contains("contractHeap1"));
     Assert.Equal("contractHeap0: Cell, contractHeap1: Cell", plan.QueryParameters);
-    Assert.Contains("\"$initial/first/value\", contractHeap0.value", plan.InitialCaptureStatements);
-    Assert.Contains("\"$final/second/value\", contractHeap1.value", plan.FinalCaptureStatements);
 
     var method = FindMethod(program, "Entry");
     var finalObservations = new Dictionary<string, ContractValue> {
@@ -648,11 +635,6 @@ module Heap {
     var queryRequires = string.Join("\n", plan.InitialConstraints.Select(constraint => "requires " + constraint));
     var probe = $$"""
 
-  method ContractHeapProbe() {
-    {{plan.AllocationStatements}}
-    assert {{plan.InputExpression("a")}} != {{plan.InputExpression("b")}};
-  }
-
   method ContractHeapQuery({{plan.QueryParameters}})
     {{queryRequires}}
     {{plan.QueryModifies}}
@@ -661,11 +643,7 @@ module Heap {
     assert old(contractHeap0.value) == 2;
   }
 """;
-    var generated = request.Sources[0].Content;
-    foreach (var (position, text) in plan.SourceInsertions.Append((Position: method.StartToken.pos, Text: probe))
-               .OrderByDescending(edit => edit.Position)) {
-      generated = generated.Insert(position, text);
-    }
+    var generated = request.Sources[0].Content.Insert(method.StartToken.pos, probe);
     var generatedReporter = new BatchErrorReporter(program.Options);
     var parsed = await ProgramParser.Parse(generated, new Uri("untitled:generated-contract-heap"), generatedReporter);
     await new ProgramResolver(parsed.Program).Resolve(CancellationToken.None);
@@ -682,48 +660,12 @@ module Heap {
     };
     var (program, request) = await Resolve(CellSource.Replace("requires a != b", "requires a == b"),
       "Heap.Entry", inputs, [Cell("shared", 2)]);
-    var plan = ContractHeapFactory.Prepare(program, request);
+    var plan = ContractHeapFactory.PrepareFixedState(program, request);
     var method = FindMethod(program, "Entry");
     var observations = new Dictionary<string, ContractValue> { ["$final/shared/value"] = Integer(3) };
 
     Assert.Equal(plan.InputExpression("a"), plan.InputExpression("b"));
     Assert.Null(plan.CheckFrame(method, inputs, observations));
-  }
-
-  // Allocates referenced objects before their owners and rejects no valid noncyclic dependency.
-  [Fact]
-  public async Task NoncyclicReferenceFieldsUseDependencyOrder() {
-    const string source = """
-module Graph {
-  class Node {
-    var next: Node?
-    var value: int
-    constructor(nextValue: Node?, initial: int) {
-      next := nextValue;
-      value := initial;
-    }
-  }
-  method Entry(root: Node) {
-  }
-}
-""";
-    var inputs = new Dictionary<string, ContractValue> { ["root"] = Reference("root") };
-    var heap = new List<ContractHeapObject> {
-      new("root", "Graph.Node", new Dictionary<string, ContractValue> {
-        ["next"] = Reference("leaf"), ["value"] = Integer(1)
-      }),
-      new("leaf", "Graph.Node", new Dictionary<string, ContractValue> {
-        ["next"] = new(ContractValueKind.Null), ["value"] = Integer(2)
-      })
-    };
-    var (program, request) = await Resolve(source, "Graph.Entry", inputs, heap);
-
-    var plan = ContractHeapFactory.Prepare(program, request);
-
-    var leafAllocation = plan.AllocationStatements.IndexOf("contractHeap1 :=", StringComparison.Ordinal);
-    var rootAllocation = plan.AllocationStatements.IndexOf("contractHeap0 :=", StringComparison.Ordinal);
-    Assert.True(leafAllocation >= 0 && leafAllocation < rootAllocation);
-    Assert.Contains("ContractDiagnosticCreate(contractHeap1, 1)", plan.AllocationStatements);
   }
 
   // Reports a mutation of an unlisted object as a frame violation using requested initial values.
@@ -735,7 +677,7 @@ module Graph {
     };
     var (program, request) = await Resolve(CellSource, "Heap.Entry", inputs,
       [Cell("first", 2), Cell("second", 10)]);
-    var plan = ContractHeapFactory.Prepare(program, request);
+    var plan = ContractHeapFactory.PrepareFixedState(program, request);
     var method = FindMethod(program, "Entry");
     var observations = new Dictionary<string, ContractValue> {
       ["$final/first/value"] = Integer(3),
@@ -747,9 +689,9 @@ module Graph {
     Assert.Contains("second.value", reason);
   }
 
-  // Ghost fields are initialized for SMT queries while runtime capture uses the logical sidecar.
+  // Ghost fields are assigned in SMT query post-states instead of being dropped.
   [Fact]
-  public async Task GhostFieldsUseLogicalSidecarInsteadOfBeingDropped() {
+  public async Task GhostFieldsAreAssignedInQueries() {
     const string source = """
 module HiddenHeap {
   class Box {
@@ -772,27 +714,13 @@ module HiddenHeap {
     };
     var (program, request) = await Resolve(source, "HiddenHeap.Entry", inputs, heap);
 
-    var plan = ContractHeapFactory.Prepare(program, request);
+    var plan = ContractHeapFactory.PrepareFixedState(program, request);
 
-    Assert.Contains("ghost proof: int", Assert.Single(plan.SourceInsertions).Text);
-    Assert.DoesNotContain("contractOmittedGhostWitness", plan.SourceInsertions[0].Text);
-    Assert.Contains("ContractDiagnosticCreate(1, 1)", plan.AllocationStatements);
-    Assert.DoesNotContain("proof", plan.InitialCaptureStatements);
     var assignments = plan.QueryAssignments(new Dictionary<string, ContractValue> {
       ["$final/box/proof"] = Integer(2),
       ["$final/box/value"] = Integer(2)
     });
     Assert.Contains("contractHeap0.proof := 2", assignments);
     Assert.Contains("contractHeap0.value := 2", assignments);
-    var snapshotReporter = new BatchErrorReporter(program.Options);
-    var snapshotProgram = await ContractSourceSnapshot.ParseAsync(snapshotReporter, request.Sources,
-      CancellationToken.None);
-    Assert.Equal(0, snapshotReporter.ErrorCount);
-    var prepared = ContractHarnessBuilder.Prepare(snapshotProgram, request);
-    var runtimeReporter = new BatchErrorReporter(program.Options);
-    _ = await ContractSourceSnapshot.ParseAsync(runtimeReporter,
-      ContractHarnessBuilder.RuntimeSources(prepared, request), CancellationToken.None);
-    Assert.True(runtimeReporter.ErrorCount == 0,
-      string.Join("\n", runtimeReporter.AllMessages.Select(message => message.Message)));
   }
 }

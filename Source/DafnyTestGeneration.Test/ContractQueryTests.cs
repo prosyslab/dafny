@@ -204,7 +204,7 @@ public class ContractQueryTests {
       new ContractEntry(entry), new Dictionary<string, ContractValue> { ["x"] = new(ContractValueKind.Integer, "2") });
     var program = await ContractSourceSnapshot.ParseAsync(reporter, request.Sources, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
-    return (ContractHarnessBuilder.Prepare(program, request), request);
+    return (ContractHarnessBuilder.PrepareObservedHeap(program, request), request);
   }
 
   // An observed value contradicting the original ensures must remain a satisfiable violation.

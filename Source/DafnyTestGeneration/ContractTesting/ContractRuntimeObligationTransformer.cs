@@ -857,7 +857,7 @@ public sealed class ContractRuntimeObligationTransformer {
 
   // Shape tokens follow Dafny's resolved type applications, never the erased CLR representation.
   private Expression ShapeExpression(Type type) {
-    var token = new StringLiteralExpr(Token.NoToken, ContractStubRuntime.TypeShapeToken(type, shapeParameters), false) { Type = new SeqType(Type.Char) };
+    var token = new StringLiteralExpr(Token.NoToken, ContractRuntimeInstrumentation.TypeShapeToken(type, shapeParameters), false) { Type = new SeqType(Type.Char) };
     if (shapeParameters.Count == 0) { return token; }
     var instantiateShape = Members(program).OfType<Function>().Single(function => function.Name == "InstantiateShape" && function.EnclosingClass.Name == "PbtChecks");
     var arguments = new SeqDisplayExpr(Token.NoToken, shapeParameters.Select((_, index) =>

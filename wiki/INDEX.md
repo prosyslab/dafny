@@ -1,5 +1,7 @@
 # Implementation knowledge
 
+2026-10-03: [legacy fixed-input removal](contract-testing.md#legacy-fixed-input-removal-2026-10-03-implementation-checks) leaves `test-contracts --runtime-check` as the only mode; fixed-input, generation and symbolic sections are marked STALE. Implementation checks only, independent verification pending.
+
 2026-10-02: [static runtime library](contract-testing.md#static-runtime-library-2026-10-02-implementation-checks) moves the PBT Dafny/C# runtime text into checked-in, ahead-of-time-checked files with pinned byte identity; implementation checks only, independent review pending.
 
 2026-10-01: [invocation-bound callee heaps, successful fact reuse and profiles](contract-testing.md#invocation-bound-callee-heaps-fact-reuse-and-profiles-2026-10-01) pass independent native49/Driver16 plus corrective10/5 and artifact13 controls. Original P/type/WD/frame/dependency and finite-prefix gates remain; root all15/six logical cases/seven exact replays and package closure are independently accepted.

@@ -27,6 +27,7 @@
 | [2026-09-12-expecto-residual-constraint-solving](2026-09-12-expecto-residual-constraint-solving.md) | done | 범용 타입/힙·구현 경로 생성·부분 평가·실제 실행·잔여 SMT를 연결 | 2026-09-12 |
 # Current work
 
+- [Remove legacy contract testing](2026-10-03-remove-legacy-contract-testing.md) — done; keep only the runtime PBT campaign mode and its shared helpers.
 - [PBT Runtime/SMT naming](2026-10-02-pbt-runtime-smt-naming.md) — done; replace ambiguous Bridge names with Runtime/Smt/Random roles.
 - [PBT runtime library command](2026-10-02-pbt-runtime-library-command.md) — done; print embedded PbtRuntime.dfy and locate generator/draft parse errors.
 - [Static contract-runtime library](2026-10-02-static-contract-runtime-library.md) — done; task-independent PBT Dafny/C# runtime text moved to checked-in, ahead-of-time-checked library files.

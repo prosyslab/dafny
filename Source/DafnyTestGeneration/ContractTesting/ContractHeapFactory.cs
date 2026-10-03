@@ -4,8 +4,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
-using System.Text;
-using System.Text.Json;
 using Microsoft.Dafny;
 using DafnyType = Microsoft.Dafny.Type;
 
@@ -14,12 +12,7 @@ namespace DafnyTestGeneration.ContractTesting;
 public sealed record ContractSourceEdit(Uri SourceUri, int Position, string Text);
 
 public sealed class ContractHeapPlan {
-  public IReadOnlyList<(int Position, string Text)> SourceInsertions { get; }
-  public IReadOnlyList<ContractSourceEdit> SourceEdits { get; }
   internal IReadOnlyList<ContractSourceEdit> QuerySourceEdits { get; }
-  public string AllocationStatements { get; }
-  public string InitialCaptureStatements { get; }
-  public string FinalCaptureStatements { get; }
   public string QueryParameters { get; }
   public IReadOnlyList<string> InitialConstraints { get; }
   public string QueryModifies { get; }
@@ -29,41 +22,19 @@ public sealed class ContractHeapPlan {
   private readonly IReadOnlyList<HeapSlot> orderedSlots;
   internal IReadOnlyList<HeapSlot> Slots => orderedSlots;
   internal ContractHeapPlan WithAdditionalSourceEdits(IEnumerable<ContractSourceEdit> edits) =>
-    new(SourceInsertions, AllocationStatements, InitialCaptureStatements, FinalCaptureStatements,
-      QueryParameters, InitialConstraints, QueryModifies, inputs, slots, orderedSlots,
-      SourceEdits.Concat(edits).ToList(), QuerySourceEdits.Concat(edits).ToList());
-  internal IReadOnlySet<Field> TrackedGhostFields => orderedSlots.SelectMany(slot => slot.Fields)
-    .Where(field => field.IsGhost).ToHashSet();
+    new(QueryParameters, InitialConstraints, QueryModifies, inputs, slots, orderedSlots,
+      QuerySourceEdits.Concat(edits).ToList());
   internal string ValueExpression(ContractValue value, DafnyType? type) => ContractHeapFactory.ValueExpression(value, type, slots);
 
-  internal string LogicalFieldsBase64(string id) {
-    if (!slots.TryGetValue(id, out var slot)) {
-      throw new ArgumentException($"Unknown heap object id '{id}'.", nameof(id));
-    }
-    var logical = slot.Fields.Where(field => field.IsGhost).ToDictionary(field => field.Name,
-      field => slot.Object.Fields[field.Name]);
-    return Convert.ToBase64String(Encoding.UTF8.GetBytes(
-      JsonSerializer.Serialize(logical, ContractJson.Options)));
-  }
-
   internal ContractHeapPlan(
-    IReadOnlyList<(int Position, string Text)> sourceInsertions,
-    string allocationStatements,
-    string initialCaptureStatements,
-    string finalCaptureStatements,
     string queryParameters,
     IReadOnlyList<string> initialConstraints,
     string queryModifies,
     IReadOnlyDictionary<string, ContractValue> inputs,
     IReadOnlyDictionary<string, HeapSlot> slots,
-    IReadOnlyList<HeapSlot> orderedSlots, IReadOnlyList<ContractSourceEdit> sourceEdits,
+    IReadOnlyList<HeapSlot> orderedSlots,
     IReadOnlyList<ContractSourceEdit> querySourceEdits) {
-    SourceInsertions = sourceInsertions;
-    SourceEdits = sourceEdits;
     QuerySourceEdits = querySourceEdits;
-    AllocationStatements = allocationStatements;
-    InitialCaptureStatements = initialCaptureStatements;
-    FinalCaptureStatements = finalCaptureStatements;
     QueryParameters = queryParameters;
     InitialConstraints = initialConstraints;
     QueryModifies = queryModifies;
@@ -136,7 +107,7 @@ public sealed class ContractHeapPlan {
     ArgumentNullException.ThrowIfNull(observations);
     var lengthError = ValidateLengths(observations, false);
     if (lengthError != null) { return lengthError; }
-    var allowed = ContractModelRealizer.ModifiedFields(method, actualInputs, receiver, this);
+    var allowed = ModifiedFields(method, actualInputs, receiver);
     foreach (var slot in orderedSlots) {
       foreach (var cell in slot.Cells.Where(cell => !allowed.Contains((slot.Object.Id, cell.Name)))) {
         var key = FinalObservationKey(slot.Object.Id, cell.Name);
@@ -149,6 +120,29 @@ public sealed class ContractHeapPlan {
       }
     }
     return null;
+  }
+
+  private HashSet<(string Object, string Field)> ModifiedFields(Method method,
+    IReadOnlyDictionary<string, ContractValue> actualInputs, ContractValue? receiver) {
+    ContractValue Reference(Expression expression) => expression.Resolved switch {
+      ThisExpr when receiver != null => receiver,
+      IdentifierExpr identifier when actualInputs.TryGetValue(identifier.Name, out var value) => value,
+      MemberSelectExpr member => Slots.Single(slot => slot.Object.Id == Reference(member.Obj).Value).Object.Fields[member.MemberName],
+      _ => throw new NotSupportedException("The modeled call frame requires concrete reference expressions.")
+    };
+    var allowed = new HashSet<(string Object, string Field)>();
+    foreach (var frame in method.Mod.Expressions ?? []) {
+      var value = Reference(frame.E);
+      if (value.Kind == ContractValueKind.Null) {
+        continue;
+      }
+      var slot = Slots.SingleOrDefault(slot => value.Kind == ContractValueKind.Reference && slot.Object.Id == value.Value)
+        ?? throw new ArgumentException("The modeled call frame references an unknown heap object.");
+      foreach (var field in slot.Cells.Where(field => frame.FieldName == null || field.Name == frame.FieldName)) {
+        allowed.Add((slot.Object.Id, field.Name));
+      }
+    }
+    return allowed;
   }
 
   private string? ValidateLengths(IReadOnlyDictionary<string, ContractValue> observations, bool initial) {
@@ -167,7 +161,7 @@ public sealed class ContractHeapPlan {
 }
 
 internal sealed record HeapCell(string Name, string Access, DafnyType Type,
-  ContractValue InitialValue, bool RuntimeVisible = true, bool Mutable = true, int? Index = null);
+  ContractValue InitialValue, bool Mutable = true, int? Index = null);
 internal sealed record HeapSlot(ContractHeapObject Object, ClassDecl Class,
   IReadOnlyList<Field> Fields, IReadOnlyList<Field> OmittedGhostFields,
   string VariableName, string SourceTypeName, string SourceModuleName,
@@ -177,7 +171,7 @@ internal sealed record HeapSlot(ContractHeapObject Object, ClassDecl Class,
     ? Object.Elements!.Select((value, index) => new HeapCell("[" + index + "]", VariableName + "[" + index + "]",
       ElementType!, value, Index: index)).ToList()
     : Fields.Select(field => new HeapCell(field.Name, VariableName + "." + field.Name, field.Type,
-      Object.Fields[field.Name], !field.IsGhost, field.IsMutable)).ToList();
+      Object.Fields[field.Name], field.IsMutable)).ToList();
 }
 
 /// <summary>
@@ -187,20 +181,13 @@ public static class ContractHeapFactory {
   internal const string ConstructorName = "ContractDiagnosticCreate";
   private static readonly Regex IdPattern = new("^[A-Za-z_][A-Za-z0-9_-]*$", RegexOptions.CultureInvariant);
 
-  public static ContractHeapPlan Prepare(Program program, ContractTestRequest request) =>
-    Prepare(program, request, ResolvedArrayTypes);
-
   // Fixed-state queries bind every object as a parameter, so they need no allocation order
   // and accept cyclic graphs such as a node whose representation set contains itself.
-  internal static ContractHeapPlan PrepareFixedState(Program program, ContractTestRequest request) =>
-    PrepareCore(program, request, ResolvedArrayTypes, requireAllocationOrder: false);
-
-  internal static ContractHeapPlan Prepare(Program program, ContractTestRequest request,
-    Func<Program, IReadOnlyDictionary<string, DafnyType>> resolveArrayTypes) =>
-    PrepareCore(program, request, resolveArrayTypes, requireAllocationOrder: true);
+  public static ContractHeapPlan PrepareFixedState(Program program, ContractTestRequest request) =>
+    PrepareCore(program, request, ResolvedArrayTypes);
 
   private static ContractHeapPlan PrepareCore(Program program, ContractTestRequest request,
-    Func<Program, IReadOnlyDictionary<string, DafnyType>> resolveArrayTypes, bool requireAllocationOrder) {
+    Func<Program, IReadOnlyDictionary<string, DafnyType>> resolveArrayTypes) {
     ArgumentNullException.ThrowIfNull(program);
     ArgumentNullException.ThrowIfNull(request);
     ArgumentNullException.ThrowIfNull(resolveArrayTypes);
@@ -257,21 +244,16 @@ public static class ContractHeapFactory {
     ValidateOmittedGhostFields(program, OriginalCallable(entry), slots.Values);
     ValidateInputReferences(entry, request.Inputs, slots);
     ValidateFieldValues(slots);
-    var orderedSlots = TopologicalOrder(slots, allowCycles: !requireAllocationOrder);
-    var insertions = BuildConstructorInsertions(slots.Values);
-    var allocations = orderedSlots.Select(slot => Allocation(slot, slots));
-    var initialCaptures = CaptureStatements(orderedSlots, true);
-    var finalCaptures = CaptureStatements(orderedSlots, false);
+    var orderedSlots = TopologicalOrder(slots);
     var parameters = string.Join(", ", slots.Values.Select(slot =>
       $"{slot.VariableName}: {slot.SourceTypeName}"));
     var constraints = InitialConstraints(slots.Values, slots);
     var modifies = slots.Count == 0 ? "" : "modifies " +
       string.Join(", ", slots.Values.Select(slot => slot.VariableName));
 
-    return new ContractHeapPlan(insertions.Where(edit => edit.SourceUri == entry.Origin.Uri).Select(edit => (edit.Position, edit.Text)).ToList(), string.Join("\n", allocations), initialCaptures,
-      finalCaptures, parameters, constraints, modifies,
-      new Dictionary<string, ContractValue>(request.Inputs), slots, orderedSlots, insertions,
-      BuildConstructorInsertions(slots.Values, includeConstructors: false));
+    return new ContractHeapPlan(parameters, constraints, modifies,
+      new Dictionary<string, ContractValue>(request.Inputs), slots, orderedSlots,
+      BuildSourceEdits(slots.Values));
   }
 
   internal static string SourceTypeName(Program program, Method entry, TopLevelDecl declaration) =>
@@ -329,23 +311,6 @@ public static class ContractHeapFactory {
       if (node is Expression { Type: { } type }) { Visit(type); }
     }
     return result;
-  }
-
-  private static string Allocation(HeapSlot slot, IReadOnlyDictionary<string, HeapSlot> slots) {
-    if (!slot.IsArray) {
-      return $"var {slot.VariableName} := new {slot.SourceTypeName}.{ConstructorName}(" +
-        string.Join(", ", slot.Fields.Select(field => ValueExpression(slot.Object.Fields[field.Name], field.Type, slots))) + ");";
-    }
-    var values = slot.Object.Elements!;
-    var initializer = "";
-    if (values.Count > 0) {
-      var expression = ValueExpression(values[^1], slot.ElementType, slots);
-      for (var index = values.Count - 2; index >= 0; index--) {
-        expression = "if contractArrayIndex == " + index + " then " + ValueExpression(values[index], slot.ElementType, slots) + " else " + expression;
-      }
-      initializer = "(contractArrayIndex => " + expression + ")";
-    }
-    return "var " + slot.VariableName + " := new " + slot.ElementType + "[" + values.Count + "]" + initializer + ";";
   }
 
   internal static void ValidateClass(Program program, Method entry, ClassDecl classDecl) {
@@ -609,7 +574,7 @@ public static class ContractHeapFactory {
     }
   }
 
-  private static IReadOnlyList<HeapSlot> TopologicalOrder(IReadOnlyDictionary<string, HeapSlot> slots, bool allowCycles) {
+  private static IReadOnlyList<HeapSlot> TopologicalOrder(IReadOnlyDictionary<string, HeapSlot> slots) {
     var result = new List<HeapSlot>();
     var visiting = new HashSet<string>(StringComparer.Ordinal);
     var visited = new HashSet<string>(StringComparer.Ordinal);
@@ -617,10 +582,7 @@ public static class ContractHeapFactory {
       if (visited.Contains(slot.Object.Id)) {
         return;
       }
-      if (!visiting.Add(slot.Object.Id)) {
-        if (allowCycles) { return; }
-        throw new NotSupportedException("Cyclic synthetic heap graphs are not supported.");
-      }
+      if (!visiting.Add(slot.Object.Id)) { return; }
       foreach (var cell in slot.Cells) {
         foreach (var reference in References(cell.InitialValue)) { Visit(slots[reference]); }
       }
@@ -634,37 +596,16 @@ public static class ContractHeapFactory {
     return result;
   }
 
-  internal static string ConstructorDeclaration(IReadOnlyList<Field> fields, IReadOnlyList<Field> omitted) {
-    var parameters = string.Join(", ", fields.Select(field =>
-      (field.IsGhost ? "ghost " : "") + field.Name + ": " + field.Type));
-    var names = fields.Select(field => field.Name).ToHashSet(StringComparer.Ordinal);
-    var assignments = fields.Select(field => $"    this.{field.Name} := {field.Name};").ToList();
-    foreach (var (field, index) in omitted.Select((field, index) => (field, index))) {
-      var witness = "contractOmittedGhostWitness" + index;
-      while (!names.Add(witness)) { witness += "_"; }
-      assignments.Add($"    ghost var {witness}: {field.Type} :| true;");
-      assignments.Add($"    this.{field.Name} := {witness};");
-    }
-    var text = string.Join("\n", assignments);
-    return $"\n  constructor {ConstructorName}({parameters}) {{" +
-      (text.Length == 0 ? "" : "\n" + text + "\n  ") + "}\n";
-  }
-
-  private static IReadOnlyList<ContractSourceEdit> BuildConstructorInsertions(
-    IEnumerable<HeapSlot> slots, bool includeConstructors = true) {
+  private static IReadOnlyList<ContractSourceEdit> BuildSourceEdits(IEnumerable<HeapSlot> slots) {
     var classes = slots.Where(slot => !slot.IsArray).GroupBy(slot => slot.Class).Select(group => group.First()).ToList();
-    // Native queries bind existing references and their exact field values; they do not
-    // allocate objects. Keep allocation helpers solely in executable source edits.
-    var edits = includeConstructors ? classes.Select(slot => new ContractSourceEdit(slot.Class.Origin.Uri, slot.Class.EndToken.pos,
-      ConstructorDeclaration(slot.Fields, slot.OmittedGhostFields))).ToList() : [];
+    var edits = new List<ContractSourceEdit>();
     foreach (var group in classes.GroupBy(slot => slot.Class.EnclosingModuleDefinition)) {
       if (group.All(slot => slot.SourceModuleName == group.Key.FullDafnyName)) {
         continue;
       }
       var exports = group.Key.TopLevelDecls.OfType<ModuleExportDecl>().ToList();
       // With no explicit export sets, Dafny already exports every new member.
-      // Otherwise amend each existing view that reveals the heap class; this includes
-      // the named view an allocation site may have imported without broadening opaque views.
+      // Otherwise amend each existing view that reveals the heap class.
       if (exports.Count == 0) { continue; }
       var slotsByExport = exports.ToDictionary(export => export, export => group.Where(slot =>
         slot.Class.IsVisibleInScope(export.Signature.VisibilityScope) &&
@@ -675,39 +616,22 @@ public static class ContractHeapFactory {
           $"'{unavailable.Class.FullDafnyName}' in module '{group.Key.FullDafnyName}'.");
       }
       foreach (var (export, exposedSlots) in slotsByExport.Where(pair => pair.Value.Count > 0)) {
-        var definitions = includeConstructors ? [] : exposedSlots.SelectMany(slot =>
+        var definitions = exposedSlots.SelectMany(slot =>
           slot.Fields.Concat(slot.OmittedGhostFields).OfType<ConstantField>()
             .Where(field => field.Rhs != null && !field.IsRevealedInScope(export.Signature.VisibilityScope))
             .Select(field => slot.Class.Name + "." + field.Name)).ToList();
         var members = exposedSlots.SelectMany(slot => slot.Fields
           .Where(field => !field.IsVisibleInScope(export.Signature.VisibilityScope))
           .Select(field => slot.Class.Name + "." + field.Name)).Except(definitions).ToList();
-        var constructors = !includeConstructors || export.ProvideAll || export.RevealAll
-          ? []
-          : exposedSlots.Select(slot => slot.Class.Name + "." + ConstructorName).ToList();
-        var text = (constructors.Any() || members.Count > 0 ?
-          " provides " + string.Join(", ", constructors.Concat(members)) : "") +
+        var text = (members.Count > 0 ? " provides " + string.Join(", ", members) : "") +
           (definitions.Count > 0 ? " reveals " + string.Join(", ", definitions) : "") + "\n";
-        if (constructors.Any() || members.Count > 0 || definitions.Count > 0) {
+        if (members.Count > 0 || definitions.Count > 0) {
           edits.Add(new ContractSourceEdit(export.Origin.Uri,
             export.EndToken.pos + export.EndToken.val.Length, text));
         }
       }
     }
     return edits;
-  }
-
-  private static string CaptureStatements(IEnumerable<HeapSlot> slots, bool initial) {
-    var captures = slots.SelectMany(slot => slot.Cells.Where(cell => cell.RuntimeVisible).Select(cell =>
-      (Id: slot.Object.Id, Name: cell.Name, Access: cell.Access,
-        Shape: ContractStubRuntime.TypeShapeToken(cell.Type)))
-      .Concat(slot.IsArray
-        ? [(Id: slot.Object.Id, Name: "$length", Access: slot.VariableName + ".Length",
-          Shape: "eyJraW5kIjoiaW50ZWdlciJ9")]
-        : []));
-    return string.Join("\n", captures.Select(cell => $"{ContractHarnessBuilder.ObservationName}.Capture(\"" +
-      (initial ? ContractHeapPlan.InitialObservationKey(cell.Id, cell.Name) :
-        ContractHeapPlan.FinalObservationKey(cell.Id, cell.Name)) + $"\", {cell.Access}, \"{cell.Shape}\");"));
   }
 
   private static IReadOnlyList<string> InitialConstraints(IEnumerable<HeapSlot> orderedSlots,

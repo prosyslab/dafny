@@ -108,6 +108,7 @@ public class ContractSpecificationCheckerTests {
   [InlineData("function {:axiom} Root():int")]
   [InlineData("function {:extern} Root():int")]
   [InlineData("lemma Bad() ensures false { assume false; } function Root():int { Bad(); 0 }")]
+  [InlineData("lemma Bad() { assert {:only} true; } function Root():int { Bad(); 0 }")]
   public async Task LogicalScopeRejectsTrustEscapes(string source) {
     var (program, checker) = await Parse("module Model { " + source + " }");
     var scope = checker.LogicalScope([Functions(program).Single()]);
