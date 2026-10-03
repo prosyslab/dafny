@@ -68,6 +68,7 @@ public class InitialAdmissionTests : IClassFixture<InitialAdmissionTests.Fixture
       CyclicTree,
       NegativeResidual,
       UnbudgetedResidual,
+      HeapProofReuseTests.PositiveCell,
       RefinedRoot,
       PlainFunctionWellDefinedness,
       ConstraintCallee,

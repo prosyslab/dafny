@@ -27,6 +27,7 @@
 | [2026-09-12-expecto-residual-constraint-solving](2026-09-12-expecto-residual-constraint-solving.md) | done | 범용 타입/힙·구현 경로 생성·부분 평가·실제 실행·잔여 SMT를 연결 | 2026-09-12 |
 # Current work
 
+- [Contract test artifact cleanup](2026-10-03-contract-test-artifact-cleanup.md) — done; contract tests delete their /workspace/tmp campaign directories.
 - [Remove legacy contract testing](2026-10-03-remove-legacy-contract-testing.md) — done; keep only the runtime PBT campaign mode and its shared helpers.
 - [Contract test fixture merge](2026-10-03-contract-test-fixture-merge.md) — done; merge runtime tests onto shared fixtures, one check per behaviour.
 - [PBT Runtime/SMT naming](2026-10-02-pbt-runtime-smt-naming.md) — done; replace ambiguous Bridge names with Runtime/Smt/Random roles.

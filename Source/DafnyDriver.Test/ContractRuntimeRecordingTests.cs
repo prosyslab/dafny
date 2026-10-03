@@ -352,7 +352,10 @@ public class ContractRuntimeRecordingTests : IClassFixture<ContractRuntimeRecord
       assemblyPath = compiled.AssemblyPath!;
     }
 
-    public Task DisposeAsync() => Task.CompletedTask;
+    public Task DisposeAsync() {
+      ContractRuntime.ContractArtifacts.Delete(directory);
+      return Task.CompletedTask;
+    }
 
     public string ObservationPath(string scenario) => Path.Combine(directory, scenario + ".jsonl");
 

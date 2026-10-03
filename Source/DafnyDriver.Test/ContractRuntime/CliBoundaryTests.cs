@@ -19,14 +19,19 @@ public class CliBoundaryTests {
     Func<string, ContractRuntimeCampaignRequest> request, int seconds) {
     var directory = Path.Combine("/workspace/tmp", "contract-runtime-cli-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(directory);
-    var path = Path.Combine(directory, "request.json");
-    await File.WriteAllTextAsync(path, JsonSerializer.Serialize(request(directory), ContractJson.Options));
-    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
-    var process = await ContractExecutionProcess.RunAsync("dotnet", [typeof(DafnyNewCli).Assembly.Location,
-      "test-contracts",
-      path,
-      "--runtime-check"], directory, timeout.Token);
-    return (process, JsonSerializer.Deserialize<ContractRuntimeCampaignResult>(process.StandardOutput, ContractJson.Options)!);
+    try {
+      var path = Path.Combine(directory, "request.json");
+      await File.WriteAllTextAsync(path, JsonSerializer.Serialize(request(directory), ContractJson.Options));
+      using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(seconds));
+      var process = await ContractExecutionProcess.RunAsync("dotnet", [typeof(DafnyNewCli).Assembly.Location,
+        "test-contracts",
+        path,
+        "--runtime-check"], directory, timeout.Token);
+      return (process, JsonSerializer.Deserialize<ContractRuntimeCampaignResult>(process.StandardOutput, ContractJson.Options)!);
+    }
+    finally {
+      ContractArtifacts.Delete(directory);
+    }
   }
 
   // CLI validation failures keep the caller seed so the strict transport can decode the receipt.

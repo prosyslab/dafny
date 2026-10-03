@@ -1703,6 +1703,17 @@ only in the owning bucket. A marker clause such as `ensures tag < 0` makes every
 Per-bucket observables are violations, callee violations and runtime errors by `SampleOrdinal`, and raw sample records
 (`rejected`, `heap_capture`, `check`); `Population` is asserted once per campaign against the bucket table.
 
+Artifact cleanup (2026-10-03, [cleanup plan](../plan/2026-10-03-contract-test-artifact-cleanup.md)): `Campaign` reference-counts
+campaigns per fixture (`CampaignFixture.InitializeAsync` acquires, `DisposeAsync` releases); the last releasing fixture removes the
+cached run and deletes its `contract-campaign-*` directory, so shared specs (for example `HeapProofReuseTests.PositiveCell`, also
+used by `InitialAdmissionTests`, which must list it in its `Campaigns()`) are never deleted under a running reader. A failed or
+cancelled campaign deletes its own directory. `CliBoundaryTests` (`contract-runtime-cli-*`) and `ContractRuntimeHeapQueryTests`
+(`contract-readonly-dependency-*`) delete in `finally`; the recording fixture (`contract-runtime-recording-*`) in `DisposeAsync`.
+Any spec awaited through `Campaign.RunAsync` must be listed in its fixture's `Campaigns()`, otherwise nobody releases it and its
+directory leaks. `DAFNY_CONTRACT_TEST_KEEP_ARTIFACTS=1` keeps every directory; `CampaignRun.Detail()` (the assertion message)
+starts with `Artifacts: <directory>`. A killed test host still leaves its directories. A `ProcessExit` hook was tried first and
+left directories behind under `dotnet test`.
+
 Rules found while merging (all evidenced by failing first attempts or coverage):
 - Never share a campaign between scenarios needing different campaign-wide settings (budgets, timeouts, drafts that
   change classification, replay) or whole-program declarations (inconsistent/extern globals, datatype or class constant

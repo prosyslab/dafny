@@ -111,11 +111,23 @@ public class ContractRuntimeHeapQueryTests {
       sourceSnapshots: check.Prepared.DiagnosticSourceSnapshots, sourcePath: check.Prepared.Source.Path);
     var directory = Path.Combine("/workspace/tmp", "contract-readonly-dependency-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(directory);
-    await File.WriteAllTextAsync(Path.Combine(directory, "sources.json"), JsonSerializer.Serialize(check.Prepared.DiagnosticSourceSnapshots, ContractJson.Options));
-    await File.WriteAllTextAsync(Path.Combine(directory, "query.dfy"), query);
-    await File.WriteAllTextAsync(Path.Combine(directory, "result.json"), JsonSerializer.Serialize(new { constant, revealed, tag, result }, ContractJson.Options));
-    var expected = tag == 8 ? ContractQueryOutcome.Unsat : ContractQueryOutcome.Sat;
-    Assert.True(result.Outcome == expected, result.Diagnostics);
+    try {
+      await File.WriteAllTextAsync(Path.Combine(directory, "sources.json"), JsonSerializer.Serialize(check.Prepared.DiagnosticSourceSnapshots, ContractJson.Options));
+      await File.WriteAllTextAsync(Path.Combine(directory, "query.dfy"), query);
+      await File.WriteAllTextAsync(Path.Combine(directory, "result.json"), JsonSerializer.Serialize(new { constant, revealed, tag, result }, ContractJson.Options));
+      var expected = tag == 8 ? ContractQueryOutcome.Unsat : ContractQueryOutcome.Sat;
+      Assert.True(result.Outcome == expected, directory + "\n" + result.Diagnostics);
+    }
+    finally {
+      // DAFNY_CONTRACT_TEST_KEEP_ARTIFACTS=1 keeps the directory for debugging.
+      if (Environment.GetEnvironmentVariable("DAFNY_CONTRACT_TEST_KEEP_ARTIFACTS") != "1") {
+        try {
+          Directory.Delete(directory, recursive: true);
+        } catch (DirectoryNotFoundException) {
+          // Already removed.
+        }
+      }
+    }
   }
 
   // Independent fresh global heaps need certified leaf witnesses, without borrowing any captured object.

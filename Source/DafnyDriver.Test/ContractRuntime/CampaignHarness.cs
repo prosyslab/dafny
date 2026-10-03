@@ -136,13 +136,33 @@ public sealed class CampaignRun {
   public static JsonElement Json(string path) => JsonDocument.Parse(File.ReadAllText(path)).RootElement.Clone();
 
   /// <summary>The serialized result, used as an assertion message.</summary>
-  public string Detail() => JsonSerializer.Serialize(Result, ContractJson.Options);
+  public string Detail() => "Artifacts: " + Directory + "\n" + JsonSerializer.Serialize(Result, ContractJson.Options);
+}
+
+/// <summary>Deletes test artifact directories unless <c>DAFNY_CONTRACT_TEST_KEEP_ARTIFACTS=1</c> asks to keep them.</summary>
+public static class ContractArtifacts {
+  public const string KeepVariable = "DAFNY_CONTRACT_TEST_KEEP_ARTIFACTS";
+
+  public static bool Keep => Environment.GetEnvironmentVariable(KeepVariable) == "1";
+
+  /// <summary>Recursively deletes a directory created by a test, tolerating one that is already gone.</summary>
+  public static void Delete(string directory) {
+    if (Keep) {
+      return;
+    }
+    try {
+      System.IO.Directory.Delete(directory, recursive: true);
+    } catch (DirectoryNotFoundException) {
+      // Already removed.
+    }
+  }
 }
 
 /// <summary>Runs campaigns once per distinct request and throttles concurrent compilations.</summary>
 public static class Campaign {
   private static readonly Dictionary<string, Task<CampaignRun>> Cache = new();
   private static readonly SemaphoreSlim Throttle = new(Math.Max(2, Environment.ProcessorCount / 4));
+  private static readonly Dictionary<string, int> Users = new();
 
   /// <summary>A source snapshot with its content hash.</summary>
   public static ContractSource Source(string path, string content) => new(path, content, Hash(content));
@@ -176,9 +196,43 @@ public static class Campaign {
     return sections;
   }
 
+  private static string Key(CampaignSpec spec) => Hash(JsonSerializer.Serialize(spec, ContractJson.Options));
+
+  /// <summary>Registers one fixture as a user of the campaign and starts it if no fixture has yet.</summary>
+  public static Task<CampaignRun> AcquireAsync(CampaignSpec spec) {
+    lock (Cache) {
+      var key = Key(spec);
+      Users[key] = Users.GetValueOrDefault(key) + 1;
+    }
+    return RunAsync(spec);
+  }
+
+  /// <summary>
+  /// Drops one fixture's use of the campaign. The last user removes the cached run and deletes its directory, so a
+  /// directory is never deleted while a fixture that acquired it can still read it; a later request reruns it.
+  /// </summary>
+  public static async Task ReleaseAsync(CampaignSpec spec) {
+    Task<CampaignRun>? finished;
+    var key = Key(spec);
+    lock (Cache) {
+      Users[key]--;
+      if (Users[key] > 0) {
+        return;
+      }
+      Users.Remove(key);
+      Cache.Remove(key, out finished);
+    }
+    // Campaign processes are reaped before the run completes, so nothing writes into the directory afterwards.
+    var directory = (await finished!.ContinueWith(task => task.IsCompletedSuccessfully ? task.Result.Directory : null,
+      TaskScheduler.Default));
+    if (directory != null) {
+      ContractArtifacts.Delete(directory);
+    }
+  }
+
   /// <summary>Returns the cached run of an identical request, starting it on first use.</summary>
   public static Task<CampaignRun> RunAsync(CampaignSpec spec) {
-    var key = Hash(JsonSerializer.Serialize(spec, ContractJson.Options));
+    var key = Key(spec);
     lock (Cache) {
       if (!Cache.TryGetValue(key, out var run)) {
         run = Start(spec, key);
@@ -193,16 +247,26 @@ public static class Campaign {
     try {
       var directory = Path.Combine("/workspace/tmp", "contract-campaign-" + key[..12] + "-" + Guid.NewGuid().ToString("N"));
       System.IO.Directory.CreateDirectory(directory);
-      var request = new ContractRuntimeCampaignRequest(1, spec.Sources, new(spec.Entry), "17", spec.Dependencies,
-        spec.Drafts, spec.Generator, spec.SampleCount, spec.SampleTimeout, spec.Timeout, spec.MaxClosedQueries,
-        spec.ClosedQueryTimeout, spec.MaxViolationsPerObligation, spec.ReplayOrdinal);
-      var options = new DafnyOptions(DafnyOptions.Default);
-      options.ApplyDefaultOptionsWithoutSettingsDefault();
-      using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(spec.Timeout + 30000));
-      var result = await ContractRuntimeCampaignRunner.RunAsync(request, options, directory, timeout.Token);
-      // Kept next to the campaign artifacts for diagnosing a failing slice.
-      await File.WriteAllTextAsync(Path.Combine(directory, "campaign-result.json"), JsonSerializer.Serialize(result, ContractJson.Options));
-      return new CampaignRun(spec, result, directory);
+      var completed = false;
+      try {
+        var request = new ContractRuntimeCampaignRequest(1, spec.Sources, new(spec.Entry), "17", spec.Dependencies,
+          spec.Drafts, spec.Generator, spec.SampleCount, spec.SampleTimeout, spec.Timeout, spec.MaxClosedQueries,
+          spec.ClosedQueryTimeout, spec.MaxViolationsPerObligation, spec.ReplayOrdinal);
+        var options = new DafnyOptions(DafnyOptions.Default);
+        options.ApplyDefaultOptionsWithoutSettingsDefault();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(spec.Timeout + 30000));
+        var result = await ContractRuntimeCampaignRunner.RunAsync(request, options, directory, timeout.Token);
+        // Kept next to the campaign artifacts for diagnosing a failing slice.
+        await File.WriteAllTextAsync(Path.Combine(directory, "campaign-result.json"), JsonSerializer.Serialize(result, ContractJson.Options));
+        completed = true;
+        return new CampaignRun(spec, result, directory);
+      }
+      finally {
+        // A failed or cancelled campaign has no owner to release it.
+        if (!completed) {
+          ContractArtifacts.Delete(directory);
+        }
+      }
     }
     finally {
       Throttle.Release();
@@ -217,7 +281,8 @@ public abstract class CampaignFixture : IAsyncLifetime {
 
   // A failing campaign is reported by the tests that await it, not by fixture construction.
   public Task InitializeAsync() => Task.WhenAll(Campaigns().Select(spec =>
-    Campaign.RunAsync(spec).ContinueWith(_ => { }, TaskScheduler.Default)));
+    Campaign.AcquireAsync(spec).ContinueWith(_ => { }, TaskScheduler.Default)));
 
-  public Task DisposeAsync() => Task.CompletedTask;
+  // Campaigns() yields the same specs on every call; the last fixture using a campaign deletes its directory.
+  public Task DisposeAsync() => Task.WhenAll(Campaigns().Select(Campaign.ReleaseAsync));
 }
