@@ -1,5 +1,7 @@
 # Contract testing boundaries
 
+Artifact availability (2026-10-04): non-Markdown artifacts formerly stored under `plan/` were deleted at the user's request. Historical validation results below are retained; removed artifacts are unavailable, and their former paths are not approved output locations. See the owning repository's `AGENTS.md` for artifact storage rules.
+
 - Status: runtime campaign (`test-contracts --runtime-check`) is the only mode since 2026-10-03; sections marked STALE below describe removed fixed-input, generation and symbolic modes ([removal plan](../plan/2026-10-03-remove-legacy-contract-testing.md)). Earlier status: verified bounded implementation; partial logical heap slice locally verified.
 - Verified: 2026-09-14, working tree based on `336ae4ce66176cf8360d107894d5a4ad5a7a3a2d`.
 - Origin: [implementation plan](../plan/2026-09-12-expecto-residual-constraint-solving.md).
@@ -1678,7 +1680,7 @@ Kept shared helpers: `ContractHarnessBuilder` (`Hash`, `ValidateRequest` now rej
 ## Shared-campaign runtime test pattern (2026-10-03, implementation checks)
 
 Status: implementation checks per the [fixture merge plan](../plan/2026-10-03-contract-test-fixture-merge.md)
-(mapping: [old test -> new test/bucket](../plan/2026-10-03-contract-test-fixture-merge-mapping.csv)); independent
+(mapping: old test -> new test/bucket (`../plan/2026-10-03-contract-test-fixture-merge-mapping.csv`; removed 2026-10-04)); independent
 verification pending. Applies to `Source/DafnyDriver.Test/ContractRuntime/` (runtime campaign tests only).
 
 Cost model: one runtime campaign compiles one C# diagnostic (~4.3-4.6 s of a ~4.9 s small campaign); a sample process

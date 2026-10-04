@@ -15,6 +15,9 @@
 | Documentation | `dafny/docs/` | language + integration references |
 
 ## CONVENTIONS
+- Reserve `plan/` and `wiki/`, including nested directories, for Markdown (`.md`) documents only. Do not create or store generated evidence, logs, JSON/JSONL/CSV outputs, images, archives, scripts, source probes, binaries, caches, or artifact symlinks there, even temporarily or when ignored by Git. Renaming an artifact to `.md` does not make it a document.
+- Put non-sensitive maintenance scratch and generated artifacts in `/workspace/tmp/<task-slug>/`, and simple experiment artifacts in `/workspace/tmp/experiment/<run-id>/`. Benchmark and private evidence must use the protocol-authorized location and existing isolation rules. Plan/wiki documents summarize commands and results and reference external artifacts with their availability.
+- Before finishing, inspect `plan/` and `wiki/` recursively for non-Markdown files. Remove violations created by the current task; preserve pre-existing files unless their cleanup is explicitly authorized.
 - Before adding new functionality, search `dafny/Source/` for similar existing implementations first; add new code only when no suitable implementation exists.
 - Use Dafny-local commands (`dotnet build`, `make test`, `make format`, `make format-dfy`).
 - Follow C# formatting/style rules from `dafny/.editorconfig` and `dafny/CLAUDE.md`.

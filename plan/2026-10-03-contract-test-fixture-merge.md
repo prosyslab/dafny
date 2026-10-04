@@ -1,5 +1,7 @@
 # Merge contract runtime tests onto shared fixtures
 
+Artifact availability (2026-10-04): non-Markdown artifacts formerly stored under `plan/` were deleted at the user's request. Historical validation results below are retained; removed artifacts are unavailable, and their former paths are not approved output locations. See the owning repository's `AGENTS.md` for artifact storage rules.
+
 Status: done — implementation and fresh independent verification complete
 
 ## Objective and authorization
@@ -61,7 +63,7 @@ Pre-existing failure to check: `DafnyTestGeneration.Test.ContractHeapTests.NoArr
 | --- | --- | --- |
 | new `DafnyDriver.Test/ContractRuntime/CampaignHarness.cs` (`CampaignSpec`, `CampaignRun`, `Campaign`, `CampaignFixture`), `DafnyDriver.Test.csproj` content item `ContractRuntime\Fixtures\*.dfy` | Shared harness | builds; all classes pass |
 | new `ContractRuntime/Fixtures/*.dfy` (18 files, named `// == source/generator NAME ==` sections) and 19 test classes `ContractRuntime/*Tests.cs` | Merged fixtures | per-class filter, full `~Contract` |
-| deleted `ContractRuntimeCheckTests.cs`, `ContractRuntimeHeapTests.cs`, `ContractRuntimePrefixTests.cs`, `ContractRuntimeObservationTests.cs`, `ContractRuntimeHeapConstructionTests.cs`, `ContractRuntimeClauseDependencyTests.cs` | Migrated per [mapping](2026-10-03-contract-test-fixture-merge-mapping.csv) | coverage diff |
+| deleted `ContractRuntimeCheckTests.cs`, `ContractRuntimeHeapTests.cs`, `ContractRuntimePrefixTests.cs`, `ContractRuntimeObservationTests.cs`, `ContractRuntimeHeapConstructionTests.cs`, `ContractRuntimeClauseDependencyTests.cs` | Migrated per mapping (`2026-10-03-contract-test-fixture-merge-mapping.csv`; removed 2026-10-04) | coverage diff |
 | `DafnyTestGeneration/ContractTesting/ContractCallableSelector.cs` `ContractConcreteMethod` | Drop dead `ConcreteTypeArguments`/`TypeSubstitution` (legacy-removal leftover; recorded in that plan) | TestGeneration `~Contract` 499/499 |
 | DafnyTestGeneration.Test survivors | No removal: no duplicate was proven by coverage (per-test coverage not run) | n/a |
 | `wiki/contract-testing.md`, `wiki/INDEX.md` | Shared-campaign/bucket test pattern section | review |
