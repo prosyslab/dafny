@@ -25,7 +25,7 @@ public class CalleeTypeContractsTests : IClassFixture<CalleeTypeContractsTests.F
     const int size = CampaignSpec.BucketSize;
     // The faulting constraint function of bucket 0 runs while the input is validated, before execution.
     Assert.True(run.Population == new ContractRuntimePopulation(Generated: Main.SampleCount, Executed: Main.SampleCount - size,
-      Valid: 8 * size, CalleeContractViolations: 9 * size, CalleeContractUnchecked: 2 * size,
+      Valid: 8 * size, CalleeContractViolations: 11 * size,
       RuntimeErrors: size, ViolatingSamples: 8 * size), run.Detail());
   }
 
@@ -37,12 +37,12 @@ public class CalleeTypeContractsTests : IClassFixture<CalleeTypeContractsTests.F
     Assert.True(run.Errors(0).Select(error => error.SampleOrdinal).Order().SequenceEqual(CampaignRun.Ordinals(0)), run.Detail());
   }
 
-  // A non-runtime predicate domain in a type constraint stays excluded when closed-query evidence is unavailable.
+  // A false non-runtime predicate domain invalidates its callee after native closed-query evaluation.
   [Fact]
-  public async Task ExcludesUncheckedTypeConstraintFunctionDomain() {
+  public async Task RejectsClosedTypeConstraintFunctionDomain() {
     var run = await Campaign.RunAsync(Main);
     Assert.Empty(run.Violations(1));
-    Assert.Empty(run.CalleeViolations(1));
+    Assert.All(run.AssertCalleeViolated(1), violation => Assert.Equal("M.AcceptQ", violation.Callee));
     Assert.Empty(run.Errors(1));
   }
 
@@ -103,13 +103,13 @@ public class CalleeTypeContractsTests : IClassFixture<CalleeTypeContractsTests.F
     (await Campaign.RunAsync(Main)).AssertCalleeViolated(18);
   }
 
-  // An unbounded spec-function domain stays unchecked when no closed-query budget is available.
+  // A false unbounded spec-function domain is excluded by its native closed-query verdict.
   [Fact]
-  public async Task ExcludesUncheckedSpecFunctionDomain() {
+  public async Task RejectsClosedSpecFunctionDomain() {
     var run = await Campaign.RunAsync(Main);
     Assert.Empty(run.Violations(19));
-    Assert.Empty(run.CalleeViolations(19));
+    Assert.All(run.AssertCalleeViolated(19), violation => Assert.Equal("M.HelperQ", violation.Callee));
     Assert.Contains(run.Result.Obligations, obligation => obligation.Callee == "M.HelperQ" &&
-      obligation.Evaluations is { Unchecked: CampaignSpec.BucketSize, Runtime: 0, ClosedSmt: 0 });
+      obligation.Evaluations is { Unchecked: 0, Runtime: 0, ClosedSmt: CampaignSpec.BucketSize });
   }
 }

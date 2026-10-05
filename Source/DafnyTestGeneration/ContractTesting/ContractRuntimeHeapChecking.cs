@@ -408,7 +408,7 @@ public static class ContractRuntimeHeapChecking {
     ContractSpecificationChecker? specifications = null) {
     var method = ContractCallableSelector.SelectMethod(originalProgram, campaign.Entry, requireConcreteReceiver: false);
     var entry = CapturedEntry(method, campaign, inputs);
-    var request = new ContractTestRequest(campaign.SchemaVersion, campaign.Sources, entry,
+    var request = new ContractTestRequest(ContractJson.SchemaVersion, campaign.Sources, entry,
       SelectFormals(method.Ins, inputs, "input"), initial, campaign.Dependencies, campaign.ClosedQueryTimeoutMilliseconds);
     ContractHarnessBuilder.ValidateRequest(request);
     var prepared = ContractHarnessBuilder.PrepareInitial(originalProgram, request);
@@ -445,7 +445,7 @@ public static class ContractRuntimeHeapChecking {
     var entry = CapturedEntry(method, campaign, inputs);
     var actualInputs = SelectFormals(method.Ins, inputs, "input");
     var actualOutputs = SelectFormals(method.Outs, outputs, "output");
-    var request = new ContractTestRequest(campaign.SchemaVersion, campaign.Sources, entry, actualInputs,
+    var request = new ContractTestRequest(ContractJson.SchemaVersion, campaign.Sources, entry, actualInputs,
       initial, campaign.Dependencies, campaign.ClosedQueryTimeoutMilliseconds);
     ContractHarnessBuilder.ValidateRequest(request);
     ContractHarnessBuilder.ValidateRequest(request with { Heap = final });

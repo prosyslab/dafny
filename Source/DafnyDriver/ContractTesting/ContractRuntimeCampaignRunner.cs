@@ -187,8 +187,8 @@ public static class ContractRuntimeCampaignRunner {
     var calleeViolations = new List<ContractRuntimeCalleeViolation>();
     var errors = new List<ContractRuntimeError>();
     var samples = new List<Sample>();
-    // A closed decision may run a query for the clause and one for its negation.
-    var reserve = Math.Min(2L * request.MaxClosedQueries * request.ClosedQueryTimeoutMilliseconds, request.TimeoutMilliseconds / 2);
+    // Reserve half the campaign time for proof and result classification.
+    var reserve = request.TimeoutMilliseconds / 2;
     var ordinals = request.ReplayOrdinal is { } replay ? [replay] : Enumerable.Range(0, request.SampleCount);
     foreach (var ordinal in ordinals) {
       cancellationToken.ThrowIfCancellationRequested();
@@ -331,9 +331,7 @@ public static class ContractRuntimeCampaignRunner {
             } else {
               try {
                 if (!ContractQueryDeadline.TryReadCached(queryCache, cacheKey, RequireCampaignTime, out decision)) {
-                  if (clause.EntryHeapPostcondition == null && closedQueries >= request.MaxClosedQueries) {
-                    decision = (null, "closed_query_budget_exhausted");
-                  } else if (clock.ElapsedMilliseconds >= request.TimeoutMilliseconds) {
+                  if (clock.ElapsedMilliseconds >= request.TimeoutMilliseconds) {
                     decision = (null, "campaign_timeout");
                   } else {
                     if (clause.EntryHeapPostcondition is { } postcondition) {
@@ -627,7 +625,7 @@ public static class ContractRuntimeCampaignRunner {
         var success = scope.Failure == null;
         foreach (var module in success ? specifications.PendingModules(scope) : []) {
           var remaining = request.TimeoutMilliseconds - clock.ElapsedMilliseconds;
-          if (closedQueries >= request.MaxClosedQueries || remaining <= 0) { success = false; break; }
+          if (remaining <= 0) { success = false; break; }
           closedQueries++;
           var deadline = ContractQueryDeadline.AfterMilliseconds(Math.Min(request.ClosedQueryTimeoutMilliseconds, remaining));
           using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -801,9 +799,6 @@ public static class ContractRuntimeCampaignRunner {
           File.Move(pendingReceiptPath, receiptPath);
           membershipReuseReceipts = receiptOrdinal;
           return (reusedProof.Outcome, null);
-        }
-        if (closedQueries >= request.MaxClosedQueries) {
-          return (ContractQueryOutcome.Unknown, "closed_query_budget_exhausted");
         }
       }
       closedQueries++;
@@ -987,9 +982,9 @@ public static class ContractRuntimeCampaignRunner {
   }
 
   private static void Validate(ContractRuntimeCampaignRequest request) {
-    if (request.SchemaVersion != 1 || request.Sources == null || request.Sources.Count == 0 || request.Entry == null ||
+    if (request.SchemaVersion != 2 || request.Sources == null || request.Sources.Count == 0 || request.Entry == null ||
         !ulong.TryParse(request.Seed, NumberStyles.None, CultureInfo.InvariantCulture, out _) || request.SampleCount <= 0 ||
-        request.SampleTimeoutMilliseconds <= 0 || request.TimeoutMilliseconds <= 0 || request.MaxClosedQueries < 0 ||
+        request.SampleTimeoutMilliseconds <= 0 || request.TimeoutMilliseconds <= 0 ||
         request.ClosedQueryTimeoutMilliseconds <= 0 || request.MaxViolationsPerObligation <= 0 || request.ReplayOrdinal < 0) {
       throw new ArgumentException("Invalid runtime campaign schema, seed, sources, entry, or budgets.");
     }

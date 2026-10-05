@@ -1,5 +1,7 @@
 # 구현 계획
 
+- [Remove the agent query-count limit](2026-10-04-remove-agent-query-count-limit.md) — done; count ceiling removed, all verifier timeouts retained; fresh native247/199 and Python/native2 passed.
+
 | 계획 | 상태 | 목표 | 갱신일 |
 | --- | --- | --- | --- |
 | [2026-09-29-recursive-and-nested-heap-construction](2026-09-29-recursive-and-nested-heap-construction.md) | done | `object` 참조·순환 fixed-state 힙과 중첩 `pbt_heap_constructor` 경로/기본 할당; Core93·TestGen649·Driver251, 독립 검증 통과 | 2026-09-29 |

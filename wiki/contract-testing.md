@@ -1,5 +1,12 @@
 # Contract testing boundaries
 
+## Agent query-count removal (2026-10-04)
+
+Current campaign requests use schema2 and no longer contain `maxClosedQueries`. Every native proof/query remains bounded by the existing query and campaign timeouts; dependency certification and conservative unchecked results remain unchanged. The finite diagnostic sample population and reported-example selection remain unchanged. Sampling reserves half the campaign duration for proof/classification, independently of a query count. Result schema1 is unchanged. Earlier descriptions of query exhaustion and shared closed-query budgets below are historical and superseded for current campaigns.
+
+Source: `ContractRuntimeModels.cs`, `ContractRuntimeCampaignRunner.cs`, and current `ContractRuntime` tests. Originating [query-count removal plan](../plan/2026-10-04-remove-agent-query-count-limit.md). Official Cosyn `make build-dafny` passed; local generation499/runtime247 and fresh independent runtime247/generation199/Python-native2 checks passed against current source and stable binaries. No proof scope, compiler reduction bounds or provider experiment changed.
+
+
 Artifact availability (2026-10-04): non-Markdown artifacts formerly stored under `plan/` were deleted at the user's request. Historical validation results below are retained; removed artifacts are unavailable, and their former paths are not approved output locations. See the owning repository's `AGENTS.md` for artifact storage rules.
 
 - Status: runtime campaign (`test-contracts --runtime-check`) is the only mode since 2026-10-03; sections marked STALE below describe removed fixed-input, generation and symbolic modes ([removal plan](../plan/2026-10-03-remove-legacy-contract-testing.md)). Earlier status: verified bounded implementation; partial logical heap slice locally verified.

@@ -344,7 +344,7 @@ public class ContractRuntimeRecordingTests : IClassFixture<ContractRuntimeRecord
       var prepared = new ContractPreparedProgram(program, goal, snapshot,
         new(snapshot.Path, goal.Origin.line, goal.Origin.col, goal.FullDafnyName, snapshot.Sha256), Sources: [snapshot]);
       var transformation = new ContractRuntimeTransformation([snapshot], [], [], "Fixture.Main", prepared, new HashSet<Field>());
-      var request = new ContractRuntimeCampaignRequest(1, [snapshot], new("Fixture.Main"), "17",
+      var request = new ContractRuntimeCampaignRequest(2, [snapshot], new("Fixture.Main"), "17",
         Dependencies: [new(dependencyPath, ContractHarnessBuilder.Hash(FixtureSource))]);
       var compiled = await ContractCompilerWorker.CompileRuntimeAsync(transformation, request,
         Path.Combine(directory, "compiled"), options, timeout.Token);

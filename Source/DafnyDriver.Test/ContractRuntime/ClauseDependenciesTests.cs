@@ -17,20 +17,14 @@ namespace DafnyDriver.Test.ContractRuntime;
 public class ClauseDependenciesTests : IClassFixture<ClauseDependenciesTests.Fixture> {
   private const string File = "ClauseDependencies";
   private static readonly CampaignSpec Main = CampaignSpec.Fixture(File, "Main").Buckets(4) with {
-    MaxClosedQueries = 32,
     ClosedQueryTimeout = 15000,
     SampleTimeout = 3000,
     Timeout = 240000
   };
-  private static readonly CampaignSpec NoBudget = CampaignSpec.Fixture(File, "Budget") with {
-    ClosedQueryTimeout = 15000,
-    SampleTimeout = 3000
-  };
-  private static readonly CampaignSpec ClauseOnlyBudget = NoBudget with { MaxClosedQueries = 1 };
-  private static readonly CampaignSpec Bodyless = CampaignSpec.Fixture(File, "Bodyless") with { MaxClosedQueries = 8 };
+  private static readonly CampaignSpec Bodyless = CampaignSpec.Fixture(File, "Bodyless");
 
   public sealed class Fixture : CampaignFixture {
-    protected override IEnumerable<CampaignSpec> Campaigns() => [Main, NoBudget, ClauseOnlyBudget, Bodyless];
+    protected override IEnumerable<CampaignSpec> Campaigns() => [Main, Bodyless];
   }
 
   public ClauseDependenciesTests(Fixture fixture) { }
@@ -88,18 +82,6 @@ public class ClauseDependenciesTests : IClassFixture<ClauseDependenciesTests.Fix
     var run = await Campaign.RunAsync(Main);
     Assert.Contains(Proofs(run), proof => !proof.Verified &&
       proof.Implementations.Any(name => name.Contains("IdentityInvalid", StringComparison.Ordinal)));
-  }
-
-  // A zero budget or one spent on the clause query cannot also certify its original dependencies.
-  [Theory]
-  [InlineData(false)]
-  [InlineData(true)]
-  public async Task RespectsSharedClosedQueryBudget(bool clauseQuery) {
-    var run = await Campaign.RunAsync(clauseQuery ? ClauseOnlyBudget : NoBudget);
-    Assert.Equal(ContractRuntimeStatus.Inconclusive, run.Result.Status);
-    Assert.Empty(run.Result.Violations);
-    Assert.Equal(1, run.Population.CalleeContractUnchecked);
-    Assert.Empty(run.Artifacts("specification-query-*.result.json"));
   }
 
   // Original clauses are recovered by immutable source identity, never by reusing a detached expression.

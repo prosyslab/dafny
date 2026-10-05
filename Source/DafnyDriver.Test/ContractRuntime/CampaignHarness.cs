@@ -17,7 +17,7 @@ namespace DafnyDriver.Test.ContractRuntime;
 /// <c>PbtRandom.Source.Size()</c> (= 2 + ordinal / 4), so bucket <c>b</c> owns ordinals 4b..4b+3.
 /// </summary>
 public sealed record CampaignSpec(IReadOnlyList<ContractSource> Sources, string Entry, ContractSource? Generator,
-  IReadOnlyList<ContractRuntimeDraft>? Drafts = null, int SampleCount = 1, int MaxClosedQueries = 0,
+  IReadOnlyList<ContractRuntimeDraft>? Drafts = null, int SampleCount = 1,
   int SampleTimeout = 5000, int ClosedQueryTimeout = 10000, int MaxViolationsPerObligation = 3,
   int? ReplayOrdinal = null, int Timeout = 300000, IReadOnlyList<ContractDependency>? Dependencies = null) {
   public const int BucketSize = 4;
@@ -249,8 +249,8 @@ public static class Campaign {
       System.IO.Directory.CreateDirectory(directory);
       var completed = false;
       try {
-        var request = new ContractRuntimeCampaignRequest(1, spec.Sources, new(spec.Entry), "17", spec.Dependencies,
-          spec.Drafts, spec.Generator, spec.SampleCount, spec.SampleTimeout, spec.Timeout, spec.MaxClosedQueries,
+        var request = new ContractRuntimeCampaignRequest(2, spec.Sources, new(spec.Entry), "17", spec.Dependencies,
+          spec.Drafts, spec.Generator, spec.SampleCount, spec.SampleTimeout, spec.Timeout,
           spec.ClosedQueryTimeout, spec.MaxViolationsPerObligation, spec.ReplayOrdinal);
         var options = new DafnyOptions(DafnyOptions.Default);
         options.ApplyDefaultOptionsWithoutSettingsDefault();

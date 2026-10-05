@@ -9,26 +9,26 @@ using Xunit;
 
 namespace DafnyDriver.Test.ContractRuntime;
 
-/// <summary>Reuse of native heap proofs, membership certificates and closed-query budget across samples and clauses.</summary>
+/// <summary>Reuse of native heap proofs, membership certificates and closed-query evidence across samples and clauses.</summary>
 public class HeapProofReuseTests : IClassFixture<HeapProofReuseTests.Fixture> {
   private const string File = "HeapProofReuse";
 
-  private static CampaignSpec Heap(string section, int queries, int samples = 1, string entry = "Client.Goal") =>
-    CampaignSpec.Fixture(File, section, entry) with { MaxClosedQueries = queries, ClosedQueryTimeout = 3000, SampleCount = samples };
+  private static CampaignSpec Heap(string section, int samples = 1, string entry = "Client.Goal") =>
+    CampaignSpec.Fixture(File, section, entry) with { ClosedQueryTimeout = 3000, SampleCount = samples };
 
-  private static readonly CampaignSpec GlobalReuse = Heap("GlobalReuse", 3, 20);
-  private static readonly CampaignSpec DistinctHeaps = Heap("DistinctHeaps", 2, 2);
-  private static readonly CampaignSpec ChangedValue = Heap("ChangedValue", 3, 2);
-  private static readonly CampaignSpec UnsuccessfulProof = Heap("UnsuccessfulProof", 3, 2);
-  private static readonly CampaignSpec ObservedReuse = Heap("ObservedReuse", 4);
-  private static readonly CampaignSpec InvalidLaterState = Heap("InvalidLaterState", 3);
-  internal static readonly CampaignSpec PositiveCell = Heap("PositiveCell", 2);
+  private static readonly CampaignSpec GlobalReuse = Heap("GlobalReuse", 20);
+  private static readonly CampaignSpec DistinctHeaps = Heap("DistinctHeaps", 2);
+  private static readonly CampaignSpec ChangedValue = Heap("ChangedValue", 2);
+  private static readonly CampaignSpec UnsuccessfulProof = Heap("UnsuccessfulProof", 2);
+  private static readonly CampaignSpec ObservedReuse = Heap("ObservedReuse");
+  private static readonly CampaignSpec InvalidLaterState = Heap("InvalidLaterState");
+  internal static readonly CampaignSpec PositiveCell = Heap("PositiveCell");
   private static readonly CampaignSpec PositiveCellOtherView = PositiveCell with {
     Sources = [Campaign.Source(PositiveCell.Sources[0].Path, PositiveCell.Sources[0].Content + "\n// distinct supplied source view")]
   };
-  private static readonly CampaignSpec NativeCertificateReuse = Heap("NativeCertificateReuse", 5);
-  private static readonly CampaignSpec HeapFacts = Heap("HeapFacts", 4);
-  private static readonly CampaignSpec RecursiveMembership = Heap("RecursiveMembership", 1, entry: "M.Goal");
+  private static readonly CampaignSpec NativeCertificateReuse = Heap("NativeCertificateReuse");
+  private static readonly CampaignSpec HeapFacts = Heap("HeapFacts");
+  private static readonly CampaignSpec RecursiveMembership = Heap("RecursiveMembership", entry: "M.Goal");
   private static readonly CampaignSpec RecursiveMembershipDuplicate = RecursiveMembership with {
     Generator = Campaign.Source(RecursiveMembership.Generator!.Path, RecursiveMembership.Generator.Content.Replace("Node(1,map[])", "Node(0,map[])"))
   };
@@ -79,9 +79,9 @@ public class HeapProofReuseTests : IClassFixture<HeapProofReuseTests.Fixture> {
     }
   }
 
-  // An exact successful membership proof admits a second distinct heap without consuming a closed-query slot.
+  // An exact successful membership proof admits a second distinct heap without repeating the same closed query.
   [Fact]
-  public async Task MembershipReuseAdmitsDistinctHeapsAfterQueryCap() {
+  public async Task MembershipReuseAdmitsDistinctHeaps() {
     var run = await Campaign.RunAsync(DistinctHeaps);
     Assert.True(run.Result.Status == ContractRuntimeStatus.ViolationFound, run.Detail());
     Assert.Equal(2, run.Population.Valid);
@@ -165,7 +165,7 @@ public class HeapProofReuseTests : IClassFixture<HeapProofReuseTests.Fixture> {
     Assert.Empty(second.Artifacts("membership-proof-reuse-*.json"));
   }
 
-  // Reusing the exact initial construction certificate leaves enough budget for the original observed-state decision.
+  // Reusing the exact initial construction certificate avoids repeating native premises before the original observed-state decision.
   [Fact]
   public async Task ReusesExactNativeInitialCertificateForHeapDecision() {
     var run = await Campaign.RunAsync(NativeCertificateReuse);
@@ -174,7 +174,7 @@ public class HeapProofReuseTests : IClassFixture<HeapProofReuseTests.Fixture> {
     Assert.Contains(run.Result.Violations, violation => violation.DecisionMethod == ContractRuntimeDecisionMethod.ClosedSmt);
   }
 
-  // Two different clauses on the same observed state reuse a successful native premise rather than spending its budget twice.
+  // Two different clauses on the same observed state reuse a successful native premise without repeating its native proof.
   [Fact]
   public async Task ExactHeapFactsAreReusedAcrossClauses() {
     var run = await Campaign.RunAsync(HeapFacts);

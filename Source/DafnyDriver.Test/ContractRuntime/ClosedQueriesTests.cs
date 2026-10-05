@@ -12,15 +12,13 @@ namespace DafnyDriver.Test.ContractRuntime;
 public class ClosedQueriesTests : IClassFixture<ClosedQueriesTests.Fixture> {
   private const string File = "ClosedQueries";
   private static readonly CampaignSpec Budget = CampaignSpec.Fixture(File, "Budget").Buckets(6) with {
-    MaxClosedQueries = 64,
     ClosedQueryTimeout = 3000
   };
   private static readonly CampaignSpec ErasedEntry = CampaignSpec.Fixture(File, "ErasedEntry") with { SampleCount = 2 };
   private static readonly CampaignSpec Initializer = CampaignSpec.Fixture(File, "Initializer") with { SampleCount = 2 };
-  private static readonly CampaignSpec CertifiedInitializer = Initializer with { MaxClosedQueries = 6 };
 
   public sealed class Fixture : CampaignFixture {
-    protected override IEnumerable<CampaignSpec> Campaigns() => [Budget, ErasedEntry, Initializer, CertifiedInitializer];
+    protected override IEnumerable<CampaignSpec> Campaigns() => [Budget, ErasedEntry, Initializer];
   }
 
   public ClosedQueriesTests(Fixture fixture) { }
@@ -87,36 +85,30 @@ public class ClosedQueriesTests : IClassFixture<ClosedQueriesTests.Fixture> {
       obligation.Evaluations.ClosedSmt >= CampaignSpec.BucketSize);
   }
 
-  // An erased entry precondition is never treated as satisfied, so its samples are discarded as unchecked.
+  // A false erased entry precondition is rejected by its native decision before goal evidence.
   [Fact]
   public async Task ErasedEntryPreconditionDiscardsSamples() {
     var run = await Campaign.RunAsync(ErasedEntry);
     Assert.True(run.Result.Status == ContractRuntimeStatus.Inconclusive, run.Detail());
-    Assert.Equal(ErasedEntry.SampleCount, run.Population.PreconditionUnchecked);
+    Assert.Equal(ErasedEntry.SampleCount, run.Population.PreconditionRejected);
     Assert.Equal(0, run.Population.Valid);
   }
 
   // Capturing keeps the original initializer executable; accepting its readonly equation needs native validation.
-  [Theory]
-  [InlineData(false)]
-  [InlineData(true)]
-  public async Task CapturesObjectWithConstantInitializer(bool certified) {
-    var spec = certified ? CertifiedInitializer : Initializer;
+  [Fact]
+  public async Task CapturesObjectWithConstantInitializer() {
+    var spec = Initializer;
     var run = await Campaign.RunAsync(spec);
-    Assert.True(run.Result.Status == (certified ? ContractRuntimeStatus.ViolationFound : ContractRuntimeStatus.Inconclusive),
+    Assert.True(run.Result.Status == ContractRuntimeStatus.ViolationFound,
       run.Detail());
     Assert.Equal(spec.SampleCount, run.Population.Executed);
-    Assert.Equal(certified ? spec.SampleCount : 0, run.Population.Valid);
-    Assert.Equal(certified ? 0 : spec.SampleCount, run.Population.PreconditionUnchecked);
+    Assert.Equal(spec.SampleCount, run.Population.Valid);
+    Assert.Equal(0, run.Population.PreconditionUnchecked);
     Assert.Equal(0, run.Population.RuntimeErrors);
     var entry = Assert.Single(run.Records(0), record => record.GetProperty("kind").GetString() == "heap_capture" &&
       record.GetProperty("phase").GetString() == "entry");
     var box = entry.GetProperty("heap").EnumerateArray().Single(item => item.GetProperty("type").GetString() == "M.Box");
     Assert.Equal("7", box.GetProperty("fields").GetProperty("tag").GetProperty("value").GetString());
-    if (certified) {
-      Assert.Equal("7", run.Result.Violations.First().Values["b.tag"].Value);
-    } else {
-      Assert.Empty(run.Result.Violations);
-    }
+    Assert.Equal("7", run.Result.Violations.First().Values["b.tag"].Value);
   }
 }

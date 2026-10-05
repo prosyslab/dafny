@@ -10,7 +10,6 @@ namespace DafnyDriver.Test.ContractRuntime;
 /// <summary>Callee heap postconditions decided over each internal invocation's own captured heaps.</summary>
 public class InternalCallsTests : IClassFixture<InternalCallsTests.Fixture> {
   private static readonly CampaignSpec Main = CampaignSpec.Fixture("InternalCalls", "Main", "Client.Goal").Buckets(6) with {
-    MaxClosedQueries = 96,
     ClosedQueryTimeout = 3000,
     SampleTimeout = 2000
   };

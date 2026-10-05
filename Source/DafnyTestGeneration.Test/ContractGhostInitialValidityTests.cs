@@ -118,7 +118,7 @@ public class ContractGhostInitialValidityTests {
     var program = await ContractSourceSnapshot.ParseAsync(reporter, [source], CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0,
       string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
-    return (program, new ContractRuntimeCampaignRequest(ContractJson.SchemaVersion, [source],
+    return (program, new ContractRuntimeCampaignRequest(2, [source],
       new ContractEntry("Store.Entry"), "ghost-initial"));
   }
 

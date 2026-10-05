@@ -11,12 +11,10 @@ namespace DafnyDriver.Test.ContractRuntime;
 public class SpecificationDependenciesTests : IClassFixture<SpecificationDependenciesTests.Fixture> {
   private const string File = "SpecificationDependencies";
   private static readonly CampaignSpec Unvalidated = CampaignSpec.Fixture(File, "Unvalidated", "Client.Goal").Buckets(8) with {
-    MaxClosedQueries = 24,
     ClosedQueryTimeout = 3000
   };
   private static readonly CampaignSpec LogicalCertificates =
     CampaignSpec.Fixture(File, "LogicalCertificates", "Client.Goal").Buckets(3) with {
-      MaxClosedQueries = 24,
       ClosedQueryTimeout = 3000
     };
 

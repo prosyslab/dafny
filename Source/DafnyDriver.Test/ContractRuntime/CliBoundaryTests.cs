@@ -38,7 +38,7 @@ public class CliBoundaryTests {
   [Fact]
   public async Task CliPreservesSeedOnGeneratorFailure() {
     const string generator = "method {:pbt_generator \"M.Goal\"} Generate(r:PbtRandom.Source) returns(x:bool) { x:=false; }";
-    var (_, result) = await RunCli(_ => new(1, [Campaign.Source("M.dfy", "module M { method Goal(x:int) {} }")],
+    var (_, result) = await RunCli(_ => new(2, [Campaign.Source("M.dfy", "module M { method Goal(x:int) {} }")],
       new("M.Goal"), "17", Generator: Campaign.Source("G.dfy", generator)), 30);
     Assert.Equal("17", result.Seed);
     Assert.Equal(ContractRuntimeStatus.Unsupported, result.Status);
@@ -51,7 +51,7 @@ public class CliBoundaryTests {
     var (process, result) = await RunCli(directory => {
       var dependencyPath = Path.Combine(directory, "BrokenDependency.cs");
       File.WriteAllText(dependencyPath, dependency);
-      return new(1, [Campaign.Source("M.dfy", "module M { method Goal(x:int) ensures true {} }")], new("M.Goal"), "17",
+      return new(2, [Campaign.Source("M.dfy", "module M { method Goal(x:int) ensures true {} }")], new("M.Goal"), "17",
         Dependencies: [new(dependencyPath, Campaign.Hash(dependency))],
         Generator: Campaign.Source("G.dfy", ConstantGenerator), SampleCount: 1);
     }, 60);

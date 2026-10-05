@@ -17,14 +17,15 @@ public class UndecidedObligationsTests : IClassFixture<UndecidedObligationsTests
 
   public UndecidedObligationsTests(Fixture fixture) { }
 
-  // Valid samples that decide no goal obligation are inconclusive rather than violation-free.
+  // Native decisions of erased and quantified goal clauses expose violations in valid samples.
   [Fact]
-  public async Task ValidSamplesWithoutDecisionsAreInconclusive() {
+  public async Task ClosedClausesDecideValidSamples() {
     var run = await Campaign.RunAsync(Main);
-    Assert.True(run.Result is { Status: ContractRuntimeStatus.Inconclusive, Reason: "No goal obligation was decided in a valid sample." },
+    Assert.True(run.Result is { Status: ContractRuntimeStatus.ViolationFound },
       run.Detail());
     Assert.Equal(Main.SampleCount, run.Population.Valid);
-    Assert.Empty(run.Result.Violations);
+    Assert.NotEmpty(run.Violations(3));
+    Assert.NotEmpty(run.Violations(4));
   }
 
   // A ghost-method-produced local stays unavailable; the executed samples are valid but decide no goal obligation.
@@ -53,20 +54,14 @@ public class UndecidedObligationsTests : IClassFixture<UndecidedObligationsTests
     Assert.Contains(run.Result.DeghostExclusions, exclusion => exclusion.Symbol == "M.Choose");
   }
 
-  // Without a closed-query budget an erased check leaves valid samples undecided rather than violation-free.
+  // An erased check is decided by its original closed query while runtime evaluations remain zero.
   [Fact]
-  public async Task ErasedCheckWithoutBudgetIsUndecided() {
+  public async Task ErasedCheckUsesClosedQuery() {
     var run = await Campaign.RunAsync(Main);
     var obligation = run.Obligation("d != C && d != A");
     Assert.Equal(0, obligation.Evaluations.Runtime);
-    Assert.Equal(Main.SampleCount, obligation.Evaluations.Unchecked);
+    Assert.Equal(Main.SampleCount, obligation.Evaluations.ClosedSmt);
+    Assert.NotEmpty(run.Violations(3));
   }
 
-  // An unbounded quantified clause remains unchecked when the closed-query budget is zero.
-  [Fact]
-  public async Task ReportsClosedQueryBudget() {
-    var obligation = (await Campaign.RunAsync(Main)).Obligation("forall n: int :: n <= x");
-    Assert.Equal("closed_query_budget_exhausted", obligation.UncheckedReason);
-    Assert.Equal(Main.SampleCount, obligation.Evaluations.Unchecked);
-  }
 }

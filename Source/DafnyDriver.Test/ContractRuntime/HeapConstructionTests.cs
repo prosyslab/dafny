@@ -12,13 +12,13 @@ namespace DafnyDriver.Test.ContractRuntime;
 public class HeapConstructionTests : IClassFixture<HeapConstructionTests.Fixture> {
   private const string File = "HeapConstruction";
 
-  private static CampaignSpec Heap(string section, int queries) =>
-    CampaignSpec.Fixture(File, section, "Client.Goal") with { MaxClosedQueries = queries, ClosedQueryTimeout = 3000 };
+  private static CampaignSpec Heap(string section) =>
+    CampaignSpec.Fixture(File, section, "Client.Goal") with { ClosedQueryTimeout = 3000 };
 
-  private static readonly CampaignSpec FixedList = Heap("FixedList", 48).Buckets(3);
-  private static readonly CampaignSpec MutatedList = Heap("MutatedList", 16);
-  private static readonly CampaignSpec NestedPaths = Heap("NestedPaths", 12).Buckets(2);
-  private static readonly CampaignSpec ClassOnly = Heap("ClassOnly", 6);
+  private static readonly CampaignSpec FixedList = Heap("FixedList").Buckets(3);
+  private static readonly CampaignSpec MutatedList = Heap("MutatedList");
+  private static readonly CampaignSpec NestedPaths = Heap("NestedPaths").Buckets(2);
+  private static readonly CampaignSpec ClassOnly = Heap("ClassOnly");
 
   public sealed class Fixture : CampaignFixture {
     protected override IEnumerable<CampaignSpec> Campaigns() => [FixedList, MutatedList, NestedPaths, ClassOnly];

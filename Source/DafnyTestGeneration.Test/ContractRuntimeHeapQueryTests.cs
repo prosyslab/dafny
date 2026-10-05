@@ -831,7 +831,7 @@ public class ContractRuntimeHeapQueryTests {
     var reporter = new BatchErrorReporter(options);
     var program = await ContractSourceSnapshot.ParseAsync(reporter, snapshots, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
-    return (program, new ContractRuntimeCampaignRequest(1, snapshots, new ContractEntry(entry), "heap-query"));
+    return (program, new ContractRuntimeCampaignRequest(2, snapshots, new ContractEntry(entry), "heap-query"));
   }
 
   private static Task<ContractQueryResult> Check(ContractRuntimeHeapCheck check, ContractQueryKind kind,

@@ -12,7 +12,7 @@ public class ContractRuntimeObligationTests {
   // Runtime requests preserve generator content and replay identity over the public wire format.
   [Fact]
   public void RequestRoundTrips() {
-    var request = new ContractRuntimeCampaignRequest(1, [new("M.dfy", "method M() {}", "hash")],
+    var request = new ContractRuntimeCampaignRequest(2, [new("M.dfy", "method M() {}", "hash")],
       new("M"), "18446744073709551615", Generator: new("G.dfy", "generator", "hash"), ReplayOrdinal: 9);
     var json = JsonSerializer.Serialize(request, ContractJson.Options);
     var copy = JsonSerializer.Deserialize<ContractRuntimeCampaignRequest>(json, ContractJson.Options)!;
@@ -25,7 +25,7 @@ public class ContractRuntimeObligationTests {
   [Fact]
   public void RequestRejectsUnknownField() {
     Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<ContractRuntimeCampaignRequest>(
-      "{\"schemaVersion\":1,\"sources\":[],\"entry\":{\"symbol\":\"M\"},\"seed\":\"1\",\"unexpected\":true}", ContractJson.Options));
+      "{\"schemaVersion\":2,\"sources\":[],\"entry\":{\"symbol\":\"M\"},\"seed\":\"1\",\"unexpected\":true}", ContractJson.Options));
   }
 
   // Runtime result enums and all population denominators retain their canonical serialized names.

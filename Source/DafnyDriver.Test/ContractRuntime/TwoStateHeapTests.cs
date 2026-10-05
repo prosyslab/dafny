@@ -14,25 +14,18 @@ namespace DafnyDriver.Test.ContractRuntime;
 public class TwoStateHeapTests : IClassFixture<TwoStateHeapTests.Fixture> {
   private const string File = "TwoStateHeap";
   private static readonly CampaignSpec Main = CampaignSpec.Fixture(File, "Main", "Client.Goal").Buckets(4) with {
-    MaxClosedQueries = 24,
-    ClosedQueryTimeout = 3000
-  };
-  private static readonly CampaignSpec Budget = CampaignSpec.Fixture(File, "Budget", "Client.Goal") with {
-    MaxClosedQueries = 1,
     ClosedQueryTimeout = 3000
   };
   private static readonly CampaignSpec Observed = CampaignSpec.Fixture(File, "Observed", "Client.Goal").Buckets(3) with {
-    MaxClosedQueries = 30,
     ClosedQueryTimeout = 3000
   };
   private static readonly CampaignSpec CertifiedSpecification =
     CampaignSpec.Fixture(File, "CertifiedSpecification", "Client.Goal").Buckets(2) with {
-      MaxClosedQueries = 12,
       ClosedQueryTimeout = 3000
     };
 
   public sealed class Fixture : CampaignFixture {
-    protected override IEnumerable<CampaignSpec> Campaigns() => [Main, Budget, Observed, CertifiedSpecification];
+    protected override IEnumerable<CampaignSpec> Campaigns() => [Main, Observed, CertifiedSpecification];
   }
 
   public TwoStateHeapTests(Fixture fixture) { }
@@ -96,15 +89,6 @@ public class TwoStateHeapTests : IClassFixture<TwoStateHeapTests.Fixture> {
     var obligation = run.Obligation(Changed, Postcondition);
     Assert.Equal(CampaignSpec.BucketSize, obligation.Evaluations.Unchecked);
     Assert.Equal("callee_contract_unvalidated", obligation.UncheckedReason);
-  }
-
-  // Consistency queries consume the same finite budget and cannot be counted as a decided postcondition.
-  [Fact]
-  public async Task HeapQueryBudgetExhaustionRemainsUnchecked() {
-    var run = await Campaign.RunAsync(Budget);
-    Assert.Equal(ContractRuntimeStatus.Inconclusive, run.Result.Status);
-    Assert.Empty(run.Result.Violations);
-    Assert.Contains(run.Result.Obligations, obligation => obligation.UncheckedReason == "closed_query_budget_exhausted");
   }
 
   // Explicit initial construction and exact final memberships preserve both original two-state polarities.

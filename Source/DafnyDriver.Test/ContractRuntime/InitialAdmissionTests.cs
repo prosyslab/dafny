@@ -13,45 +13,43 @@ namespace DafnyDriver.Test.ContractRuntime;
 public class InitialAdmissionTests : IClassFixture<InitialAdmissionTests.Fixture> {
   private const string File = "InitialAdmission";
 
-  private static CampaignSpec Heap(string section, int queries, int buckets = 0) {
-    var spec = CampaignSpec.Fixture(File, section, "Client.Goal") with { MaxClosedQueries = queries, ClosedQueryTimeout = 3000 };
+  private static CampaignSpec Heap(string section, int buckets = 0) {
+    var spec = CampaignSpec.Fixture(File, section, "Client.Goal") with { ClosedQueryTimeout = 3000 };
     return buckets == 0 ? spec : spec.Buckets(buckets);
   }
 
   private static string ReadDraft(string method, string body) =>
     "method {:pbt_draft \"Store.Cell." + method + "\"} " + method + "() returns (result: int) { result := " + body + "; }";
 
-  private static readonly CampaignSpec Store = Heap("Store", 32, 4).WithDrafts(
+  private static readonly CampaignSpec Store = Heap("Store", 4).WithDrafts(
     ("Store.Cell.ReadValue", ReadDraft("ReadValue", "Read()")),
     ("Store.Cell.ReadWrong", ReadDraft("ReadWrong", "Read() + 2")),
     ("Store.Cell.ReadEven", ReadDraft("ReadEven", "Read() + 0")),
     ("Store.Cell.ReadOdd", ReadDraft("ReadOdd", "Read() + 1")));
-  private static readonly CampaignSpec OmittedByDraft = Heap("OmittedByDraft", 6)
+  private static readonly CampaignSpec OmittedByDraft = Heap("OmittedByDraft")
     .WithDrafts(("Store.Cell.ReadValue", ReadDraft("ReadValue", "Read() + unused")));
   private static readonly CampaignSpec UncallableConstructor = CampaignSpec.Fixture(File, "UncallableConstructor").Buckets(2);
-  private static readonly CampaignSpec EmptyGlobal = Heap("EmptyGlobal", 10);
-  private static readonly CampaignSpec EmptyGlobalInitializer = Heap("EmptyGlobalInitializer", 10);
-  private static readonly CampaignSpec DatatypeConstant = Heap("DatatypeConstant", 0);
-  private static readonly CampaignSpec PlainDatatype = Heap("PlainDatatype", 0);
-  private static readonly CampaignSpec NegativeConstant = Heap("NegativeConstant", 6);
-  private static readonly CampaignSpec UndefinedConstant = Heap("UndefinedConstant", 6);
-  private static readonly CampaignSpec ValidConstant = Heap("ValidConstant", 6);
-  private static readonly CampaignSpec TypedGhostField = Heap("TypedGhostField", 0, 3);
-  private static readonly CampaignSpec CyclicTree = Heap("CyclicTree", 0, 2);
-  private static readonly CampaignSpec NegativeResidual = Heap("NegativeResidual", 2);
-  private static readonly CampaignSpec UnbudgetedResidual = HeapProofReuseTests.PositiveCell with { MaxClosedQueries = 0 };
-  private static readonly CampaignSpec RefinedRoot = Heap("RefinedRoot", 2, 2);
-  private static readonly CampaignSpec PlainFunctionWellDefinedness = Heap("PlainFunctionWellDefinedness", 2);
-  private static readonly CampaignSpec ConstraintCallee = Heap("ConstraintCallee", 6);
-  private static readonly CampaignSpec HigherOrderConstraintCallee = Heap("HigherOrderConstraintCallee", 6);
-  private static readonly CampaignSpec EmptyOmittedField = Heap("EmptyOmittedField", 2);
-  private static readonly CampaignSpec PositiveOmittedField = Heap("PositiveOmittedField", 2);
-  private static readonly CampaignSpec UnbudgetedOmittedField = Heap("PositiveOmittedField", 0);
-  private static readonly CampaignSpec OrdinaryArrowOmission = Heap("OrdinaryArrowOmission", 0);
-  private static readonly CampaignSpec RefinedArrowOmission = Heap("RefinedArrowOmission", 0);
-  private static readonly CampaignSpec ValidWitness = Heap("ValidWitness", 1);
-  private static readonly CampaignSpec InvalidWitness = Heap("InvalidWitness", 1);
-  private static readonly CampaignSpec NestedEmptyOmission = Heap("NestedEmptyOmission", 6);
+  private static readonly CampaignSpec EmptyGlobal = Heap("EmptyGlobal");
+  private static readonly CampaignSpec EmptyGlobalInitializer = Heap("EmptyGlobalInitializer");
+  private static readonly CampaignSpec DatatypeConstant = Heap("DatatypeConstant");
+  private static readonly CampaignSpec PlainDatatype = Heap("PlainDatatype");
+  private static readonly CampaignSpec NegativeConstant = Heap("NegativeConstant");
+  private static readonly CampaignSpec UndefinedConstant = Heap("UndefinedConstant");
+  private static readonly CampaignSpec ValidConstant = Heap("ValidConstant");
+  private static readonly CampaignSpec TypedGhostField = Heap("TypedGhostField", 3);
+  private static readonly CampaignSpec CyclicTree = Heap("CyclicTree", 2);
+  private static readonly CampaignSpec NegativeResidual = Heap("NegativeResidual");
+  private static readonly CampaignSpec RefinedRoot = Heap("RefinedRoot", 2);
+  private static readonly CampaignSpec PlainFunctionWellDefinedness = Heap("PlainFunctionWellDefinedness");
+  private static readonly CampaignSpec ConstraintCallee = Heap("ConstraintCallee");
+  private static readonly CampaignSpec HigherOrderConstraintCallee = Heap("HigherOrderConstraintCallee");
+  private static readonly CampaignSpec EmptyOmittedField = Heap("EmptyOmittedField");
+  private static readonly CampaignSpec PositiveOmittedField = Heap("PositiveOmittedField");
+  private static readonly CampaignSpec OrdinaryArrowOmission = Heap("OrdinaryArrowOmission");
+  private static readonly CampaignSpec RefinedArrowOmission = Heap("RefinedArrowOmission");
+  private static readonly CampaignSpec ValidWitness = Heap("ValidWitness");
+  private static readonly CampaignSpec InvalidWitness = Heap("InvalidWitness");
+  private static readonly CampaignSpec NestedEmptyOmission = Heap("NestedEmptyOmission");
 
   public sealed class Fixture : CampaignFixture {
     protected override IEnumerable<CampaignSpec> Campaigns() => [Store,
@@ -67,7 +65,6 @@ public class InitialAdmissionTests : IClassFixture<InitialAdmissionTests.Fixture
       TypedGhostField,
       CyclicTree,
       NegativeResidual,
-      UnbudgetedResidual,
       HeapProofReuseTests.PositiveCell,
       RefinedRoot,
       PlainFunctionWellDefinedness,
@@ -75,7 +72,6 @@ public class InitialAdmissionTests : IClassFixture<InitialAdmissionTests.Fixture
       HigherOrderConstraintCallee,
       EmptyOmittedField,
       PositiveOmittedField,
-      UnbudgetedOmittedField,
       OrdinaryArrowOmission,
       RefinedArrowOmission,
       ValidWitness,
@@ -192,7 +188,7 @@ public class InitialAdmissionTests : IClassFixture<InitialAdmissionTests.Fixture
     Assert.Equal(2 * CampaignSpec.BucketSize, run.Population.PreconditionRejected);
   }
 
-  // A nullable reference cycle does not hide invalid nested datatype fields or consume solver budget.
+  // A nullable reference cycle does not hide invalid nested datatype fields or require redundant solver queries.
   [Theory]
   [InlineData(0, false)]
   [InlineData(1, true)]
@@ -210,9 +206,8 @@ public class InitialAdmissionTests : IClassFixture<InitialAdmissionTests.Fixture
   [Theory]
   [InlineData("negative value", false)]
   [InlineData("positive value", true)]
-  [InlineData("positive value without budget", false)]
   public async Task ValidatesResidualInitialFieldConstraint(string row, bool valid) {
-    var spec = row.StartsWith("negative") ? NegativeResidual : row.EndsWith("budget") ? UnbudgetedResidual : HeapProofReuseTests.PositiveCell;
+    var spec = row.StartsWith("negative") ? NegativeResidual : HeapProofReuseTests.PositiveCell;
     await AssertAdmission(spec, valid);
   }
 
@@ -248,9 +243,8 @@ public class InitialAdmissionTests : IClassFixture<InitialAdmissionTests.Fixture
   [Theory]
   [InlineData("empty refinement", false)]
   [InlineData("positive refinement", true)]
-  [InlineData("positive refinement without budget", false)]
   public async Task ValidatesOmittedRefinedGhostField(string row, bool valid) {
-    var spec = row.StartsWith("empty") ? EmptyOmittedField : row.EndsWith("budget") ? UnbudgetedOmittedField : PositiveOmittedField;
+    var spec = row.StartsWith("empty") ? EmptyOmittedField : PositiveOmittedField;
     await AssertAdmission(spec, valid);
   }
 

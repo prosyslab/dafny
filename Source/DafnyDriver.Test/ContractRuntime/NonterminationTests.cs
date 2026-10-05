@@ -28,8 +28,8 @@ public class NonterminationTests : IClassFixture<NonterminationTests.Fixture> {
     var run = await Campaign.RunAsync(Main);
     const int size = CampaignSpec.BucketSize;
     Assert.True(run.Population == new ContractRuntimePopulation(Generated: Main.SampleCount, PreconditionRejected: size,
-      Executed: Main.SampleCount - size, Valid: 2 * size, CalleeContractViolations: size, CalleeContractUnchecked: size,
-      Timeouts: size, ViolatingSamples: 2 * size), run.Detail());
+      Executed: Main.SampleCount - size, Valid: 3 * size, CalleeContractViolations: size,
+      Timeouts: size, ViolatingSamples: 3 * size), run.Detail());
   }
 
   // A failed invariant remains a counterexample when the valid execution never returns.
@@ -65,14 +65,14 @@ public class NonterminationTests : IClassFixture<NonterminationTests.Fixture> {
     Assert.Empty(Certificates(run, 2));
   }
 
-  // An undecidable helper contract before the invariant failure cannot be skipped.
+  // A natively certified helper contract permits the later invariant counterexample.
   [Fact]
-  public async Task ExcludesUncheckedEarlierCallee() {
+  public async Task CertifiesClosedEarlierCallee() {
     var run = await Campaign.RunAsync(Main);
-    Assert.Empty(run.Violations(3));
+    run.AssertViolated(3, "tag != 3", ContractRuntimeObligationKind.LoopInvariantEntry);
     Assert.Empty(run.CalleeViolations(3));
     Assert.Empty(run.Errors(3));
-    Assert.Empty(Certificates(run, 3));
+    Assert.Equal(CampaignSpec.BucketSize, Certificates(run, 3).Count());
   }
 
   // A helper failure after the invariant endpoint cannot invalidate an earlier valid counterexample.

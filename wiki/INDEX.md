@@ -1,5 +1,7 @@
 # Implementation knowledge
 
+2026-10-04: [agent query-count removal](contract-testing.md#agent-query-count-removal-2026-10-04) uses request schema2 and time-only phase allocation; all verifier timeouts retained, native checks in progress.
+
 2026-10-03: [shared-campaign runtime test pattern](contract-testing.md#shared-campaign-runtime-test-pattern-2026-10-03-implementation-checks) merges DafnyDriver runtime tests onto bucketed fixture campaigns (220 -> 70 compiles, 10 min -> 84 s, coverage preserved); implementation checks only, independent verification pending.
 
 2026-10-03: [legacy fixed-input removal](contract-testing.md#legacy-fixed-input-removal-2026-10-03-implementation-checks) leaves `test-contracts --runtime-check` as the only mode; fixed-input, generation and symbolic sections are marked STALE. Implementation checks only, independent verification pending.

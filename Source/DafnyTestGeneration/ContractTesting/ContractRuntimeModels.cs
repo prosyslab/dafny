@@ -11,7 +11,7 @@ public sealed record ContractRuntimeDraft(string Symbol, string Path, string Con
 public sealed record ContractRuntimeCampaignRequest(int SchemaVersion, IReadOnlyList<ContractSource> Sources,
   ContractEntry Entry, string Seed, IReadOnlyList<ContractDependency>? Dependencies = null,
   IReadOnlyList<ContractRuntimeDraft>? Drafts = null, ContractSource? Generator = null, int SampleCount = 64,
-  int SampleTimeoutMilliseconds = 5000, int TimeoutMilliseconds = 240000, int MaxClosedQueries = 16,
+  int SampleTimeoutMilliseconds = 5000, int TimeoutMilliseconds = 240000,
   int ClosedQueryTimeoutMilliseconds = 10000, int MaxViolationsPerObligation = 3, int? ReplayOrdinal = null);
 public sealed record ContractRuntimePopulation(int Generated = 0, int PreconditionRejected = 0,
   int PreconditionUnchecked = 0, int Executed = 0, int Valid = 0, int CalleeContractViolations = 0,
