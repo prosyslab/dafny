@@ -1166,6 +1166,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
     }
 
     internal void PrintDecreasesSpec(Specification<Expression> decs, int indent) {
+      if (options.Get(SimplifyOptionBag.StripVerificationClauses)) { return; }
       Contract.Requires(decs != null);
       if (printMode == PrintModes.NoGhostOrIncludes) {
         return;
@@ -1182,6 +1183,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
     }
 
     internal void PrintFrameSpecLine(string kind, Specification<FrameExpression> ee, int indent) {
+      if (options.Get(SimplifyOptionBag.StripVerificationClauses)) { return; }
       Contract.Requires(kind != null);
       Contract.Requires(ee != null);
       if (ee != null && ee.Expressions != null && ee.Expressions.Count != 0) {
@@ -1196,6 +1198,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
     }
 
     internal void PrintSpec(string kind, List<AttributedExpression> ee, int indent) {
+      if (options.Get(SimplifyOptionBag.StripVerificationClauses)) { return; }
       Contract.Requires(kind != null);
       Contract.Requires(ee != null);
       if (printMode == PrintModes.NoGhostOrIncludes) { return; }

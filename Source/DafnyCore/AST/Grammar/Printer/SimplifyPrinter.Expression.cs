@@ -1346,21 +1346,23 @@ namespace Microsoft.Dafny {
           wr.Write(")");
         }
 
-        if (e.Range != null) {
+        if (!options.Get(SimplifyOptionBag.StripVerificationClauses) && e.Range != null) {
           wr.Write(" requires ");
           PrintExpression(e.Range, false);
         }
 
-        var firstReadsExpression = true;
-        foreach (var read in e.Reads.Expressions) {
-          if (firstReadsExpression) {
-            PrintAttributes(e.Reads.Attributes, indent, () => { wr.Write(" reads "); });
-            firstReadsExpression = false;
-          } else {
-            wr.Write(", ");
-          }
+        if (!options.Get(SimplifyOptionBag.StripVerificationClauses)) {
+          var firstReadsExpression = true;
+          foreach (var read in e.Reads.Expressions) {
+            if (firstReadsExpression) {
+              PrintAttributes(e.Reads.Attributes, indent, () => { wr.Write(" reads "); });
+              firstReadsExpression = false;
+            } else {
+              wr.Write(", ");
+            }
 
-          PrintExpression(read.E, false);
+            PrintExpression(read.E, false);
+          }
         }
 
         wr.Write(" => ");

@@ -168,7 +168,7 @@ namespace Microsoft.Dafny {
                             (s.Decreases.Expressions != null && s.Decreases.Expressions.Count != 0) ||
                             s.Mod.Expressions != null;
             if (s.UsesOptionalBraces) {
-              if (hasSpecs) {
+              if (hasSpecs && !options.Get(SimplifyOptionBag.StripVerificationClauses)) {
                 wr.WriteLine();
                 Indent(indent);
               } else {
@@ -209,7 +209,7 @@ namespace Microsoft.Dafny {
               }
               PrintSpec("ensures", s.Ens, indent + IndentAmount);
               if (s.Body != null) {
-                if (s.Ens.Count == 0) {
+                if (options.Get(SimplifyOptionBag.StripVerificationClauses) || s.Ens.Count == 0) {
                   wr.Write(" ");
                 } else {
                   wr.WriteLine();
@@ -710,7 +710,8 @@ namespace Microsoft.Dafny {
         Indent(indent + IndentAmount);
         wr.Write("...;");
       } else if (s.Body != null) {
-        if (s.Invariants.Count == 0 && s.Decreases.Expressions.Count == 0 && (s.Mod.Expressions == null || s.Mod.Expressions.Count == 0)) {
+        if (options.Get(SimplifyOptionBag.StripVerificationClauses) ||
+            (s.Invariants.Count == 0 && s.Decreases.Expressions.Count == 0 && (s.Mod.Expressions == null || s.Mod.Expressions.Count == 0))) {
           wr.Write(" ");
         } else {
           wr.WriteLine();
@@ -774,7 +775,8 @@ namespace Microsoft.Dafny {
         PrintFrameSpecLine("modifies", s.Mod, indent + IndentAmount);
       }
       if (s.Body != null) {
-        if (s.Invariants.Count == 0 && s.Decreases.Expressions.Count == 0 && (s.Mod.Expressions == null || s.Mod.Expressions.Count == 0)) {
+        if (options.Get(SimplifyOptionBag.StripVerificationClauses) ||
+            (s.Invariants.Count == 0 && s.Decreases.Expressions.Count == 0 && (s.Mod.Expressions == null || s.Mod.Expressions.Count == 0))) {
           wr.Write(" ");
         } else {
           wr.WriteLine();

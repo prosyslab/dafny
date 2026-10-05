@@ -11,7 +11,8 @@ using Microsoft.Dafny.Compilers;
 namespace Microsoft.Dafny;
 
 public class SimplifyOptionBag {
-  public static readonly Option<bool> All = new("--all", "Apply all transformations.") { };
+  public static readonly Option<bool> All = new("--all", "Apply all simplifications except verification clause stripping.") { };
+  public static readonly Option<bool> StripVerificationClauses = new("--strip-verification-clauses", "Remove requires, ensures, invariant, reads, modifies, decreases, and yield contracts; retain proof statements and ghost code. Not enabled by --all.");
   public static readonly Option<bool> NoAttribute = new("--no-attribute", "Remove attributes.") { };
   public static readonly Option<bool> ExplicitEmptyBlock = new("--explicit-empty-block", "Explicitly add {} for empty block.") { };
   public static readonly Option<bool> ExplicitCardinality = new("--explicit-cardinality", "Explicitly add parentheses for cardinality expression.") { };
@@ -25,6 +26,7 @@ public class SimplifyOptionBag {
 
   static SimplifyOptionBag() {
     OptionRegistry.RegisterOption(All, OptionScope.Cli);
+    OptionRegistry.RegisterOption(StripVerificationClauses, OptionScope.Cli);
     OptionRegistry.RegisterOption(NoAttribute, OptionScope.Cli);
     OptionRegistry.RegisterOption(ExplicitEmptyBlock, OptionScope.Cli);
     OptionRegistry.RegisterOption(ExplicitCardinality, OptionScope.Cli);

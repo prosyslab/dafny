@@ -15,6 +15,7 @@ public static class SimplifyCommand {
 
   public static IEnumerable<Option> Options => new Option[] {
     SimplifyOptionBag.All,
+    SimplifyOptionBag.StripVerificationClauses,
     SimplifyOptionBag.NoAttribute,
     SimplifyOptionBag.ExplicitEmptyBlock,
     SimplifyOptionBag.ExplicitCardinality,
