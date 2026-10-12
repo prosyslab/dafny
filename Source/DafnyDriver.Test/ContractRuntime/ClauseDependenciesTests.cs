@@ -116,4 +116,37 @@ public class ClauseDependenciesTests : IClassFixture<ClauseDependenciesTests.Fix
     Assert.Null(ContractRuntimeClauseDependencies.OriginalExpression(original, sources,
       clause with { Obligation = obligation with { Kind = LoopInvariantEntry } }));
   }
+
+  // Original assertions are recovered only from the exact target source location, text and hashes.
+  [Fact]
+  public async Task MapsOnlyExactOriginalTargetAssertion() {
+    const string source = "module M { method Goal(x:int) { assert x > 0; } }";
+    ContractSource[] sources = [Campaign.Source("M.dfy", source)];
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    var reporter = new BatchErrorReporter(options);
+    var original = await ContractSourceSnapshot.ParseAsync(reporter, sources, CancellationToken.None);
+    Assert.Equal(0, reporter.ErrorCount);
+    var detached = await ContractSourceSnapshot.ParseAsync(reporter, sources, CancellationToken.None);
+    Assert.Equal(0, reporter.ErrorCount);
+    var owner = ContractRuntimeObligationTransformer.Members(detached).OfType<Method>().Single();
+    var assertion = owner.Body!.Descendants().OfType<AssertStmt>().Single();
+    var obligation = new ContractRuntimeObligation("clause", Assertion, "M.dfy", assertion.Expr.Origin.line,
+      assertion.Expr.Origin.col, "x > 0", null, ContractRuntimeDecisionMethod.ClosedSmt, null, new());
+    var clause = new ContractRuntimeClause(obligation, assertion.Expr, [], owner,
+      OriginalSourceHash: sources[0].Sha256, OriginalSourceSetHash: ContractRuntimeTypeEvidence.SourceSetHash(sources));
+
+    var mapped = ContractRuntimeClauseDependencies.OriginalExpression(original, sources, clause);
+
+    Assert.Same(ContractRuntimeObligationTransformer.Members(original).OfType<Method>().Single()
+      .Body!.Descendants().OfType<AssertStmt>().Single().Expr, mapped);
+    Assert.Null(ContractRuntimeClauseDependencies.OriginalExpression(original, sources,
+      clause with { OriginalSourceHash = "wrong" }));
+    Assert.Null(ContractRuntimeClauseDependencies.OriginalExpression(original, sources,
+      clause with { Obligation = obligation with { Column = obligation.Column + 1 } }));
+    Assert.Null(ContractRuntimeClauseDependencies.OriginalExpression(original, sources,
+      clause with { Obligation = obligation with { Clause = "x >= 0" } }));
+    Assert.Null(ContractRuntimeClauseDependencies.OriginalExpression(original, sources,
+      clause with { Obligation = obligation with { Kind = Postcondition } }));
+  }
 }

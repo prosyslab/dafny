@@ -40,6 +40,10 @@ public sealed class ContractSpecificationScope {
   public string? Failure { get; }
   public IReadOnlyList<string> Symbols => Declarations.Select(declaration => declaration.GetType().Name + ":" +
     ContractSpecificationChecker.Name(declaration)).OrderBy(name => name, StringComparer.Ordinal).ToList();
+
+  /// <summary>Tests membership by original declaration identity, without accepting a same-named detached declaration.</summary>
+  public bool ContainsDeclaration(Declaration declaration) => Declarations.Contains(declaration);
+
   internal ContractSpecificationScope(ContractSpecificationChecker owner, string context, ContractSpecificationRole role,
     HashSet<Declaration> declarations, HashSet<ContractSpecificationCheck> checks, string? failure) {
     Owner = owner;

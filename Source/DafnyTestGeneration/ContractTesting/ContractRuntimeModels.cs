@@ -3,7 +3,7 @@ using System.Collections.Generic;
 namespace DafnyTestGeneration.ContractTesting;
 
 public enum ContractRuntimeStatus { ViolationFound, NoViolationFound, DraftsRequired, GeneratorRequired, Inconclusive, Unsupported, Error }
-public enum ContractRuntimeObligationKind { Postcondition, LoopInvariantEntry, LoopInvariantMaintenance, CallPrecondition, EntryPrecondition, CalleePostcondition }
+public enum ContractRuntimeObligationKind { Postcondition, Assertion, LoopInvariantEntry, LoopInvariantMaintenance, CallPrecondition, EntryPrecondition, CalleePostcondition }
 public enum ContractRuntimeDecisionMethod { Runtime, ClosedSmt, Unchecked }
 public enum ContractRuntimeDraftKind { Method, Function, ExternMethod }
 

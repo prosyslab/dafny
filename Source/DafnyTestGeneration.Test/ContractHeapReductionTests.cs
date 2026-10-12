@@ -11,6 +11,163 @@ using Xunit;
 namespace DafnyTestGeneration.Test;
 
 public class ContractHeapReductionTests {
+  // Checked pure witnesses after projection retain the complete original target, including a false conjunct.
+  [Theory]
+  [InlineData("old(c.value) == 1", ContractQueryOutcome.Unsat)]
+  [InlineData("old(c.value) == 2", ContractQueryOutcome.Sat)]
+  public async Task ProjectedHeapComposesCheckedPureWitnesses(string suffix, ContractQueryOutcome expected) {
+    var result = await Check("class Cell { var value:int } " +
+      "predicate Leaf(value:int) { exists items:seq<int> :: items == [value] && |items| == 1 } " +
+      "predicate Middle(value:int) { Leaf(value) } predicate Outer(value:int) { Middle(value) } " +
+      "method ContractDiagnosticQuery(c:Cell) requires c.value == 1 modifies c { c.value := 3; " +
+      "assert {:error \"contract_query_target\"} Outer(c.value) && " + suffix + "; }");
+    Assert.True(result.Outcome == expected, result.Diagnostics);
+    Assert.Contains("addedCheckedEquivalences=1", result.Diagnostics);
+    Assert.DoesNotContain("addedCheckedProofSteps=0", result.Diagnostics);
+  }
+
+  // Explicit reveals accompany the pure prerequisite evaluator without supplying any additional heap facts.
+  [Theory]
+  [InlineData("reveal Leaf();", ContractQueryOutcome.Unsat)]
+  [InlineData("", ContractQueryOutcome.Sat)]
+  public async Task ProjectedPureCompositionPreservesOpaqueVisibility(string reveal, ContractQueryOutcome expected) {
+    var result = await Check("class Cell { var value:int } " +
+      "opaque predicate Leaf(value:int) { exists items:seq<int> :: items == [value] && |items| == 1 } " +
+      "predicate Middle(value:int) { Leaf(value) } predicate Outer(value:int) { Middle(value) } " +
+      "method ContractDiagnosticQuery(c:Cell) requires c.value == 1 modifies c { " + reveal + " c.value := 3; " +
+      "assert {:error \"contract_query_target\"} Outer(c.value); }");
+    Assert.True(result.Outcome == expected, result.Diagnostics);
+    if (reveal.Length > 0) { Assert.DoesNotContain("addedCheckedProofSteps=0", result.Diagnostics); }
+  }
+
+  // Propagated pure-call preconditions remain native target WD obligations after heap projection.
+  [Theory]
+  [InlineData(0, ContractQueryOutcome.Error)]
+  [InlineData(1, ContractQueryOutcome.Unsat)]
+  public async Task ProjectedPureWitnessRetainsDefinednessFailure(int value, ContractQueryOutcome expected) {
+    var result = await Check("class Cell { var value:int } function Partial(x:int):int requires x > 0 { x } " +
+      "predicate Leaf(value:int) requires value > 0 { " +
+      "exists items:seq<int> :: items == [] && Partial(value) == value } " +
+      "predicate Middle(value:int) requires value > 0 { Leaf(value) } " +
+      "predicate Outer(value:int) requires value > 0 { Middle(value) } " +
+      "method ContractDiagnosticQuery(c:Cell) requires c.value == 1 modifies c { c.value := " + value + "; " +
+      "assert {:error \"contract_query_target\"} Outer(c.value); }");
+    Assert.True(result.Outcome == expected, result.Diagnostics);
+    Assert.Contains("addedCheckedEquivalences=1", result.Diagnostics);
+  }
+
+  // Added proof steps preserve original command identities, target expression and its source metadata.
+  [Fact]
+  public async Task ComposedHeapProjectionPreservesResolvedOriginalIdentities() {
+    var (program, method) = await Parse("class Cell { var value:int } " +
+      "predicate Leaf(value:int) { exists items:seq<int> :: items == [value] && |items| == 1 } " +
+      "predicate Middle(value:int) { Leaf(value) } predicate Outer(value:int) { Middle(value) } " +
+      "method ContractDiagnosticQuery(c:Cell) requires c.value == 1 modifies c { c.value := 3; " +
+      "assert {:error \"contract_query_target\"} Outer(c.value); }");
+    var originals = method.Body!.Body.ToArray();
+    var target = (AssertStmt)originals[^1];
+    var expression = target.Expr;
+    var origin = target.Origin;
+    var attributes = target.Attributes;
+    using var log = new StringWriter();
+    Assert.True(ContractQueryHeapReduction.TryApply(program, method, log));
+    Assert.True(method.Body.Body.Except(originals).Count() > 1);
+    Assert.Equal(originals, method.Body.Body.Where(originals.Contains));
+    Assert.All(method.Body.Body.Except(originals), statement => Assert.IsType<AssertStmt>(statement));
+    Assert.Same(expression, target.Expr);
+    Assert.Same(origin, target.Origin);
+    Assert.Same(attributes, target.Attributes);
+  }
+
+  // Cancellation at the final heap boundary publishes neither proof statements nor a replacement target.
+  [Fact]
+  public async Task HeapCancellationPreservesOriginalStatementsAtomically() {
+    const string source = "class Cell { var value:int } " +
+      "predicate Leaf(value:int) { exists items:seq<int> :: items == [value] && |items| == 1 } " +
+      "predicate Outer(value:int) { Leaf(value) } " +
+      "method ContractDiagnosticQuery(c:Cell) requires c.value == 1 modifies c { c.value := 3; " +
+      "assert {:error \"contract_query_target\"} Outer(c.value); }";
+    var (baselineProgram, baselineMethod) = await Parse(source);
+    var totalChecks = 0;
+    using (var baselineLog = new StringWriter()) {
+      Assert.True(ContractQueryHeapReduction.TryApply(baselineProgram, baselineMethod, baselineLog,
+        () => totalChecks++));
+    }
+    var (program, method) = await Parse(source);
+    var originals = method.Body!.Body.ToArray();
+    var target = (AssertStmt)originals[^1];
+    var expression = target.Expr;
+    var origin = target.Origin;
+    var attributes = target.Attributes;
+    var checks = 0;
+    using var log = new StringWriter();
+
+    Assert.Throws<OperationCanceledException>(() => ContractQueryHeapReduction.TryApply(program, method, log, () => {
+      if (++checks == totalChecks) { throw new OperationCanceledException(); }
+    }));
+
+    Assert.Equal(totalChecks, checks);
+    Assert.Equal(originals, method.Body.Body);
+    Assert.Same(expression, target.Expr);
+    Assert.Same(origin, target.Origin);
+    Assert.Same(attributes, target.Attributes);
+  }
+
+  // Residual rendering observes cancellation before publishing any staged statement or target change.
+  [Fact]
+  public async Task HeapResidualRenderingCancellationPreservesOriginalStatements() {
+    var source = Source("", "a.value := 3;", "a.value == 3 && Opaque(a)");
+
+    var (baselineProgram, baselineMethod) = await Parse(source);
+    using var baselineLog = new StringWriter();
+    Assert.True(ContractQueryHeapReduction.TryApply(baselineProgram, baselineMethod, baselineLog));
+    var baselineOutput = baselineLog.ToString();
+    Assert.Contains("Heap reduction: decision=", baselineOutput);
+    Assert.Contains("Heap reduction residual expression: ", baselineOutput);
+
+    var (controlProgram, controlMethod) = await Parse(source);
+    var controlChecks = 0;
+    using var controlLog = new ResidualRenderingWindowWriter();
+    Assert.True(ContractQueryHeapReduction.TryApply(controlProgram, controlMethod, controlLog,
+      () => controlChecks++));
+    Assert.True(controlChecks > 0);
+    Assert.True(controlLog.SawMetadata);
+    Assert.True(controlLog.SawResidual);
+    Assert.False(controlLog.RenderingWindow);
+    Assert.Equal(baselineOutput, controlLog.ToString());
+
+    var (program, method) = await Parse(source);
+    var originals = method.Body!.Body.ToArray();
+    var target = (AssertStmt)originals[^1];
+    var expression = target.Expr;
+    var resolved = expression.Resolved;
+    var before = Printer.ExprToString(program.Options, expression);
+    var origin = target.Origin;
+    var attributes = target.Attributes;
+    var renderingChecks = 0;
+    using var log = new ResidualRenderingWindowWriter();
+
+    Assert.Throws<OperationCanceledException>(() =>
+      ContractQueryHeapReduction.TryApply(program, method, log, () => {
+        if (log.RenderingWindow && ++renderingChecks == 2) {
+          throw new OperationCanceledException();
+        }
+      }));
+
+    Assert.Equal(2, renderingChecks);
+    Assert.True(log.SawMetadata);
+    Assert.False(log.SawResidual);
+    Assert.True(log.RenderingWindow);
+    Assert.DoesNotContain("Heap reduction residual expression: ", log.ToString());
+    Assert.DoesNotContain("Heap reduction inventory: ", log.ToString());
+    Assert.Equal(originals, method.Body.Body);
+    Assert.Same(expression, target.Expr);
+    Assert.Same(resolved, target.Expr.Resolved);
+    Assert.Same(origin, target.Origin);
+    Assert.Same(attributes, target.Attributes);
+    Assert.Equal(before, Printer.ExprToString(program.Options, target.Expr));
+  }
+
   // Native proofs retain both epoch semantics and legitimate target counterexamples.
   [Theory]
   [InlineData("old(a.value) == 1 && a.value == 3", ContractQueryOutcome.Unsat)]
@@ -199,6 +356,27 @@ module Client {
     }
   }
 
+  private sealed class ResidualRenderingWindowWriter : StringWriter {
+    private const string MetadataPrefix = "Heap reduction: decision=";
+    private const string ResidualPrefix = "Heap reduction residual expression: ";
+
+    internal bool RenderingWindow { get; private set; }
+    internal bool SawMetadata { get; private set; }
+    internal bool SawResidual { get; private set; }
+
+    public override void WriteLine(string? value) {
+      if (value?.StartsWith(ResidualPrefix, StringComparison.Ordinal) == true) {
+        SawResidual = true;
+        RenderingWindow = false;
+      }
+      base.WriteLine(value);
+      if (value?.StartsWith(MetadataPrefix, StringComparison.Ordinal) == true) {
+        SawMetadata = true;
+        RenderingWindow = true;
+      }
+    }
+  }
+
   private static string Source(string requirements, string body, string property) => """
 class Cell { var value:int ghost var omitted:int const tag:int := 7 }
 twostate function Delta(c:Cell):int reads c { c.value - old(c.value) }
@@ -233,5 +411,39 @@ method ContractDiagnosticQuery(a:Cell,b:Cell) requires a.value == 1 REQUIREMENTS
     using var timeout = new CancellationTokenSource(10000);
     return await ContractSolver.CheckAsync(source, ContractQueryKind.ObservedPostcondition, Options(disableScopes), timeout.Token,
       deadlineTimestamp: ContractQueryDeadline.AfterMilliseconds(10000));
+  }
+
+  // The actual pure staging method cancels at its final boundary without publishing any proof step or target rewrite.
+  [Fact]
+  public async Task PureCancellationPreservesOriginalStatementsAtomically() {
+    const string source = "function Size(items:seq<int>):nat { if |items| == 0 then 0 else 1 + Size(items[1..]) } " +
+      "method ContractDiagnosticQuery() { assert {:error \"contract_query_target\"} Size([1,2,3,4]) == 4; }";
+    var (baselineProgram, baselineMethod) = await Parse(source);
+    var totalChecks = 0;
+    using (var baselineLog = new StringWriter()) {
+      ContractSolver.ReduceConcreteAssertion(baselineProgram, baselineLog, baselineMethod.Name, () => totalChecks++);
+    }
+    Assert.True(baselineMethod.Body!.Body.Count > 1);
+    var (program, method) = await Parse(source);
+    var originals = method.Body!.Body.ToArray();
+    var target = (AssertStmt)originals[^1];
+    var expression = target.Expr;
+    var resolved = expression.Resolved;
+    var before = Printer.ExprToString(program.Options, expression);
+    var origin = target.Origin;
+    var attributes = target.Attributes;
+    var checks = 0;
+    using var log = new StringWriter();
+    Assert.Throws<OperationCanceledException>(() =>
+      ContractSolver.ReduceConcreteAssertion(program, log, method.Name, () => {
+        if (++checks == totalChecks) { throw new OperationCanceledException(); }
+      }));
+    Assert.Equal(totalChecks, checks);
+    Assert.Equal(originals, method.Body.Body);
+    Assert.Same(expression, target.Expr);
+    Assert.Same(resolved, target.Expr.Resolved);
+    Assert.Same(origin, target.Origin);
+    Assert.Same(attributes, target.Attributes);
+    Assert.Equal(before, Printer.ExprToString(program.Options, target.Expr));
   }
 }

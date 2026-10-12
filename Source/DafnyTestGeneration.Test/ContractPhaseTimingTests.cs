@@ -189,6 +189,55 @@ public class ContractPhaseTimingTests {
     Assert.Empty(events);
   }
 
+  // Token cancellation at reduction start records cancellation and starts no later native phase.
+  [Fact]
+  public async Task CancellationAtReductionStartStopsBeforeTranslation() {
+    using var cancellation = new CancellationTokenSource();
+    var events = new List<(string Phase, string State)>();
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ContractSolver.CheckAsync(Source,
+      ContractQueryKind.ClosedClause, Options(), cancellation.Token, phaseObserver: Observe));
+
+    Assert.Contains(("parse", "completed"), events);
+    Assert.Contains(("resolve", "completed"), events);
+    Assert.Contains(("reduction", "started"), events);
+    Assert.Contains(("reduction", "cancelled"), events);
+    Assert.DoesNotContain(("reduction", "completed"), events);
+    Assert.DoesNotContain(events, item => item.Phase == "translation" ||
+      item.Phase.StartsWith("boogie:", StringComparison.Ordinal));
+
+    void Observe(string phase, string state) {
+      events.Add((phase, state));
+      if (phase == "reduction" && state == "started") { cancellation.Cancel(); }
+    }
+  }
+
+  // Monotonic expiry at reduction start records failure with an uncancelled token and starts no later phase.
+  [Fact]
+  public async Task DeadlineAtReductionStartStopsBeforeTranslation() {
+    var events = new List<(string Phase, string State)>();
+    var deadline = ContractQueryDeadline.AfterMilliseconds(3000);
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ContractSolver.CheckAsync(Source,
+      ContractQueryKind.ClosedClause, Options(), CancellationToken.None,
+      phaseObserver: Observe, deadlineTimestamp: deadline));
+
+    Assert.Contains(("parse", "completed"), events);
+    Assert.Contains(("resolve", "completed"), events);
+    Assert.Contains(("reduction", "started"), events);
+    Assert.Contains(("reduction", "failed"), events);
+    Assert.DoesNotContain(("reduction", "completed"), events);
+    Assert.DoesNotContain(events, item => item.Phase == "translation" ||
+      item.Phase.StartsWith("boogie:", StringComparison.Ordinal));
+
+    void Observe(string phase, string state) {
+      events.Add((phase, state));
+      if (phase == "reduction" && state == "started") {
+        while (System.Diagnostics.Stopwatch.GetTimestamp() < deadline) { Thread.Sleep(1); }
+      }
+    }
+  }
+
   // A native result arriving after the wall-clock limit cannot become a verdict through a delayed timer callback.
   [Fact]
   public async Task NativeCompletionAfterDeadlineDoesNotReturnVerdict() {

@@ -22,13 +22,15 @@ public static class ContractRuntimeClauseDependencies {
       ContractSourceSnapshot.UriFor(candidate.Path) == owner.Origin.Uri);
     if (source == null || source.Sha256 != clause.OriginalSourceHash ||
         ContractHarnessBuilder.Hash(source.Content) != source.Sha256) { return null; }
-    IEnumerable<AttributedExpression> candidates = clause.Obligation.Kind switch {
-      ContractRuntimeObligationKind.EntryPrecondition or ContractRuntimeObligationKind.CallPrecondition => owner.Req,
-      ContractRuntimeObligationKind.Postcondition or ContractRuntimeObligationKind.CalleePostcondition => owner.Ens,
+    IEnumerable<Expression> candidates = clause.Obligation.Kind switch {
+      ContractRuntimeObligationKind.EntryPrecondition or ContractRuntimeObligationKind.CallPrecondition => owner.Req.Select(item => item.E),
+      ContractRuntimeObligationKind.Postcondition or ContractRuntimeObligationKind.CalleePostcondition => owner.Ens.Select(item => item.E),
+      ContractRuntimeObligationKind.Assertion when owner is Method method =>
+        ContractRuntimeObligationTransformer.ExecutableAssertions(method).Select(assertion => assertion.Expr),
       _ => []
     };
     var bytes = Encoding.UTF8.GetBytes(source.Content);
-    var matches = candidates.Select(candidate => candidate.E).Where(expression =>
+    var matches = candidates.Where(expression =>
       expression.Origin.Uri == owner.Origin.Uri && expression.Origin.line == clause.Obligation.Line &&
       expression.Origin.col == clause.Obligation.Column && MatchesText(expression)).ToList();
     return matches.Count == 1 ? matches[0] : null;

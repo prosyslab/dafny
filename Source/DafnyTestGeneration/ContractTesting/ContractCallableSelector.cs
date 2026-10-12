@@ -6,7 +6,8 @@ using Microsoft.Dafny;
 namespace DafnyTestGeneration.ContractTesting;
 
 public static class ContractCallableSelector {
-  public static Method SelectMethod(Program program, ContractEntry entry, bool requireConcreteReceiver = true) {
+  public static Method SelectMethod(Program program, ContractEntry entry, bool requireConcreteReceiver = true,
+    bool allowLemmaContract = false) {
     var matches = program.RawModules().SelectMany(module => module.TopLevelDecls)
       .OfType<TopLevelDeclWithMembers>().SelectMany(declaration => declaration.Members)
       .Where(member => member.FullDafnyName == entry.Symbol || member.FullName == entry.Symbol).ToList();
@@ -18,7 +19,8 @@ public static class ContractCallableSelector {
       Function function => DescribeFunction(program, function),
       _ => throw new NotSupportedException("The selected declaration is not a method or function.")
     };
-    if (method.IsGhost || method.EnclosingClass.TypeArgs.Count != 0 || entry.InputMode != ContractInputMode.Unit) {
+    if (method.IsGhost && (!allowLemmaContract || !SupportsLemmaContract(method)) ||
+        method.EnclosingClass.TypeArgs.Count != 0 || entry.InputMode != ContractInputMode.Unit) {
       throw new NotSupportedException("This execution slice requires a non-ghost unit callable in a concrete class.");
     }
     if (method.TypeArgs.Count != (entry.TypeArguments?.Count ?? 0)) {
@@ -55,6 +57,44 @@ public static class ContractCallableSelector {
       throw new ArgumentException("Instance entries require an explicit heap reference receiver; static entries do not take a receiver.");
     }
     return method;
+  }
+
+  /// <summary>Recognizes ordinary, static, value-only lemma contracts without executable proof semantics.</summary>
+  public static bool SupportsLemmaContract(Method method) {
+    if (method.EnclosingClass?.EnclosingModuleDefinition == null) { return false; }
+    if (method.GetType() != typeof(Lemma) || !method.IsStatic || method.Outs.Count != 0 ||
+        method.TypeArgs.Count != 0 || method.EnclosingClass.TypeArgs.Count != 0 ||
+        method.Reads.Expressions?.Count > 0 || method.Mod.Expressions is not { Count: 0 } ||
+        method.HasVerifyFalseAttribute || method.EnclosingClass.HasVerifyFalseAttribute ||
+        new[] { method.Attributes, method.EnclosingClass.Attributes }.Any(attributes =>
+          new[] { "axiom", "extern", "only" }.Any(name => Attributes.Contains(attributes, name)))) {
+      return false;
+    }
+    for (var module = method.EnclosingClass.EnclosingModuleDefinition; module != null; module = module.EnclosingModule) {
+      if (module.IsFacade || new[] { "axiom", "extern", "only" }.Any(name => Attributes.Contains(module.Attributes, name)) ||
+          Attributes.Find(module.Attributes, Attributes.VerifyAttributeName) is { Args.Count: 1 } verify &&
+          LiteralExpr.IsFalse(verify.Args[0])) {
+        return false;
+      }
+    }
+    return method.Ins.All(formal => PureType(formal.Type, [])) &&
+      !method.Req.Concat(method.Ens).SelectMany(clause => clause.E.DescendantsAndSelf).Any(node =>
+        node is OldExpr or UnchangedExpr or ThisExpr ||
+        node is UnaryOpExpr { Op: UnaryOpExpr.Opcode.Fresh or UnaryOpExpr.Opcode.Allocated } ||
+        node is FunctionCallExpr { Function.Reads.Expressions.Count: > 0 });
+
+    static bool PureType(Microsoft.Dafny.Type type, HashSet<DatatypeDecl> active) {
+      type = type.NormalizeExpand();
+      if (type.IsRefType || type.AsTypeParameter != null || !ContractHarnessBuilder.SupportedType(type) ||
+          type.TypeArgs.Any(argument => !PureType(argument, active))) { return false; }
+      if (type.AsDatatype is not { } datatype) { return true; }
+      if (!active.Add(datatype)) { return true; }
+      var substitution = TypeParameter.SubstitutionMap(datatype.TypeArgs, type.TypeArgs);
+      var pure = datatype.Ctors.All(constructor => !constructor.IsGhost && constructor.Formals.All(formal =>
+        !formal.IsGhost && PureType(formal.Type.Subst(substitution), active)));
+      active.Remove(datatype);
+      return pure;
+    }
   }
 
   public static string FunctionResultName(Program program, Function function) =>

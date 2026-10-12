@@ -14,7 +14,11 @@ namespace Microsoft.Dafny;
 /// </summary>
 public sealed class ContractExpressionReducer {
   /// <summary>Recognizes resolved values supported by concrete contract reduction.</summary>
-  public static bool IsConcreteValue(Expression expression) => PartialEvaluatorEngine.IsContractConcreteValue(expression);
+  public static bool IsConcreteValue(Expression expression) => IsConcreteValue(expression, null);
+
+  /// <summary>Recognizes concrete resolved values while checking each recursive traversal step.</summary>
+  public static bool IsConcreteValue(Expression expression, Action? cancellationCheck) =>
+    PartialEvaluatorEngine.IsContractConcreteValue(expression, cancellationCheck);
 
   private readonly DafnyOptions options;
   private readonly ModuleDefinition module;
@@ -30,34 +34,55 @@ public sealed class ContractExpressionReducer {
     this.module = module ?? throw new ArgumentNullException(nameof(module));
     this.systemModuleManager = systemModuleManager ??
       throw new ArgumentNullException(nameof(systemModuleManager));
-    this.effectiveScope = effectiveScope ?? module.VisibilityScope;
+    if (effectiveScope != null) {
+      this.effectiveScope = effectiveScope;
+    } else {
+      // A module's resolved signature always includes the implicit system imports.
+      this.effectiveScope = new VisibilityScope();
+      this.effectiveScope.Augment(module.VisibilityScope);
+      this.effectiveScope.Augment(systemModuleManager.systemNameInfo.VisibilityScope);
+    }
   }
 
   public ContractReductionResult Reduce(
     Expression originalExpression,
     IReadOnlyDictionary<IVariable, Expression>? substitutions = null,
-    ContractReductionBudget? budget = null) {
-    return ReduceCore(originalExpression, substitutions, budget, null, false);
+    ContractReductionBudget? budget = null,
+    Action? cancellationCheck = null) {
+    return ReduceCore(originalExpression, substitutions, budget, null, false, cancellationCheck);
   }
 
   /// <summary>Reduces and prepares dependency-ordered assertions for native proof composition.</summary>
   public ContractReductionResult ReduceForNativeProofComposition(
     Expression originalExpression,
     IReadOnlyDictionary<IVariable, Expression>? substitutions = null,
-    ContractReductionBudget? budget = null) {
-    return ReduceCore(originalExpression, substitutions, budget, null, true);
+    ContractReductionBudget? budget = null,
+    Action? cancellationCheck = null) {
+    return ReduceCore(originalExpression, substitutions, budget, null, true, cancellationCheck);
   }
 
   /// <summary>Reduces with resolved entry/current facts while preserving the original expression.</summary>
   public ContractReductionResult ReduceWithHeap(Expression originalExpression, ContractHeapReductionContext heap,
-    IReadOnlyDictionary<IVariable, Expression>? substitutions = null, ContractReductionBudget? budget = null) {
+    IReadOnlyDictionary<IVariable, Expression>? substitutions = null, ContractReductionBudget? budget = null,
+    Action? cancellationCheck = null) {
     ArgumentNullException.ThrowIfNull(heap);
-    return ReduceCore(originalExpression, substitutions, budget, new ContractHeapReductionSession(heap), false);
+    return ReduceCore(originalExpression, substitutions, budget, new ContractHeapReductionSession(heap), false,
+      cancellationCheck);
+  }
+
+  /// <summary>Projects captured heaps and prepares checked proof steps only for heap-independent expressions.</summary>
+  public ContractReductionResult ReduceWithHeapForNativeProofComposition(Expression originalExpression,
+    ContractHeapReductionContext heap, IReadOnlyDictionary<IVariable, Expression>? substitutions = null,
+    ContractReductionBudget? budget = null, Action? cancellationCheck = null) {
+    ArgumentNullException.ThrowIfNull(heap);
+    return ReduceCore(originalExpression, substitutions, budget, new ContractHeapReductionSession(heap), true,
+      cancellationCheck);
   }
 
   private ContractReductionResult ReduceCore(Expression originalExpression,
     IReadOnlyDictionary<IVariable, Expression>? substitutions, ContractReductionBudget? budget,
-    ContractHeapReductionSession? heap, bool composeNativeProof) {
+    ContractHeapReductionSession? heap, bool composeNativeProof, Action? cancellationCheck) {
+    cancellationCheck?.Invoke();
     ArgumentNullException.ThrowIfNull(originalExpression);
     if (!originalExpression.WasResolved() || originalExpression.Type == null) {
       throw new ArgumentException("Contract reduction requires a resolved, typed expression.",
@@ -65,38 +90,43 @@ public sealed class ContractExpressionReducer {
     }
 
     budget ??= new ContractReductionBudget();
-    var originalNodeCount = CountExpressionNodes(originalExpression);
-    var substitutionMap = CopyAndValidateSubstitutions(substitutions);
-    var substituter = new Substituter(null, substitutionMap, new Dictionary<TypeParameter, Type>(),
-      null, systemModuleManager);
+    var originalNodeCount = CountExpressionNodes(originalExpression, cancellationCheck);
+    var substitutionMap = CopyAndValidateSubstitutions(substitutions, cancellationCheck);
+    var substituter = new ContractReductionSubstituter(null, substitutionMap,
+      new Dictionary<TypeParameter, Type>(), null, systemModuleManager, cancellationCheck);
     var substitutedExpression = substituter.Substitute(originalExpression);
-    var preservedSubstitutedExpression = CloneResolvedExpression(substitutedExpression);
-    var substitutedNodeCount = CountExpressionNodes(preservedSubstitutedExpression);
+    var preservedSubstitutedExpression = CloneResolvedExpression(substitutedExpression, cancellationCheck);
+    var substitutedNodeCount = CountExpressionNodes(preservedSubstitutedExpression, cancellationCheck);
 
     if (substitutedNodeCount > budget.ExpressionNodeLimit) {
-      var reducedResidual = CloneResolvedExpression(preservedSubstitutedExpression);
-      return CreateResult(originalExpression, preservedSubstitutedExpression,
+      var reducedResidual = CloneResolvedExpression(preservedSubstitutedExpression, cancellationCheck);
+      var residualResult = CreateResult(originalExpression, preservedSubstitutedExpression,
         reducedResidual, budget,
         [ContractReductionExhaustionReason.ExpressionNodeLimit], 0, originalNodeCount,
         substitutedNodeCount, substitutedNodeCount, 0);
+      cancellationCheck?.Invoke();
+      return residualResult;
     }
 
-    var workingExpression = CloneResolvedExpression(preservedSubstitutedExpression);
+    var workingExpression = CloneResolvedExpression(preservedSubstitutedExpression, cancellationCheck);
     var quantifierBudget = new QuantifierExpansionBudget(budget.QuantifierInstanceLimit);
     var expressionExpansionBudget = new ExpressionExpansionBudget(
-      budget.ExpressionNodeLimit - substitutedNodeCount);
+      budget.ExpressionNodeLimit - substitutedNodeCount, cancellationCheck);
     var evaluator = new PartialEvaluatorEngine(options, module, systemModuleManager,
       budget.InlineDepthLimit, effectiveScope, budget.QuantifierInstanceLimit,
       quantifierBudget, emitQuantifierOverflowResidual: true,
       PartialEvaluationProfile.ContractConcrete, expressionExpansionBudget, heap,
       collectProofCompositionCandidates: composeNativeProof,
       detectEmptyQuantifierProduct: composeNativeProof,
-      proofCompositionMode: composeNativeProof);
+      proofCompositionMode: composeNativeProof,
+      cancellationCheck: cancellationCheck);
     var reducedExpression = evaluator.SimplifyExpression(workingExpression);
-    var reducedNodeCount = CountExpressionNodes(reducedExpression);
-    var composer = new NativeProofComposer(this, evaluator, budget, quantifierBudget, expressionExpansionBudget);
-    if (composeNativeProof && heap == null) {
-      composer.Compose(evaluator.ProofCompositionCandidates, evaluator.ProofWitnesses);
+    var reducedNodeCount = CountExpressionNodes(reducedExpression, cancellationCheck);
+    var composer = new NativeProofComposer(this, evaluator, budget, quantifierBudget, expressionExpansionBudget,
+      cancellationCheck);
+    if (composeNativeProof) {
+      composer.Compose(evaluator.ProofCompositionCandidates, evaluator.ProofWitnesses, evaluator.ProofPrerequisites,
+        evaluator.ProofConcreteCalls);
     }
     var exhaustionReasons = new List<ContractReductionExhaustionReason>();
 
@@ -108,7 +138,7 @@ public sealed class ContractExpressionReducer {
     }
     if (evaluator.ExpressionNodeLimitExhausted || reducedNodeCount > budget.ExpressionNodeLimit) {
       exhaustionReasons.Add(ContractReductionExhaustionReason.ExpressionNodeLimit);
-      reducedExpression = CloneResolvedExpression(preservedSubstitutedExpression);
+      reducedExpression = CloneResolvedExpression(preservedSubstitutedExpression, cancellationCheck);
       reducedNodeCount = substitutedNodeCount;
     }
 
@@ -121,6 +151,7 @@ public sealed class ContractExpressionReducer {
     result.ProofObligations = composer.Obligations.AsReadOnly();
     result.ProofCompositionNodesConsidered = composer.NodesConsidered;
     result.ProofCompositionNodesAdmitted = composer.NodesAdmitted;
+    cancellationCheck?.Invoke();
     return result;
   }
 
@@ -131,92 +162,145 @@ public sealed class ContractExpressionReducer {
     private readonly ContractReductionBudget budget;
     private readonly QuantifierExpansionBudget quantifierBudget;
     private readonly ExpressionExpansionBudget expressionBudget;
+    private readonly Action? cancellationCheck;
     private readonly Dictionary<string, ContractPredicateReductionCandidate> candidatesByKey = new(StringComparer.Ordinal);
     private readonly HashSet<string> activeCandidateKeys = new(StringComparer.Ordinal);
     private readonly Dictionary<string, ProofNodeState> states = new(StringComparer.Ordinal);
     private readonly HashSet<string> admittedPrerequisites = new(StringComparer.Ordinal);
+    private readonly HashSet<ContractConcreteCallProof> admittedConcreteCalls = new(ReferenceEqualityComparer.Instance);
 
     internal List<ContractReductionProofObligation> Obligations { get; } = new();
     internal uint NodesConsidered { get; private set; }
     internal uint NodesAdmitted { get; private set; }
 
     internal NativeProofComposer(ContractExpressionReducer reducer, PartialEvaluatorEngine evaluator,
-      ContractReductionBudget budget, QuantifierExpansionBudget quantifierBudget, ExpressionExpansionBudget expressionBudget) {
+      ContractReductionBudget budget, QuantifierExpansionBudget quantifierBudget,
+      ExpressionExpansionBudget expressionBudget, Action? cancellationCheck) {
       this.reducer = reducer;
       this.evaluator = evaluator;
       this.budget = budget;
       this.quantifierBudget = quantifierBudget;
       this.expressionBudget = expressionBudget;
+      this.cancellationCheck = cancellationCheck;
     }
 
-    internal void Compose(IReadOnlyList<ContractPredicateReductionCandidate> candidates, IReadOnlyList<Expression> rootWitnesses) {
+    internal void Compose(IReadOnlyList<ContractPredicateReductionCandidate> candidates, IReadOnlyList<Expression> rootWitnesses,
+      IReadOnlyList<Expression> prerequisites, IReadOnlyList<ContractConcreteCallProof> concreteCalls) {
+      foreach (var call in concreteCalls) {
+        cancellationCheck?.Invoke();
+        TryCommit(transaction => TryComposeConcreteCall(call, transaction));
+      }
+      // The evaluator emits ordered certificate transactions. Deduplicating individual
+      // expressions here can remove one half of a later certificate pair.
+      foreach (var prerequisite in prerequisites) {
+        cancellationCheck?.Invoke();
+        Obligations.Add(new ContractReductionProofObligation(ContractReductionProofKind.Prerequisite, prerequisite));
+      }
       foreach (var candidate in candidates) {
-        var candidateKey = reducer.ProofExpressionKey(candidate.Call);
+        cancellationCheck?.Invoke();
+        var candidateKey = ProofExpressionKey(candidate.Call);
         candidatesByKey.TryAdd(candidateKey, candidate);
         activeCandidateKeys.Add(candidateKey);
       }
       var dependencyKeys = new HashSet<string>(StringComparer.Ordinal);
       foreach (var candidate in candidates) {
-        foreach (var call in candidate.InstantiatedBody.DescendantsAndSelf.OfType<FunctionCallExpr>()) {
-          var dependencyKey = reducer.ProofExpressionKey(call);
-          if (activeCandidateKeys.Contains(dependencyKey) && dependencyKey != reducer.ProofExpressionKey(candidate.Call)) {
+        cancellationCheck?.Invoke();
+        foreach (var call in ContractReductionTraversal.LogicalNodes(candidate.InstantiatedBody, cancellationCheck).OfType<FunctionCallExpr>()) {
+          cancellationCheck?.Invoke();
+          var dependencyKey = ProofExpressionKey(call);
+          if (activeCandidateKeys.Contains(dependencyKey) && dependencyKey != ProofExpressionKey(candidate.Call)) {
             dependencyKeys.Add(dependencyKey);
           }
         }
       }
-      foreach (var candidate in candidates.Where(candidate => !dependencyKeys.Contains(reducer.ProofExpressionKey(candidate.Call)))) {
+      foreach (var candidate in candidates.Where(candidate => !dependencyKeys.Contains(ProofExpressionKey(candidate.Call)))) {
+        cancellationCheck?.Invoke();
         // A nested dependency can be discovered only after earlier witnesses have
         // been staged. Keep their causal order and publish the complete certificate
         // atomically with the parent.
         TryCommit(transaction => TryComposeCandidate(candidate, transaction));
       }
-      var emittedExpressions = Obligations.Select(obligation => reducer.ProofExpressionKey(obligation.Expression))
+      var emittedExpressions = Obligations.Select(obligation => ProofExpressionKey(obligation.Expression))
         .ToHashSet(StringComparer.Ordinal);
       foreach (var witness in rootWitnesses) {
+        cancellationCheck?.Invoke();
         TryCommit(transaction => {
           if (!TryComposeWitnessDependencies(witness, transaction)) {
             return false;
           }
-          if (!emittedExpressions.Contains(reducer.ProofExpressionKey(witness))) {
+          if (!emittedExpressions.Contains(ProofExpressionKey(witness))) {
             transaction.Staged.Add(new ContractReductionProofObligation(ContractReductionProofKind.Witness, witness));
           }
           return true;
-        }, committed => emittedExpressions.UnionWith(committed.Select(obligation => reducer.ProofExpressionKey(obligation.Expression))));
+        }, committed => emittedExpressions.UnionWith(committed.Select(obligation => ProofExpressionKey(obligation.Expression))));
       }
     }
 
     private bool TryCommit(Func<ProofTransaction, bool> compose,
       Action<IReadOnlyList<ContractReductionProofObligation>>? onCommit = null) {
       var transaction = new ProofTransaction(admittedPrerequisites);
+      cancellationCheck?.Invoke();
       if (!compose(transaction)) {
         // Shared budgets are intentionally not rolled back. A staged node cannot stay
         // Complete after its certificate was discarded, or a later parent could reuse
         // a proof that was never emitted.
         foreach (var key in transaction.CompletedKeys) {
+          cancellationCheck?.Invoke();
           states[key] = ProofNodeState.Failed;
         }
         return false;
       }
+      cancellationCheck?.Invoke();
       Obligations.AddRange(transaction.Staged);
       admittedPrerequisites.UnionWith(transaction.Prerequisites);
+      admittedConcreteCalls.UnionWith(transaction.ConcreteCalls);
       NodesAdmitted += transaction.NodesAdmitted;
       onCommit?.Invoke(transaction.Staged);
       return true;
     }
 
+    private bool TryComposeConcreteCall(ContractConcreteCallProof proof, ProofTransaction transaction) {
+      cancellationCheck?.Invoke();
+      if (admittedConcreteCalls.Contains(proof) || transaction.ConcreteCalls.Contains(proof)) { return true; }
+      NodesConsidered++;
+      foreach (var dependency in proof.Dependencies) {
+        cancellationCheck?.Invoke();
+        if (!TryComposeConcreteCall(dependency, transaction)) { return false; }
+      }
+      foreach (var prerequisite in proof.Prerequisites) {
+        cancellationCheck?.Invoke();
+        if (!reducer.IsClosedProofExpression(prerequisite, cancellationCheck)) { return false; }
+        if (!Expression.IsBoolLiteral(prerequisite, out var holds) || !holds) {
+          transaction.Staged.Add(new ContractReductionProofObligation(ContractReductionProofKind.Prerequisite, prerequisite));
+        }
+      }
+      foreach (var witness in proof.Witnesses) {
+        cancellationCheck?.Invoke();
+        if (!reducer.IsClosedProofExpression(witness, cancellationCheck)) { return false; }
+        transaction.Staged.Add(new ContractReductionProofObligation(ContractReductionProofKind.Witness, witness));
+      }
+      if (!TryReserveProofNode(proof.Equality, quantifierBudget, expressionBudget)) { return false; }
+      transaction.Staged.Add(new ContractReductionProofObligation(ContractReductionProofKind.Prerequisite, proof.Equality));
+      transaction.ConcreteCalls.Add(proof);
+      transaction.NodesAdmitted++;
+      return true;
+    }
+
     private bool TryComposeCandidate(ContractPredicateReductionCandidate candidate, ProofTransaction transaction) {
-      var candidateKey = reducer.ProofExpressionKey(candidate.Call);
+      cancellationCheck?.Invoke();
+      var candidateKey = ProofExpressionKey(candidate.Call);
       if (states.TryGetValue(candidateKey, out var state)) {
         return state == ProofNodeState.Complete;
       }
       states[candidateKey] = ProofNodeState.Processing;
       NodesConsidered++;
-      var dependencyCalls = candidate.InstantiatedBody.DescendantsAndSelf.OfType<FunctionCallExpr>()
-        .Select(call => (Call: call, Key: reducer.ProofExpressionKey(call)))
+      var dependencyCalls = ContractReductionTraversal.LogicalNodes(candidate.InstantiatedBody, cancellationCheck).OfType<FunctionCallExpr>()
+        .Select(call => (Call: call, Key: ProofExpressionKey(call)))
         .Where(dependency => dependency.Key != candidateKey && activeCandidateKeys.Contains(dependency.Key))
         .DistinctBy(dependency => dependency.Key)
         .ToList();
       foreach (var dependency in dependencyCalls) {
+        cancellationCheck?.Invoke();
         if (!TryComposeCandidate(candidatesByKey[dependency.Key], transaction)) {
           return Fail();
         }
@@ -225,25 +309,37 @@ public sealed class ContractExpressionReducer {
       var completeDependencyKeys = dependencyCalls.Select(dependency => dependency.Key).ToHashSet(StringComparer.Ordinal);
       var stagedPrerequisites = new HashSet<string>(StringComparer.Ordinal);
       var conjuncts = new List<Expression>();
-      QuantifierBounds.CollectConjuncts(candidate.InstantiatedBody, conjuncts);
+      QuantifierBounds.CollectConjuncts(candidate.InstantiatedBody, conjuncts, cancellationCheck);
       foreach (var conjunct in conjuncts) {
+        cancellationCheck?.Invoke();
         if (Expression.IsBoolLiteral(conjunct, out var value)) {
           if (!value) {
             return Fail();
           }
           continue;
         }
-        var prerequisiteKey = reducer.ProofExpressionKey(conjunct);
+        var prerequisiteKey = ProofExpressionKey(conjunct);
         if (completeDependencyKeys.Contains(prerequisiteKey) || transaction.Prerequisites.Contains(prerequisiteKey) ||
             !stagedPrerequisites.Add(prerequisiteKey)) {
           continue;
         }
-        if (!reducer.IsClosedProofExpression(conjunct) ||
+        if (!reducer.IsClosedProofExpression(conjunct, cancellationCheck) ||
             !reducer.TryReduceProofPrerequisite(conjunct, budget, quantifierBudget, expressionBudget,
-              out var prerequisite, out var witnesses)) {
+              evaluator.IsExplicitlyRevealed,
+              cancellationCheck,
+              out var prerequisite, out var witnesses, out var implications, out var concreteCalls)) {
           return Fail();
         }
+        foreach (var call in concreteCalls) {
+          cancellationCheck?.Invoke();
+          if (!TryComposeConcreteCall(call, transaction)) { return Fail(); }
+        }
+        foreach (var implication in implications) {
+          cancellationCheck?.Invoke();
+          transaction.Staged.Add(new ContractReductionProofObligation(ContractReductionProofKind.Prerequisite, implication));
+        }
         foreach (var witness in witnesses) {
+          cancellationCheck?.Invoke();
           if (!TryComposeWitnessDependencies(witness, transaction)) {
             return Fail();
           }
@@ -275,10 +371,12 @@ public sealed class ContractExpressionReducer {
     }
 
     private bool TryComposeWitnessDependencies(Expression witness, ProofTransaction transaction) {
+      cancellationCheck?.Invoke();
       var calls = new List<FunctionCallExpr>();
-      CollectPositiveConjunctPredicateCalls(witness, calls);
-      foreach (var call in calls.DistinctBy(reducer.ProofExpressionKey)) {
-        var key = reducer.ProofExpressionKey(call);
+      CollectPositiveConjunctPredicateCalls(witness, calls, cancellationCheck);
+      foreach (var call in calls.DistinctBy(ProofExpressionKey)) {
+        cancellationCheck?.Invoke();
+        var key = ProofExpressionKey(call);
         if (!candidatesByKey.TryGetValue(key, out var candidate)) {
           if (!evaluator.TryCreateProofCompositionCandidate(call, out candidate)) {
             continue;
@@ -292,6 +390,13 @@ public sealed class ContractExpressionReducer {
       }
       return true;
     }
+
+    private string ProofExpressionKey(Expression expression) {
+      cancellationCheck?.Invoke();
+      var key = reducer.ProofExpressionKey(expression, cancellationCheck);
+      cancellationCheck?.Invoke();
+      return key;
+    }
   }
 
   /// <summary>Obligations and prerequisites staged for one root until its certificate is complete.</summary>
@@ -299,11 +404,14 @@ public sealed class ContractExpressionReducer {
     internal List<ContractReductionProofObligation> Staged { get; } = new();
     internal HashSet<string> Prerequisites { get; } = new(admittedPrerequisites, StringComparer.Ordinal);
     internal HashSet<string> CompletedKeys { get; } = new(StringComparer.Ordinal);
+    internal HashSet<ContractConcreteCallProof> ConcreteCalls { get; } = new(ReferenceEqualityComparer.Instance);
     internal uint NodesAdmitted { get; set; }
   }
 
-  private static void CollectPositiveConjunctPredicateCalls(Expression expression, List<FunctionCallExpr> calls) {
-    expression = NormalizeProofExpression(expression);
+  private static void CollectPositiveConjunctPredicateCalls(Expression expression, List<FunctionCallExpr> calls,
+    Action? cancellationCheck) {
+    cancellationCheck?.Invoke();
+    expression = NormalizeProofExpression(expression, cancellationCheck);
     if (expression is FunctionCallExpr { Function: not null } functionCall &&
         functionCall.Type?.NormalizeExpand().IsBoolType == true) {
       calls.Add(functionCall);
@@ -311,8 +419,8 @@ public sealed class ContractExpressionReducer {
     }
     if (expression is BinaryExpr binary &&
         (binary.ResolvedOp == BinaryExpr.ResolvedOpcode.And || binary.Op == BinaryExpr.Opcode.And)) {
-      CollectPositiveConjunctPredicateCalls(binary.E0, calls);
-      CollectPositiveConjunctPredicateCalls(binary.E1, calls);
+      CollectPositiveConjunctPredicateCalls(binary.E0, calls, cancellationCheck);
+      CollectPositiveConjunctPredicateCalls(binary.E1, calls, cancellationCheck);
     }
   }
 
@@ -327,14 +435,21 @@ public sealed class ContractExpressionReducer {
     ContractReductionBudget budget,
     QuantifierExpansionBudget quantifierBudget,
     ExpressionExpansionBudget expressionBudget,
+    Func<Function, bool> isExplicitlyRevealed,
+    Action? cancellationCheck,
     out Expression prerequisite,
-    out IReadOnlyList<Expression> witnesses) {
-    prerequisite = CloneResolvedExpression(expression);
+    out IReadOnlyList<Expression> witnesses,
+    out IReadOnlyList<Expression> implications,
+    out IReadOnlyList<ContractConcreteCallProof> concreteCalls) {
+    cancellationCheck?.Invoke();
+    prerequisite = CloneResolvedExpression(expression, cancellationCheck);
     witnesses = Array.Empty<Expression>();
+    implications = Array.Empty<Expression>();
+    concreteCalls = Array.Empty<ContractConcreteCallProof>();
     if (!TryReserveProofNode(prerequisite, quantifierBudget, expressionBudget)) {
       return false;
     }
-    var working = CloneResolvedExpression(prerequisite);
+    var working = CloneResolvedExpression(prerequisite, cancellationCheck);
     if (!expressionBudget.TryReserve(working)) {
       return false;
     }
@@ -343,16 +458,20 @@ public sealed class ContractExpressionReducer {
       quantifierBudget, emitQuantifierOverflowResidual: true,
       PartialEvaluationProfile.ContractConcrete, expressionBudget,
       detectEmptyQuantifierProduct: true,
-      proofCompositionMode: true);
+      proofCompositionMode: true, isExplicitlyRevealed: isExplicitlyRevealed,
+      cancellationCheck: cancellationCheck);
     var reduced = evaluator.SimplifyExpression(working);
     if (evaluator.ExpressionNodeLimitExhausted ||
         !Expression.IsBoolLiteral(reduced, out var value) || !value) {
       return false;
     }
-    if (evaluator.ProofWitnesses.Any(witness => !IsClosedProofExpression(witness))) {
+    if (evaluator.ProofWitnesses.Any(witness => !IsClosedProofExpression(witness, cancellationCheck))) {
       return false;
     }
     witnesses = new List<Expression>(evaluator.ProofWitnesses).AsReadOnly();
+    implications = new List<Expression>(evaluator.ProofPrerequisites).AsReadOnly();
+    concreteCalls = evaluator.ProofConcreteCalls.ToArray();
+    cancellationCheck?.Invoke();
     return true;
   }
 
@@ -369,24 +488,26 @@ public sealed class ContractExpressionReducer {
     return true;
   }
 
-  private bool IsClosedProofExpression(Expression expression) =>
-    PartialEvaluatorEngine.IsClosedProofExpression(options, expression);
+  private bool IsClosedProofExpression(Expression expression, Action? cancellationCheck) =>
+    PartialEvaluatorEngine.IsClosedProofExpression(options, expression, cancellationCheck);
 
-  private string ProofExpressionKey(Expression expression) {
-    expression = NormalizeProofExpression(expression);
+  private string ProofExpressionKey(Expression expression, Action? cancellationCheck) {
+    expression = NormalizeProofExpression(expression, cancellationCheck);
     var declaration = expression is FunctionCallExpr functionCall && functionCall.Function != null
       ? RuntimeHelpers.GetHashCode(functionCall.Function).ToString()
       : "expression";
-    return declaration + ":" + Printer.ExprToString(options, expression);
+    var result = declaration + ":" + ContractReductionTraversal.PrintExpression(options, expression, cancellationCheck);
+    return result;
   }
 
-  private static Expression NormalizeProofExpression(Expression expression) {
+  private static Expression NormalizeProofExpression(Expression expression, Action? cancellationCheck) {
     while (true) {
+      cancellationCheck?.Invoke();
       if (expression.Resolved != null && !ReferenceEquals(expression.Resolved, expression)) {
         expression = expression.Resolved;
         continue;
       }
-      var normalized = QuantifierBounds.NormalizeForPattern(expression);
+      var normalized = QuantifierBounds.NormalizeForPattern(expression, cancellationCheck);
       if (ReferenceEquals(normalized, expression)) {
         return expression;
       }
@@ -418,13 +539,14 @@ public sealed class ContractExpressionReducer {
   }
 
   private static Dictionary<IVariable, Expression> CopyAndValidateSubstitutions(
-    IReadOnlyDictionary<IVariable, Expression>? substitutions) {
+    IReadOnlyDictionary<IVariable, Expression>? substitutions, Action? cancellationCheck) {
     var result = new Dictionary<IVariable, Expression>();
     if (substitutions == null) {
       return result;
     }
 
     foreach (var (variable, expression) in substitutions) {
+      cancellationCheck?.Invoke();
       ArgumentNullException.ThrowIfNull(variable);
       ArgumentNullException.ThrowIfNull(expression);
       if (!expression.WasResolved() || expression.Type == null) {
@@ -436,20 +558,22 @@ public sealed class ContractExpressionReducer {
     return result;
   }
 
-  private static Expression CloneResolvedExpression(Expression expression) {
-    return new Cloner(cloneResolvedFields: true).CloneExpr(expression);
+  private static Expression CloneResolvedExpression(Expression expression, Action? cancellationCheck) {
+    return new ContractReductionCloner(cancellationCheck).CloneExpr(expression);
   }
 
-  private static uint CountExpressionNodes(Expression expression) {
+  private static uint CountExpressionNodes(Expression expression, Action? cancellationCheck) {
     var seen = new HashSet<Expression>();
     var pending = new Stack<Expression>();
     pending.Push(expression);
     while (pending.Count > 0) {
+      cancellationCheck?.Invoke();
       var current = pending.Pop();
       if (!seen.Add(current)) {
         continue;
       }
       foreach (var child in current.SubExpressions) {
+        cancellationCheck?.Invoke();
         pending.Push(child);
       }
     }

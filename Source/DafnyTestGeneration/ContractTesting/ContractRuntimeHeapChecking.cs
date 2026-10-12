@@ -406,7 +406,7 @@ public static class ContractRuntimeHeapChecking {
   public static ContractRuntimeHeapCheck PrepareInitial(Program originalProgram, ContractRuntimeCampaignRequest campaign,
     IReadOnlyDictionary<string, ContractValue> inputs, IReadOnlyList<ContractHeapObject> initial,
     ContractSpecificationChecker? specifications = null) {
-    var method = ContractCallableSelector.SelectMethod(originalProgram, campaign.Entry, requireConcreteReceiver: false);
+    var method = ContractCallableSelector.SelectMethod(originalProgram, campaign.Entry, requireConcreteReceiver: false, allowLemmaContract: true);
     var entry = CapturedEntry(method, campaign, inputs);
     var request = new ContractTestRequest(ContractJson.SchemaVersion, campaign.Sources, entry,
       SelectFormals(method.Ins, inputs, "input"), initial, campaign.Dependencies, campaign.ClosedQueryTimeoutMilliseconds);

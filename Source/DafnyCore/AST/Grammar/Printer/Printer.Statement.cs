@@ -32,6 +32,7 @@ namespace Microsoft.Dafny {
     /// </summary>
     public void PrintStatement(Statement stmt, int indent, bool includeSemicolon = true) {
       Contract.Requires(stmt != null);
+      CheckCancellation();
 
       if (stmt.IsGhost && printMode == PrintModes.NoGhostOrIncludes) {
         return;
@@ -39,6 +40,7 @@ namespace Microsoft.Dafny {
 
       if (stmt is LabeledStatement labelledStatement) {
         for (var index = 0; index < labelledStatement.Labels.Count; index++) {
+          CheckCancellation();
           var label = labelledStatement.Labels[index];
           if (label.Name != null) {
             wr.Write("label {0}:", label.Name);
@@ -51,7 +53,9 @@ namespace Microsoft.Dafny {
       }
 
       if (stmt is ICanPrint canPrint) {
+        CheckCancellation();
         canPrint.Render(wr, this, indent);
+        CheckCancellation();
         return;
       }
 
@@ -75,6 +79,7 @@ namespace Microsoft.Dafny {
               wr.Write($"{s.Kind} {s.TargetLabel.Value};");
             } else {
               for (int i = 0; i < s.BreakAndContinueCount - 1; i++) {
+                CheckCancellation();
                 wr.Write("break ");
               }
               wr.Write($"{s.Kind};");
@@ -88,6 +93,7 @@ namespace Microsoft.Dafny {
             if (s.Rhss != null) {
               var sep = " ";
               foreach (var rhs in s.Rhss) {
+                CheckCancellation();
                 wr.Write(sep);
                 PrintRhs(rhs);
                 sep = ", ";
@@ -109,6 +115,7 @@ namespace Microsoft.Dafny {
             wr.WriteLine("{");
             int ind = indent + IndentAmount;
             foreach (Statement s in sbs.BodyInit) {
+              CheckCancellation();
               Indent(ind);
               PrintStatement(s, ind);
               wr.WriteLine();
@@ -117,6 +124,7 @@ namespace Microsoft.Dafny {
               Indent(indent + IndentAmount);
               wr.WriteLine("new;");
               foreach (Statement s in sbs.BodyProper) {
+                CheckCancellation();
                 Indent(ind);
                 PrintStatement(s, ind);
                 wr.WriteLine();
@@ -195,6 +203,7 @@ namespace Microsoft.Dafny {
             var s = forallStmt;
             if (options.DafnyPrintResolvedFile != null && s.EffectiveEnsuresClauses != null) {
               foreach (var expr in s.EffectiveEnsuresClauses) {
+                CheckCancellation();
                 PrintExpression(expr, false, new string(' ', indent + IndentAmount) + "ensures ");
               }
               if (s.Body != null) {
@@ -250,6 +259,7 @@ namespace Microsoft.Dafny {
                                                                          // a dangling hint.
             int hintCount = s.Lines.Count != 0 && s.Hints.Last().Body.Count == 0 ? lineCount - 1 : lineCount;
             for (var i = 0; i < lineCount; i++) {
+              CheckCancellation();
               var e = s.Lines[i];
               var op = s.StepOps[i];
               var h = s.Hints[i];
@@ -268,6 +278,7 @@ namespace Microsoft.Dafny {
               }
               // print the hints
               foreach (var st in h.Body) {
+                CheckCancellation();
                 Indent(lineInd);
                 PrintStatement(st, lineInd);
                 wr.WriteLine();
@@ -310,6 +321,7 @@ namespace Microsoft.Dafny {
               }
               int caseInd = indent + (s.UsesOptionalBraces ? IndentAmount : 0);
               foreach (NestedMatchCaseStmt mc in s.Cases) {
+                CheckCancellation();
                 wr.WriteLine();
                 Indent(caseInd);
                 PrintAttributes(mc.Attributes, indent, () => {
@@ -319,6 +331,7 @@ namespace Microsoft.Dafny {
                 PrintExtendedPattern(mc.Pat);
                 wr.Write(" =>");
                 foreach (Statement bs in mc.Body) {
+                  CheckCancellation();
                   wr.WriteLine();
                   Indent(caseInd + IndentAmount);
                   PrintStatement(bs, caseInd + IndentAmount);
@@ -346,6 +359,7 @@ namespace Microsoft.Dafny {
 
             int caseInd = indent + (s.UsesOptionalBraces ? IndentAmount : 0);
             foreach (MatchCaseStmt mc in s.Cases) {
+              CheckCancellation();
               wr.WriteLine();
               Indent(caseInd);
               PrintAttributes(mc.Attributes, indent, () => {
@@ -359,6 +373,7 @@ namespace Microsoft.Dafny {
               PrintMatchCaseArgument(mc);
               wr.Write(" =>");
               foreach (Statement bs in mc.Body) {
+                CheckCancellation();
                 wr.WriteLine();
                 Indent(caseInd + IndentAmount);
                 PrintStatement(bs, caseInd + IndentAmount);
@@ -386,8 +401,20 @@ namespace Microsoft.Dafny {
           }
         case VarDeclStmt declStmt: {
             var s = declStmt;
-            if (s.Locals.Exists(v => v.IsGhost) && printMode == PrintModes.NoGhostOrIncludes) { return; }
-            if (s.Locals.TrueForAll((v => v.IsGhost))) {
+            CheckCancellation();
+            var hasGhost = s.Locals.Exists(v => {
+              CheckCancellation();
+              return v.IsGhost;
+            });
+            CheckCancellation();
+            if (hasGhost && printMode == PrintModes.NoGhostOrIncludes) { return; }
+            CheckCancellation();
+            var allGhost = s.Locals.TrueForAll(v => {
+              CheckCancellation();
+              return v.IsGhost;
+            });
+            CheckCancellation();
+            if (allGhost) {
               // Emit the "ghost" modifier if all of the variables are ghost. If some are ghost, but not others,
               // then some of these ghosts are auto-converted to ghost, so we should not emit the "ghost" keyword.
               wr.Write("ghost ");
@@ -395,6 +422,7 @@ namespace Microsoft.Dafny {
             wr.Write("var");
             string sep = "";
             foreach (var local in s.Locals) {
+              CheckCancellation();
               wr.Write(sep);
               if (local.Attributes != null) {
                 PrintAttributes(local.Attributes, AtAttributesOnSameLineIndent, () => { });
@@ -484,8 +512,10 @@ namespace Microsoft.Dafny {
     }
 
     public void PrintConcreteUpdateStatement(ConcreteAssignStatement stmt, int indent, bool includeSemicolon = true) {
+      CheckCancellation();
       string sep = "";
       foreach (var lhs in stmt.Lhss) {
+        CheckCancellation();
         wr.Write(sep);
         PrintExpression(lhs, true);
         sep = ", ";
@@ -500,9 +530,11 @@ namespace Microsoft.Dafny {
     }
 
     public void PrintBlockStmt(BlockStmt stmt, int indent) {
+      CheckCancellation();
       wr.WriteLine("{");
       int ind = indent + IndentAmount;
       foreach (Statement s in stmt.Body) {
+        CheckCancellation();
         Indent(ind);
         PrintStatement(s, ind);
         wr.WriteLine();
@@ -512,6 +544,7 @@ namespace Microsoft.Dafny {
     }
 
     public void PrintPredicateStmt(Statement stmt, bool includeSemicolon = true) {
+      CheckCancellation();
       if (printMode == PrintModes.NoGhostOrIncludes) {
         return;
       }
@@ -540,12 +573,14 @@ namespace Microsoft.Dafny {
     }
 
     private void PrintHideReveal(HideRevealStmt revealStmt) {
+      CheckCancellation();
       wr.Write(revealStmt.Mode == Bpl.HideRevealCmd.Modes.Hide ? "hide " : "reveal ");
       if (revealStmt.Wildcard) {
         wr.Write("*");
       } else {
         var sep = "";
         foreach (var e in revealStmt.Exprs) {
+          CheckCancellation();
           wr.Write(sep);
           sep = ", ";
           if (HideRevealStmt.SingleName(e) != null) {
@@ -563,6 +598,7 @@ namespace Microsoft.Dafny {
       Contract.Requires(0 <= indent);
       Contract.Requires(s != null);
       Contract.Requires(!omitFrame || s.Mod.Expressions.Count == 0);
+      CheckCancellation();
 
       PrintAttributes(s.Mod.Attributes, indent, () => {
         wr.Write("modify");
@@ -595,6 +631,7 @@ namespace Microsoft.Dafny {
     /// </summary>
     void PrintUpdateRHS(ConcreteAssignStatement s, int indent) {
       Contract.Requires(s != null);
+      CheckCancellation();
       if (s is AssignStatement) {
         var update = (AssignStatement)s;
         if (update.Lhss.Count != 0) {
@@ -602,6 +639,7 @@ namespace Microsoft.Dafny {
         }
         var sep = "";
         foreach (var rhs in update.Rhss) {
+          CheckCancellation();
           wr.Write(sep);
           PrintRhs(rhs);
           sep = ", ";
@@ -628,6 +666,7 @@ namespace Microsoft.Dafny {
         wr.Write(" ");
         PrintRhs(stmt.Rhs);
         foreach (var rhs in stmt.Rhss) {
+          CheckCancellation();
           wr.Write(", ");
           PrintRhs(rhs);
         }
@@ -635,6 +674,7 @@ namespace Microsoft.Dafny {
           wr.WriteLine();
           Indent(indent); wr.WriteLine("/*---------- desugared ----------");
           foreach (Statement r in stmt.ResolvedStatements) {
+            CheckCancellation();
             Indent(indent);
             PrintStatement(r, indent);
             wr.WriteLine();
@@ -648,6 +688,7 @@ namespace Microsoft.Dafny {
     }
 
     void PrintIfStatement(int indent, IfStmt s, bool omitGuard) {
+      CheckCancellation();
       PrintAttributes(s.Attributes, indent, () => {
         wr.Write("if");
       });
@@ -675,6 +716,7 @@ namespace Microsoft.Dafny {
 
     void PrintWhileStatement(int indent, WhileStmt s, bool omitGuard, bool omitBody) {
       Contract.Requires(0 <= indent);
+      CheckCancellation();
       PrintAttributes(s.Attributes, indent, () => {
         wr.Write("while");
       });
@@ -704,8 +746,10 @@ namespace Microsoft.Dafny {
     }
 
     void PrintAlternatives(int indent, List<GuardedAlternative> alternatives) {
+      CheckCancellation();
       var startWithLine = true;
       foreach (var alternative in alternatives) {
+        CheckCancellation();
         if (startWithLine) {
           wr.WriteLine();
         } else {
@@ -724,6 +768,7 @@ namespace Microsoft.Dafny {
         }
         wr.Write(" =>");
         foreach (Statement s in alternative.Body) {
+          CheckCancellation();
           wr.WriteLine();
           Indent(indent + IndentAmount);
           PrintStatement(s, indent + IndentAmount);
@@ -734,6 +779,7 @@ namespace Microsoft.Dafny {
     void PrintForLoopStatement(int indent, ForLoopStmt s) {
       Contract.Requires(0 <= indent);
       Contract.Requires(s != null);
+      CheckCancellation();
       PrintAttributes(s.Attributes, indent, () => {
         wr.Write("for");
       });
@@ -766,6 +812,7 @@ namespace Microsoft.Dafny {
 
     void PrintRhs(AssignmentRhs rhs) {
       Contract.Requires(rhs != null);
+      CheckCancellation();
       if (rhs is ExprRhs) {
         PrintExpression(((ExprRhs)rhs).Expr, true);
       } else if (rhs is HavocRhs) {
@@ -785,6 +832,7 @@ namespace Microsoft.Dafny {
           } else {
             string s = "[";
             foreach (Expression dim in allocateArray.ArrayDimensions) {
+              CheckCancellation();
               Contract.Assume(dim != null);
               wr.Write(s);
               PrintExpression(dim, false);
@@ -823,6 +871,7 @@ namespace Microsoft.Dafny {
 
     void PrintGuard(bool isBindingGuard, Expression guard) {
       Contract.Requires(!isBindingGuard || (guard is ExistsExpr && ((ExistsExpr)guard).Range == null));
+      CheckCancellation();
       if (guard == null) {
         wr.Write("*");
       } else if (isBindingGuard) {
@@ -836,6 +885,7 @@ namespace Microsoft.Dafny {
     void PrintBindingGuard(ExistsExpr guard) {
       Contract.Requires(guard != null);
       Contract.Requires(guard.Range == null);
+      CheckCancellation();
       PrintQuantifierDomain(guard.BoundVars, guard.Attributes, null);
       wr.Write(" :| ");
       PrintExpression(guard.Term, false);
@@ -843,7 +893,10 @@ namespace Microsoft.Dafny {
 
     void PrintCalcOp(CalcStmt.CalcOp op) {
       Contract.Requires(op != null);
-      wr.Write(op.ToString());
+      CheckCancellation();
+      var opText = op.ToString();
+      CheckCancellation();
+      wr.Write(opText);
       if (op is CalcStmt.TernaryCalcOp) {
         wr.Write("[");
         PrintExpression(((CalcStmt.TernaryCalcOp)op).Index, false);

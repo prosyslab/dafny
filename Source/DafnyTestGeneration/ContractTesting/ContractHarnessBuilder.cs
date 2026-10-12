@@ -84,7 +84,7 @@ public static class ContractHarnessBuilder {
     Prepare(program, request, PreparationMode.ObservedHeap);
 
   private static ContractPreparedProgram Prepare(Program program, ContractTestRequest request, PreparationMode mode) {
-    var method = ContractCallableSelector.SelectMethod(program, request.Entry);
+    var method = ContractCallableSelector.SelectMethod(program, request.Entry, allowLemmaContract: mode == PreparationMode.InitialState);
     if (!method.Ins.Select(input => input.Name).ToHashSet().SetEquals(request.Inputs.Keys)) {
       throw new ArgumentException("Input names must exactly match the selected declaration's formals.");
     }

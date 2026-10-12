@@ -76,7 +76,7 @@ public static class ContractQueryBuilder {
     var expression = Printer.ExprToString(prepared.Program.Options, QualifyExpression(prepared.Program, scope, clause.Expression));
     var reveals = RevealDefinitions(prepared.Program, scope, [clause.Expression], clause.Variables.Select(variable => variable.Type));
     var declaration = "\nmethod " + Name(prepared) + "(" + parameters + ")\n" + bindings +
-      "\n{ " + reveals + "\nassert {:error \"" + TargetMarker + "\"} " + (negate ? "!(" : "") + expression + (negate ? ")" : "") + "; }\n";
+      "\n{ " + reveals + "\nassert {:error \"" + TargetMarker + "\"} " + (negate ? "!(" : "(") + expression + "); }\n";
     var source = ContractSourceSnapshot.Find(prepared.SourceSnapshots, clause.Owner.Origin.Uri);
     var insertion = clause.Owner.EnclosingClass is DefaultClassDecl ? clause.Owner.StartToken.pos : clause.Owner.EnclosingClass.StartToken.pos;
     var index = System.Text.Encoding.UTF8.GetCharCount(System.Text.Encoding.UTF8.GetBytes(source.Content), 0, insertion);
@@ -139,6 +139,9 @@ public static class ContractQueryBuilder {
 
   internal static string QualifiedType(Program program, ModuleDefinition scope, Type type) {
     type = type.NormalizeExpandKeepConstraints();
+    if (type is UserDefinedType { ResolvedClass: TypeParameter } parameter) {
+      return parameter.TypeName(program.Options, scope, parseAble: true);
+    }
     if (type is UserDefinedType { ResolvedClass: { } declaration } applied) {
       // Captured types may come from a separate resolved snapshot of the same source.
       var natural = program.SystemModuleManager.NatDecl;
@@ -149,6 +152,7 @@ public static class ContractQueryBuilder {
       var arguments = applied.TypeArgs.Select(argument => QualifiedType(program, scope, argument)).ToList();
       if (declaration is TupleTypeDecl) { return "(" + string.Join(", ", arguments) + ")"; }
       return ContractHeapFactory.SourceTypeName(program, scope, declaration) +
+        (declaration is ClassLikeDecl { IsReferenceTypeDecl: true } ? "?" : "") +
         (arguments.Count == 0 ? "" : "<" + string.Join(", ", arguments) + ">");
     }
     return type switch {
@@ -204,7 +208,8 @@ public static class ContractQueryBuilder {
             ContractHeapFactory.SourceModuleName(program, scope, declaration.EnclosingModuleDefinition) :
             ContractHeapFactory.SourceTypeName(program, scope, declaration);
           isImplicit = name.Length == 0;
-          type = new UserDefinedType(expression.Origin, isImplicit ? declaration.Name : name, declaration, type.TypeArgs);
+          type = new UserDefinedType(expression.Origin, isImplicit ? declaration.Name : name, declaration,
+            type.TypeArgs.Select(QualifyType).ToList());
         }
         return new StaticReceiverExpr(expression.Origin, type, isImplicit) { Type = type };
       }
@@ -214,12 +219,50 @@ public static class ContractQueryBuilder {
         return new DatatypeValue(value.Origin, ContractHeapFactory.SourceTypeName(program, scope, datatype),
           value.MemberName, substituted.Arguments) {
           Ctor = value.Ctor,
-          InferredTypeArgs = substituted.InferredTypeArgs,
+          InferredTypeArgs = substituted.InferredTypeArgs.Select(QualifyType).ToList(),
           IsCoCall = value.IsCoCall,
           Type = substituted.Type
         };
       }
-      return base.Substitute(expression);
+      var result = base.Substitute(expression);
+      // The base substituter can return an original node, and resolved clones
+      // retain these type lists. Detach before replacing their rendered names.
+      if (result is FunctionCallExpr call) {
+        var qualified = new FunctionCallExpr(new Cloner(cloneResolvedFields: true), call) {
+          TypeApplication_AtEnclosingClass = call.TypeApplication_AtEnclosingClass.Select(QualifyType).ToList(),
+          TypeApplication_JustFunction = call.TypeApplication_JustFunction.Select(QualifyType).ToList()
+        };
+        return qualified;
+      }
+      if (result is MemberSelectExpr member) {
+        var qualified = new MemberSelectExpr(new Cloner(cloneResolvedFields: true), member) {
+          TypeApplicationAtEnclosingClass = member.TypeApplicationAtEnclosingClass.Select(QualifyType).ToList(),
+          TypeApplicationJustMember = member.TypeApplicationJustMember.Select(QualifyType).ToList()
+        };
+        return qualified;
+      }
+      return result;
+    }
+
+    private Type QualifyType(Type type) {
+      type = type.NormalizeExpandKeepConstraints();
+      if (type is UserDefinedType { ResolvedClass: TypeParameter }) {
+        return type;
+      }
+      var arguments = type.TypeArgs.Select(QualifyType).ToList();
+      if (type is UserDefinedType { ResolvedClass: { } declaration } applied &&
+          type is not ArrowType && declaration is not (TupleTypeDecl or DefaultClassDecl) &&
+          !ArrowType.IsPartialArrowTypeName(applied.Name) && !ArrowType.IsTotalArrowTypeName(applied.Name)) {
+        var natural = program.SystemModuleManager.NatDecl;
+        var name = declaration is SubsetTypeDecl && declaration.FullDafnyName == natural.FullDafnyName &&
+          declaration.EnclosingModuleDefinition.FullDafnyName == natural.EnclosingModuleDefinition.FullDafnyName
+          ? "nat" : ContractHeapFactory.SourceTypeName(program, scope, declaration);
+        if (declaration is ClassLikeDecl { IsReferenceTypeDecl: true }) {
+          name += "?";
+        }
+        return new UserDefinedType(applied.Origin, name, declaration, arguments);
+      }
+      return arguments.Count == 0 ? type : type.ReplaceTypeArguments(arguments);
     }
   }
 

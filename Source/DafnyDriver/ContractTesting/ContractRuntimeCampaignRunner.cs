@@ -38,8 +38,9 @@ public static class ContractRuntimeCampaignRunner {
     var program = await ContractSourceSnapshot.ParseAsync(reporter, request.Sources, cancellationToken,
       phaseObserver: (phase, state) => phases.Record("original:" + phase, state));
     if (reporter.ErrorCount > 0) { return Failure(ContractRuntimeStatus.Error, Diagnostics(reporter), request.Seed); }
-    var goal = ContractCallableSelector.SelectMethod(program, request.Entry, requireConcreteReceiver: false);
-    if (goal.FunctionFromWhichThisIsByMethodDecl is { ByMethodBody: null } || goal.Body == null) {
+    var goal = ContractCallableSelector.SelectMethod(program, request.Entry, requireConcreteReceiver: false, allowLemmaContract: true);
+    var lemmaContract = goal is Lemma;
+    if (!lemmaContract && (goal.FunctionFromWhichThisIsByMethodDecl is { ByMethodBody: null } || goal.Body == null)) {
       return Failure(ContractRuntimeStatus.Unsupported, "Runtime goals require an implemented method or function-by-method.", request.Seed);
     }
     var originalProgram = program;
@@ -87,7 +88,7 @@ public static class ContractRuntimeCampaignRunner {
       return Failure(ContractRuntimeStatus.Unsupported, "Draft or generator resolution failed: " +
         Diagnostics(reporter, sourcePreparation.SourceMap), request.Seed);
     }
-    goal = ContractCallableSelector.SelectMethod(program, request.Entry, requireConcreteReceiver: false);
+    goal = ContractCallableSelector.SelectMethod(program, request.Entry, requireConcreteReceiver: false, allowLemmaContract: true);
     ContractDiagnosticConstruction.AuditResolved(program, goal, sourcePreparation.DiagnosticConstructors ?? new HashSet<string>());
     var generatedMethod = ContractRuntimeObligationTransformer.Members(program).OfType<Method>()
       .Single(m => m.Name == "Generate" && m.EnclosingClass.EnclosingModuleDefinition == goal.EnclosingClass.EnclosingModuleDefinition);
@@ -186,6 +187,8 @@ public static class ContractRuntimeCampaignRunner {
     var violations = new List<ContractRuntimeViolation>();
     var calleeViolations = new List<ContractRuntimeCalleeViolation>();
     var errors = new List<ContractRuntimeError>();
+    var baseUncheckedReasons = obligations.ToDictionary(pair => pair.Key, pair => pair.Value.UncheckedReason);
+    var latestUncheckedReasons = new Dictionary<string, (int SampleOrdinal, string Reason)>();
     var samples = new List<Sample>();
     // Reserve half the campaign time for proof and result classification.
     var reserve = request.TimeoutMilliseconds / 2;
@@ -240,13 +243,25 @@ public static class ContractRuntimeCampaignRunner {
         throw new CampaignDeadlineExpiredException();
       }
     }
-    foreach (var originalSample in samples) {
+    var scheduledSamples = samples
+      .Select(sample => (Sample: sample, HasRuntimeSafetyFailure:
+        RuntimeSafetyFailurePrefixLength(sample.Records, sample.FirstMalformedRecord, obligations) > 0))
+      .OrderByDescending(item => item.HasRuntimeSafetyFailure)
+      .ThenBy(item => item.Sample.Ordinal)
+      .Select(item => item.Sample)
+      .ToList();
+    foreach (var originalSample in scheduledSamples) {
       var classificationStarted = Stopwatch.GetTimestamp();
       try {
         // Later execution is unnecessary for a safety counterexample. Restrict every
         // validation input, including runtime type evidence, to this exact finite prefix.
         var originalComplete = originalSample.Records.Any(r => Kind(r) == "complete");
-        var prefixLength = originalComplete ? 0 : CounterexamplePrefixLength(originalSample, obligations);
+        int prefixLength;
+        try {
+          prefixLength = await CounterexamplePrefixLengthAsync(originalSample, originalComplete);
+        } catch (CampaignDeadlineExpiredException) {
+          prefixLength = 0;
+        }
         var sample = originalSample;
         if (prefixLength > 0) {
           var prefix = originalSample.Records.Take(prefixLength).ToList();
@@ -298,7 +313,7 @@ public static class ContractRuntimeCampaignRunner {
             JsonSerializer.Deserialize<Dictionary<string, ContractValue>>(record.GetProperty("values"), ContractJson.Options)!;
           // Failed runtime records can contribute rejection or counterexample evidence and retain strict value validation.
           if (passed == false) { _ = Values(); }
-          string? uncheckedReason = obligation.UncheckedReason;
+          string? uncheckedReason = baseUncheckedReasons[id];
           if (!isRuntime && obligation.DecisionMethod == ContractRuntimeDecisionMethod.ClosedSmt) {
             var values = Values();
             var clauseHeap = heapCheck;
@@ -351,10 +366,18 @@ public static class ContractRuntimeCampaignRunner {
             }
             cancellationToken.ThrowIfCancellationRequested();
             passed = decision.Passed; uncheckedReason = decision.Reason;
+            Expression? originalExpression = null;
+            if (passed != null && obligation.Kind == ContractRuntimeObligationKind.Assertion) {
+              originalExpression = ContractRuntimeClauseDependencies.OriginalExpression(originalProgram, request.Sources, clause);
+              if (originalExpression == null) {
+                passed = null;
+                uncheckedReason = "original_assertion_unavailable";
+              }
+            }
             if (passed != null && unvalidatedCallees && (clause.EntryHeapPostcondition != null || obligation.Kind == ContractRuntimeObligationKind.CalleePostcondition || (passed == false ? GoalKind(obligation.Kind) : obligation.Kind == ContractRuntimeObligationKind.EntryPrecondition))) {
               if (clause.EntryHeapPostcondition == null && !rejected && !uncheckedPrecondition && !badCallee && !uncheckedCallee) {
                 if (!scalarDependencyScopes.TryGetValue(id, out var dependencyScope)) {
-                  var originalExpression = ContractRuntimeClauseDependencies.OriginalExpression(originalProgram, request.Sources, clause);
+                  originalExpression ??= ContractRuntimeClauseDependencies.OriginalExpression(originalProgram, request.Sources, clause);
                   dependencyScope = originalExpression == null ? null : specifications.LogicalScope(originalExpression);
                   scalarDependencyScopes.Add(id, dependencyScope);
                 }
@@ -366,6 +389,10 @@ public static class ContractRuntimeCampaignRunner {
               // indict the goal (or admit an input) through an unvalidated callee stays undecided.
               if (unvalidatedCallees) { passed = null; uncheckedReason = "callee_contract_unvalidated"; }
             }
+          }
+          if (uncheckedReason != null && (!latestUncheckedReasons.TryGetValue(id, out var latestUnchecked) ||
+              sample.Ordinal >= latestUnchecked.SampleOrdinal)) {
+            latestUncheckedReasons[id] = (sample.Ordinal, uncheckedReason);
           }
           obligation = obligation with {
             Evaluations = isRuntime ? obligation.Evaluations with { Runtime = obligation.Evaluations.Runtime + 1 } :
@@ -440,7 +467,7 @@ public static class ContractRuntimeCampaignRunner {
         foreach (var failure in failed.Where(f => counted(f.Kind))) {
           obligations[failure.Id] = obligations[failure.Id] with { Violations = obligations[failure.Id].Violations + 1 };
         }
-        void AddError(string message, string? location = null) { if (errors.Count < 20) { errors.Add(new(sample.Ordinal, message, location)); } }
+        void AddError(string message, string? location = null) { errors.Add(new(sample.Ordinal, message, location)); }
       }
       finally {
         profile.Record("result_classification", classificationStarted);
@@ -453,9 +480,18 @@ public static class ContractRuntimeCampaignRunner {
     var reason = status != ContractRuntimeStatus.Inconclusive ? "" :
       population.Valid == 0 ? "No valid sample completed." : "No goal obligation was decided in a valid sample.";
     phases.Record("campaign", "completed");
-    return new(1, status, reason, request.Seed, population, obligations.Values.ToList(),
-      violations.GroupBy(v => v.ObligationId).SelectMany(g => g.OrderBy(v => JsonSerializer.Serialize(v.Inputs, ContractJson.Options).Length)
-        .ThenBy(v => v.SampleOrdinal).Take(request.MaxViolationsPerObligation)).ToList(), calleeViolations, [], null, transformation.Exclusions, errors);
+    var reportedObligations = obligations.Values.Select(obligation => obligation with {
+      UncheckedReason = latestUncheckedReasons.TryGetValue(obligation.Id, out var latestUnchecked)
+        ? latestUnchecked.Reason
+        : baseUncheckedReasons[obligation.Id]
+    }).ToList();
+    var reportedViolations = violations.OrderBy(violation => violation.SampleOrdinal)
+      .GroupBy(violation => violation.ObligationId)
+      .SelectMany(group => group.OrderBy(violation => JsonSerializer.Serialize(violation.Inputs, ContractJson.Options).Length)
+        .ThenBy(violation => violation.SampleOrdinal).Take(request.MaxViolationsPerObligation)).ToList();
+    return new(1, status, reason, request.Seed, population, reportedObligations, reportedViolations,
+      calleeViolations.OrderBy(violation => violation.SampleOrdinal).ToList(), [], null, transformation.Exclusions,
+      errors.OrderBy(error => error.SampleOrdinal).Take(20).ToList());
 
     DafnyOptions ClosedQueryOptions() =>
       new(options) { TimeLimit = (uint)Math.Max(1, (request.ClosedQueryTimeoutMilliseconds + 999) / 1000) };
@@ -469,6 +505,16 @@ public static class ContractRuntimeCampaignRunner {
       try {
         RequireCampaignTime();
         var initial = Decode<List<ContractHeapObject>>(capture.GetProperty("heap"));
+        if (lemmaContract) {
+          // An empty heap can pass the host shortcut while input refinements still
+          // contain erased proof calls. Certify all original root types and globals first.
+          var scope = ContractPhaseRecorder.Measure(phases.Record, "lemma_initial_dependency_scope:" + sample.Ordinal, cancellationToken,
+            () => ContractInitialTypeProof.RequiredScope(originalProgram, request, initial, specifications));
+          if (!await ValidateSpecificationsAsync(scope)) {
+            return (null, "initial_heap_specification_unvalidated");
+          }
+          RequireCampaignTime();
+        }
         bool? validTypes;
         try {
           RequireCampaignTime();
@@ -614,15 +660,24 @@ public static class ContractRuntimeCampaignRunner {
 
     async Task<bool> ValidateSpecificationsAsync(ContractSpecificationScope scope) {
       try {
+        // Clause, initial-type and global certificates must never use the target
+        // lemma as evidence, even if its proof happens to verify independently.
+        var targetDependency = lemmaContract && scope.ContainsDeclaration(originalPrepared.Method);
         var key = scope.CacheIdentity;
         if (ContractQueryDeadline.TryReadCached(specificationAttempts, key, RequireCampaignTime, out var previous)) {
-          var accepted = previous && specifications.Accept(scope);
+          var accepted = !targetDependency && previous && specifications.Accept(scope);
           RequireCampaignTime();
           return accepted;
         }
         await WriteJsonAsync(Path.Combine(directory, "specification-scope-" + specificationAttempts.Count + ".json"),
-          new { scope.Symbols, scope.Role, scope.RequiredNativeChecks, scope.Failure, modules = specifications.PendingModules(scope) });
-        var success = scope.Failure == null;
+          new {
+            scope.Symbols,
+            scope.Role,
+            scope.RequiredNativeChecks,
+            Failure = targetDependency ? "target_lemma_dependency" : scope.Failure,
+            modules = specifications.PendingModules(scope)
+          });
+        var success = !targetDependency && scope.Failure == null;
         foreach (var module in success ? specifications.PendingModules(scope) : []) {
           var remaining = request.TimeoutMilliseconds - clock.ElapsedMilliseconds;
           if (remaining <= 0) { success = false; break; }
@@ -862,12 +917,64 @@ public static class ContractRuntimeCampaignRunner {
       var originalClause = ContractRuntimeObligationTransformer.BindOriginalOwner(originalProgram, clause);
       if (originalClause == null) { return (null, "closed_query_original_owner_unavailable"); }
       clause = originalClause;
+      if (lemmaContract && clause.Owner == originalPrepared.Method && !clause.TypeConstraint) {
+        var expression = ContractRuntimeClauseDependencies.OriginalExpression(originalProgram, request.Sources, clause);
+        if (expression == null) { return (null, "closed_query_original_clause_unavailable"); }
+        if (!scalarDependencyScopes.TryGetValue(clause.Obligation.Id, out var scope)) {
+          scope = specifications.LogicalScope(expression);
+          scalarDependencyScopes.Add(clause.Obligation.Id, scope);
+        }
+        if (scope == null || !await ValidateSpecificationsAsync(scope)) {
+          return (null, "callee_contract_unvalidated");
+        }
+        // The detached diagnostic erases proof statements. Query the complete original
+        // expression only after its logical dependencies (including proof calls) pass.
+        clause = clause with { Expression = expression };
+      }
       var holds = await QueryAsync(clause, values, false);
       if (holds == ContractQueryOutcome.Unsat) { return (true, null); }
       var fails = holds == ContractQueryOutcome.Error ? ContractQueryOutcome.Error : await QueryAsync(clause, values, true);
       if (fails == ContractQueryOutcome.Unsat) { return (false, null); }
       return (null, holds == ContractQueryOutcome.Timeout || fails == ContractQueryOutcome.Timeout ? "closed_query_timeout" :
         holds == ContractQueryOutcome.Error || fails == ContractQueryOutcome.Error ? "closed_query_error" : "closed_query_undecided");
+    }
+
+    async Task<int> CounterexamplePrefixLengthAsync(Sample sample, bool originalComplete) {
+      var runtimePrefixLength = originalComplete ? 0 : RuntimeSafetyFailurePrefixLength(
+        sample.Records, sample.FirstMalformedRecord, obligations);
+      if (runtimePrefixLength > 0) {
+        return runtimePrefixLength;
+      }
+      var limit = sample.FirstMalformedRecord ?? sample.Records.Count;
+      for (var index = 0; index < limit; index++) {
+        var record = sample.Records[index];
+        if (Kind(record) != "checkpoint" ||
+            !obligations.TryGetValue(record.GetProperty("id").GetString()!, out var endpoint)) {
+          continue;
+        }
+        if (endpoint.Kind != ContractRuntimeObligationKind.Assertion ||
+            endpoint.DecisionMethod != ContractRuntimeDecisionMethod.ClosedSmt) {
+          continue;
+        }
+        var clause = clauses[endpoint.Id];
+        var originalAssertion = ContractRuntimeClauseDependencies.OriginalExpression(originalProgram, request.Sources, clause);
+        if (originalAssertion == null) { continue; }
+        var values = JsonSerializer.Deserialize<Dictionary<string, ContractValue>>(
+          record.GetProperty("values"), ContractJson.Options)!;
+        var cacheKey = endpoint.Id + ":" + ContractHarnessBuilder.Hash(JsonSerializer.Serialize(values, ContractJson.Options));
+        if (!ContractQueryDeadline.TryReadCached(queryCache, cacheKey, RequireCampaignTime, out var decision)) {
+          closedQueries++;
+          decision = await DecideClosedAsync(clause, values);
+          RequireCampaignTime();
+          if (decision.Passed != null) { queryCache.TryAdd(cacheKey, decision); }
+        }
+        if (decision.Passed != false) { continue; }
+        if (clause.UnvalidatedCallees && !await ValidateSpecificationsAsync(specifications.LogicalScope(originalAssertion))) {
+          continue;
+        }
+        return index + 1;
+      }
+      return 0;
     }
 
     // Unsat means the asserted formula is proven under the value bindings.
@@ -897,7 +1004,28 @@ public static class ContractRuntimeCampaignRunner {
     }
   }
 
-  private static bool GoalKind(ContractRuntimeObligationKind kind) => kind is ContractRuntimeObligationKind.Postcondition or
+  /// <summary>Returns the exact record prefix ending at the first observed compiled runtime safety failure.</summary>
+  public static int RuntimeSafetyFailurePrefixLength(IReadOnlyList<JsonElement> records, int? firstMalformedRecord,
+    IReadOnlyDictionary<string, ContractRuntimeObligation> obligations) {
+    var limit = Math.Clamp(firstMalformedRecord ?? records.Count, 0, records.Count);
+    for (var index = 0; index < limit; index++) {
+      var record = records[index];
+      if (!record.TryGetProperty("kind", out var kind) || kind.ValueKind != JsonValueKind.String ||
+          kind.GetString() != "check" || !record.TryGetProperty("passed", out var passed) ||
+          passed.ValueKind != JsonValueKind.False || !record.TryGetProperty("id", out var id) ||
+          id.ValueKind != JsonValueKind.String || !obligations.TryGetValue(id.GetString()!, out var endpoint)) {
+        continue;
+      }
+      if (endpoint.DecisionMethod == ContractRuntimeDecisionMethod.Runtime &&
+          endpoint.Kind is ContractRuntimeObligationKind.Assertion or ContractRuntimeObligationKind.LoopInvariantEntry or
+            ContractRuntimeObligationKind.LoopInvariantMaintenance) {
+        return index + 1;
+      }
+    }
+    return 0;
+  }
+
+  private static bool GoalKind(ContractRuntimeObligationKind kind) => kind is ContractRuntimeObligationKind.Postcondition or ContractRuntimeObligationKind.Assertion or
     ContractRuntimeObligationKind.LoopInvariantEntry or ContractRuntimeObligationKind.LoopInvariantMaintenance or ContractRuntimeObligationKind.CallPrecondition;
 
   private sealed record Sample(int Ordinal, IReadOnlyDictionary<string, ContractValue> Inputs,
@@ -914,19 +1042,6 @@ public static class ContractRuntimeCampaignRunner {
   private static List<JsonElement> HeapCaptures(IEnumerable<JsonElement> records, string phase) =>
     records.Where(record => Kind(record) == "heap_capture" && record.GetProperty("phase").GetString() == phase).ToList();
 
-  // A failed runtime loop invariant is a complete safety counterexample; later records are not needed.
-  private static int CounterexamplePrefixLength(Sample sample, IReadOnlyDictionary<string, ContractRuntimeObligation> obligations) {
-    for (var index = 0; index < (sample.FirstMalformedRecord ?? sample.Records.Count); index++) {
-      var record = sample.Records[index];
-      if (Kind(record) == "check" && !record.GetProperty("passed").GetBoolean() &&
-          obligations.TryGetValue(record.GetProperty("id").GetString()!, out var endpoint) &&
-          endpoint.DecisionMethod == ContractRuntimeDecisionMethod.Runtime &&
-          endpoint.Kind is ContractRuntimeObligationKind.LoopInvariantEntry or ContractRuntimeObligationKind.LoopInvariantMaintenance) {
-        return index + 1;
-      }
-    }
-    return 0;
-  }
   private static string Diagnostics(BatchErrorReporter reporter) => string.Join("\n", reporter.AllMessages.Where(m => m.Level == ErrorLevel.Error).Select(m => m.Range.StartToken.Uri + ":" + m.Range.StartToken.line + ":" + m.Range.StartToken.col + ": " + m.Message));
 
   // Prepared-snapshot positions are reported at their supplied source, draft or generator location when known.
@@ -947,7 +1062,8 @@ public static class ContractRuntimeCampaignRunner {
     var supplied = drafts.Select(d => d.Symbol).ToHashSet();
     // A function-by-method descriptor is detached from the call graph; its original function reaches the by-method body.
     var root = goal.FunctionFromWhichThisIsByMethodDecl ?? (MethodOrFunction)goal;
-    return ContractRuntimeObligationTransformer.ExecutionReachable(program, [root])
+    return (goal is Lemma ? Enumerable.Empty<MethodOrFunction>() :
+        ContractRuntimeObligationTransformer.ExecutionReachable(program, [root]))
       .Where(c => c != root && c != goal && c != (root as Function)?.ByMethodDecl && (!c.IsGhost || c is Function) &&
         !supplied.Contains(c.FullDafnyName) && c.EnclosingClass.EnclosingModuleDefinition.Name is not ("PbtRuntime" or "PbtRandom") &&
         // Built-in and library declarations outside the supplied snapshot cannot be drafted.

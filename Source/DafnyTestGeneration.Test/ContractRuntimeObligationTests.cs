@@ -64,6 +64,44 @@ public class ContractRuntimeObligationTests {
     Assert.Contains(result.Exclusions, e => e.Symbol.EndsWith(".y"));
   }
 
+  // A finite enumerable ghost choice is deghosted and remains available to its target assertion.
+  [Fact]
+  public async Task KeepsEnumerableGhostChoiceAvailable() {
+    var result = await Transform("method Goal(x: int) { ghost var y: int :| y in {x}; assert y == x; }");
+    var assertion = Assert.Single(result.Clauses, clause => clause.Obligation.Kind == ContractRuntimeObligationKind.Assertion);
+    Assert.Equal(ContractRuntimeDecisionMethod.Runtime, assertion.Obligation.DecisionMethod);
+    Assert.DoesNotContain(result.Exclusions, exclusion => exclusion.Symbol.EndsWith(".y"));
+  }
+
+  // Every ghost LHS of an unbounded choice is unavailable to assertion instrumentation.
+  [Fact]
+  public async Task ExcludesEveryUnboundedGhostChoiceValue() {
+    var result = await Transform("method Goal(x: int) { ghost var y: seq<int>, z: seq<int> :| |y| > x && |z| > |y|; assert |z| > |y|; }");
+    var assertion = Assert.Single(result.Clauses, clause => clause.Obligation.Kind == ContractRuntimeObligationKind.Assertion);
+    Assert.Equal("value_unavailable", assertion.Obligation.UncheckedReason);
+    Assert.Contains(result.Exclusions, exclusion => exclusion.Symbol.EndsWith(".y"));
+    Assert.Contains(result.Exclusions, exclusion => exclusion.Symbol.EndsWith(".z"));
+  }
+
+  // Availability loss propagates through later ghost assignments instead of inventing a witness.
+  [Fact]
+  public async Task PropagatesUnavailableGhostChoiceValue() {
+    var result = await Transform("method Goal(x: int) { ghost var y: seq<int> :| |y| > x; ghost var z := y; assert |z| > x; }");
+    var assertion = Assert.Single(result.Clauses, clause => clause.Obligation.Kind == ContractRuntimeObligationKind.Assertion);
+    Assert.Equal("value_unavailable", assertion.Obligation.UncheckedReason);
+    Assert.Contains(result.Exclusions, exclusion => exclusion.Symbol.EndsWith(".y"));
+    Assert.Contains(result.Exclusions, exclusion => exclusion.Symbol.EndsWith(".z"));
+  }
+
+  // A shared ghost declaration remains erased, so one unavailable initializer excludes every declared local.
+  [Fact]
+  public async Task ExcludesWholeSharedGhostDeclaration() {
+    var result = await Transform("method Goal(x: int) { ghost var y: seq<int> :| |y| > x; ghost var z, w := y, 0; assert w == 0; }");
+    var assertion = Assert.Single(result.Clauses, clause => clause.Obligation.Kind == ContractRuntimeObligationKind.Assertion);
+    Assert.Equal("value_unavailable", assertion.Obligation.UncheckedReason);
+    Assert.Contains(result.Exclusions, exclusion => exclusion.Symbol.EndsWith(".w"));
+  }
+
   // Allocation-state predicates remain unchecked rather than being compiled as ordinary booleans.
   [Fact]
   public async Task FreshRemainsUnchecked() {

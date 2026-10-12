@@ -9,6 +9,63 @@ using Xunit;
 namespace DafnyTestGeneration.Test;
 
 public class ContractClosedClauseTypeTests {
+  // A captured nullable reference bound to null cannot acquire an inconsistent non-null parameter premise.
+  [Theory]
+  [InlineData("captured == null", false, ContractQueryOutcome.Unsat)]
+  [InlineData("captured == null", true, ContractQueryOutcome.Sat)]
+  [InlineData("captured != null", false, ContractQueryOutcome.Sat)]
+  [InlineData("captured != null", true, ContractQueryOutcome.Unsat)]
+  public async Task NullableCapturedNullPreservesBothPolarities(string property, bool negate, ContractQueryOutcome expected) {
+    var source = "module Library { class Cell {} type MaybeCell = Cell? } " +
+      "module Client { import L = Library class Cell {} " +
+      "method Entry() { var captured:L.MaybeCell := null; assert " + property + "; } }";
+    var result = await Check(source, new ContractValue(ContractValueKind.Null), negate);
+    Assert.True(result.Outcome == expected, result.Diagnostics);
+  }
+
+  // Closed pure queries reject reference identities instead of inventing a non-null object encoding.
+  [Fact]
+  public async Task NullableCapturedReferenceRetainsUnsupportedEncoding() {
+    const string source = "module Library { class Cell {} } " +
+      "module Client { import L = Library method Entry() { var captured:L.Cell? := null; assert captured != null; } }";
+    await Assert.ThrowsAsync<System.NotSupportedException>(() =>
+      Check(source, new ContractValue(ContractValueKind.Reference, "object-1"), negate: false));
+  }
+
+  // Constructor instantiations preserve imported aliases through nested collections despite local type shadows.
+  [Theory]
+  [InlineData(false, 2, false, ContractQueryOutcome.Unsat)]
+  [InlineData(false, 3, false, ContractQueryOutcome.Sat)]
+  [InlineData(false, 2, true, ContractQueryOutcome.Sat)]
+  [InlineData(false, 3, true, ContractQueryOutcome.Unsat)]
+  [InlineData(true, 2, false, ContractQueryOutcome.Unsat)]
+  [InlineData(true, 3, false, ContractQueryOutcome.Sat)]
+  [InlineData(true, 2, true, ContractQueryOutcome.Sat)]
+  [InlineData(true, 3, true, ContractQueryOutcome.Unsat)]
+  public async Task ImportedConstructorTypeArgumentsRetainNestedIdentity(bool nested, int captured, bool negate,
+    ContractQueryOutcome expected) {
+    var property = nested ? "L.Ok(map[0 := L.Box(captured)]).value[0].value[0] == 2" :
+      "L.Ok(captured).value[0] == 2";
+    var source = """
+      module Library {
+        type Byte = b: int | 0 <= b < 256 witness 0
+        type Bytes = seq<Byte>
+        datatype Result<T> = Ok(value: T)
+        datatype Box<T> = Box(value: T)
+        function Make(): Bytes { [2] }
+      }
+      module Client {
+        import L = Library
+        type Byte = b: int | b == 99 witness 99
+        datatype Box<T> = Other(other: T)
+        method Entry() { var captured := L.Make(); assert PROPERTY; }
+      }
+      """.Replace("PROPERTY", property);
+    var result = await Check(source, new ContractValue(ContractValueKind.Sequence,
+      Items: [new ContractValue(ContractValueKind.Integer, captured.ToString())]), negate);
+    Assert.True(result.Outcome == expected, result.Diagnostics);
+  }
+
   // Inferred imported aliases retain their refined element type despite a conflicting local name.
   [Theory]
   [InlineData(2, false, ContractQueryOutcome.Unsat)]
@@ -111,8 +168,19 @@ public class ContractClosedClauseTypeTests {
     var clause = new ContractRuntimeClause(new ContractRuntimeObligation("captured-assert", ContractRuntimeObligationKind.Postcondition,
       "contract.dfy", 1, 1, "original", null, ContractRuntimeDecisionMethod.ClosedSmt, null, new()),
       assertion.Expr, [local], prepared.Method);
+    var constructors = assertion.Expr.DescendantsAndSelf.OfType<DatatypeValue>().ToDictionary(
+      constructor => constructor, constructor => (constructor.Ctor, constructor.InferredTypeArgs,
+        Items: constructor.InferredTypeArgs.ToArray()));
     var query = ContractQueryBuilder.BuildClosedClause(prepared, clause,
       new Dictionary<string, ContractValue> { [local.Name] = value }, negate);
+    foreach (var (constructor, original) in constructors) {
+      Assert.Same(original.Ctor, constructor.Ctor);
+      Assert.Same(original.InferredTypeArgs, constructor.InferredTypeArgs);
+      Assert.Equal(original.Items.Length, constructor.InferredTypeArgs.Count);
+      for (var index = 0; index < original.Items.Length; index++) {
+        Assert.Same(original.Items[index], constructor.InferredTypeArgs[index]);
+      }
+    }
     return await ContractSolver.CheckAsync(query, ContractQueryKind.ClosedClause, options, CancellationToken.None,
       queryName: ContractQueryBuilder.Name(prepared), sourceSnapshots: prepared.SourceSnapshots, sourcePath: prepared.Source.Path);
   }

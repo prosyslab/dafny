@@ -15,7 +15,8 @@ public static class ContractSolver {
     string queryName = ContractQueryBuilder.QueryName,
     IReadOnlyList<ContractSource>? sourceSnapshots = null, string? sourcePath = null,
     Action<string, string>? phaseObserver = null, long? deadlineTimestamp = null) {
-    ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
+    void CheckQueryBoundary() => ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
+    CheckQueryBoundary();
     var log = new StringWriter();
     var proofOnly = !captureModel && kind is ContractQueryKind.ClosedClause or ContractQueryKind.ObservedPostcondition;
     var options = new DafnyOptions(baseOptions, useNullWriters: true) {
@@ -96,27 +97,33 @@ public static class ContractSolver {
       .Where(method => method.Name == queryName && method.Body != null)
       .SelectMany(method => method.Body!.Descendants().OfType<AssertStmt>())
       .Any(assertion => assertion.Expr.Resolved is UnaryOpExpr { Op: UnaryOpExpr.Opcode.Not } &&
-                        assertion.Expr.Descendants().OfType<Microsoft.Dafny.QuantifierExpr>().Any());
+                        (ContractReductionTraversal.LogicalNodes(assertion.Expr, CheckQueryBoundary).OfType<Microsoft.Dafny.QuantifierExpr>().Any() ||
+                         HasLogicalUniversalQuantifier(assertion.Expr, CheckQueryBoundary)));
     if (hasQuantifiedAssertion && options.IsUsingZ3()) {
       options.ProverOptions.RemoveAll(option => option.StartsWith("O:smt.mbqi=", StringComparison.Ordinal));
       options.ProverOptions.Add("O:smt.mbqi=true");
     }
     if (!captureModel && kind != ContractQueryKind.PremiseConsistency) {
       ContractPhaseRecorder.Measure(phaseObserver, "reduction", cancellationToken, () => {
-        ReduceConcreteAssertion(programSource, log, queryName);
+        CheckQueryBoundary();
+        ReduceConcreteAssertion(programSource, log, queryName, CheckQueryBoundary);
+        CheckQueryBoundary();
         return true;
       });
     }
+    CheckQueryBoundary();
     options.ProcessSolverOptions(reporter, Microsoft.Dafny.Token.NoToken);
     if (reporter.ErrorCount != 0) {
       return new ContractQueryResult(kind, ContractQueryOutcome.Error,
         string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
     }
+    CheckQueryBoundary();
     using var engine = ExecutionEngine.CreateWithoutSharedCache(options);
     var verified = 0;
     var errors = 0;
     var selectedModules = new System.Collections.Generic.List<string>();
     // Translation keeps thread-static type-scope state, so it finishes on this thread before any awaited verification.
+    CheckQueryBoundary();
     var translated = ContractPhaseRecorder.Measure(phaseObserver, "translation", cancellationToken, () => {
       // Every native module translation includes its complete visible declaration/import closure.
       // Only modules owning the selected diagnostic can contribute a verified target assertion;
@@ -191,6 +198,26 @@ public static class ContractSolver {
       ", modules=" + string.Join("; ", selectedModules) + "): " + diagnostics);
   }
 
+  private static bool HasLogicalUniversalQuantifier(Expression expression, System.Action cancellationCheck) {
+    var functions = new HashSet<Microsoft.Dafny.Function>();
+    var pending = new Stack<Expression>();
+    pending.Push(expression);
+    while (pending.TryPop(out var current)) {
+      cancellationCheck();
+      foreach (var node in ContractReductionTraversal.LogicalNodes(current, cancellationCheck).OfType<Expression>()) {
+        cancellationCheck();
+        // A negated universal definition needs a witness; an existential definition alone does not.
+        if (node.Resolved is Microsoft.Dafny.ForallExpr) { return true; }
+        // Inspect only original logical bodies; this selects a solver option without revealing or assuming definitions.
+        if (ContractRuntimeObligationTransformer.FunctionReference(node.Resolved) is { Body: { } body } function &&
+            functions.Add(function)) {
+          pending.Push(body);
+        }
+      }
+    }
+    return false;
+  }
+
   private static IEnumerable<Method> QueryMethods(ModuleDefinition module, string queryName) =>
     module.TopLevelDecls.OfType<TopLevelDeclWithMembers>().SelectMany(type => type.Members).OfType<Method>()
       .Where(method => method.Name == queryName && method.Body != null);
@@ -198,11 +225,14 @@ public static class ContractSolver {
   private static int CountTargetErrors(string diagnostics) => diagnostics.Split('\n').Count(line =>
     line.TrimEnd('\r').EndsWith(": Error: " + ContractQueryBuilder.TargetMarker, StringComparison.Ordinal));
 
-  private static void ReduceConcreteAssertion(Microsoft.Dafny.Program program, TextWriter log, string queryName) {
+  /// <summary>Stages checked proof steps off-tree and publishes them only after the final query-boundary check.</summary>
+  public static void ReduceConcreteAssertion(Microsoft.Dafny.Program program, TextWriter log, string queryName,
+    System.Action cancellationCheck) {
     foreach (var method in program.RawModules().SelectMany(module => module.TopLevelDecls)
                .OfType<TopLevelDeclWithMembers>().SelectMany(type => type.Members).OfType<Method>()
                .Where(method => method.Name == queryName)) {
-      if (ContractQueryHeapReduction.TryApply(program, method, log)) { continue; }
+      cancellationCheck();
+      if (ContractQueryHeapReduction.TryApply(program, method, log, cancellationCheck)) { continue; }
       // Substituting initial bindings after an executable assignment would be wrong.
       // Path and heap-transition queries retain their original translation here.
       if (method.Body?.Body.Count != 1 || method.Body.Body[0] is not AssertStmt assertion) {
@@ -210,16 +240,20 @@ public static class ContractSolver {
       }
       var bindings = new Dictionary<IVariable, Expression>();
       foreach (var clause in method.Req) {
+        cancellationCheck();
         if (clause.E.Resolved is BinaryExpr { Op: BinaryExpr.Opcode.Eq } equality &&
-            equality.E0.Resolved is Microsoft.Dafny.IdentifierExpr identifier && ContractExpressionReducer.IsConcreteValue(equality.E1)) {
+            equality.E0.Resolved is Microsoft.Dafny.IdentifierExpr identifier && ContractExpressionReducer.IsConcreteValue(equality.E1, cancellationCheck)) {
           bindings.TryAdd(identifier.Var, equality.E1);
         }
       }
       var owner = method.EnclosingClass.EnclosingModuleDefinition;
       var reducer = new ContractExpressionReducer(program.Options,
         owner, program.SystemModuleManager, program.ModuleSigs[owner].VisibilityScope);
-      var reduction = reducer.ReduceForNativeProofComposition(assertion.Expr, bindings);
+      var reduction = reducer.ReduceForNativeProofComposition(assertion.Expr, bindings,
+        cancellationCheck: cancellationCheck);
+      var added = new List<Statement>();
       foreach (var obligation in reduction.ProofObligations) {
+        cancellationCheck();
         var markerName = obligation.Kind switch {
           ContractReductionProofKind.Witness => "contract_reduction_witness",
           ContractReductionProofKind.Prerequisite => "contract_reduction_prerequisite",
@@ -229,13 +263,16 @@ public static class ContractSolver {
         var marker = new StringLiteralExpr(assertion.Origin, markerName, false) {
           Type = new SeqType(Microsoft.Dafny.Type.Char)
         };
-        method.Body.Body.Insert(method.Body.Body.Count - 1,
-          new AssertStmt(assertion.Origin, obligation.Expression, null, new Attributes("error", [marker], null)));
+        added.Add(new AssertStmt(assertion.Origin, obligation.Expression, null,
+          new Attributes("error", [marker], null)));
       }
       // Keep the complete original assertion as a conjunct. Reduction supplies
       // concrete instances to the same solver obligation; it never supplies an
       // assumption or independently establishes a verdict on the original contract.
-      assertion.Expr = Expression.CreateAnd(assertion.Expr, reduction.ReducedExpression, allowSimplification: false);
+      var replacement = Expression.CreateAnd(assertion.Expr, reduction.ReducedExpression, allowSimplification: false);
+      cancellationCheck();
+      method.Body.Body.InsertRange(method.Body.Body.Count - 1, added);
+      assertion.Expr = replacement;
       log.WriteLine("Contract reduction: decision=" + reduction.Decision + ", residual=" + reduction.ResidualKind +
         ", quantifierInstances=" + reduction.QuantifierInstancesUsed + "/" + reduction.QuantifierInstanceLimit +
         ", exhaustion=" + string.Join(",", reduction.ExhaustionReasons) +

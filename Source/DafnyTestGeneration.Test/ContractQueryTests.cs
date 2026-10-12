@@ -10,6 +10,40 @@ using Xunit;
 namespace DafnyTestGeneration.Test;
 
 public class ContractQueryTests {
+  // Public initial admission accepts null only for the original nullable type before native proof planning.
+  [Theory]
+  [InlineData(true)]
+  [InlineData(false)]
+  public async Task InitialNullMembershipPreservesDeclaredNullability(bool nullable) {
+    var content = "module Library { class Cell {} } module Client { import L = Library class Cell {} " +
+      "method Entry(ghost captured:L.Cell" + (nullable ? "?" : "") + ") {} }";
+    var source = new ContractSource("initial-null.dfy", content, ContractHarnessBuilder.Hash(content));
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.TimeLimit = 10;
+    var reporter = new BatchErrorReporter(options);
+    var program = await ContractSourceSnapshot.ParseAsync(reporter, [source], CancellationToken.None);
+    Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+    var campaign = new ContractRuntimeCampaignRequest(2, [source], new ContractEntry("Client.Entry"), "initial-null");
+    var specifications = new ContractSpecificationChecker(program, campaign.Sources, options);
+    var scope = ContractInitialTypeProof.RequiredScope(program, campaign, [], specifications);
+    Assert.Null(scope.Failure);
+    foreach (var module in specifications.PendingModules(scope)) {
+      var result = await specifications.CheckModuleAsync(scope, module, CancellationToken.None);
+      Assert.True(result.Verified, result.Diagnostics);
+    }
+    Assert.True(specifications.Accept(scope));
+    var proof = ContractInitialTypeProof.TryPrepare(program, campaign,
+      new Dictionary<string, ContractValue> { ["captured"] = new(ContractValueKind.Null) }, [], specifications);
+    if (nullable) {
+      Assert.NotNull(proof);
+      Assert.False(proof.RequiresNativeProof);
+      Assert.Equal(1, proof.HostMembershipChecks);
+    } else {
+      Assert.Null(proof);
+    }
+  }
+
   // Reading the original readonly value activates its type/RHS facts without adding any assumption.
   [Fact]
   public async Task UnprunedReadonlyFactsExposeInconsistentDatatype() {
@@ -339,6 +373,174 @@ public class ContractQueryTests {
       }
       """, "Client.Entry");
     await CheckImportedClause(prepared, request, closed, wrong);
+  }
+
+  // Generic calls and function values retain imported type arguments and resolved identities without editing the source AST.
+  [Theory]
+  [InlineData("Ops.Identity<seq<Ops.Byte>>([2])[0]", false)]
+  [InlineData("Ops.Identity<seq<Ops.Byte>>([2])[0]", true)]
+  [InlineData("Ops.Worker<seq<Ops.Byte>>.Identity([2])[0]", false)]
+  [InlineData("Ops.Worker<seq<Ops.Byte>>.Identity([2])[0]", true)]
+  [InlineData("Ops.Box(Ops.Identity<seq<Ops.Byte>>).value([2])[0]", false)]
+  [InlineData("Ops.Box(Ops.Identity<seq<Ops.Byte>>).value([2])[0]", true)]
+  [InlineData("if Ops.Box(Ops.Identity<Ops.Cell?>(null)).value == null then x else 0", false)]
+  [InlineData("if Ops.Box(Ops.Identity<Ops.Cell?>(null)).value == null then x else 0", true)]
+  [InlineData("Ops.Box(Ops.Identity<(nat, seq<Ops.Byte>)>((0, [2]))).value.1[0]", false)]
+  [InlineData("Ops.Box(Ops.Identity<(nat, seq<Ops.Byte>)>((0, [2]))).value.1[0]", true)]
+  public async Task GenericImportedApplicationsPreserveScopeAndSource(string expression, bool wrong) {
+    var (prepared, request) = await Prepare("""
+      module Library {
+        type Byte = b: int | 0 <= b < 256 witness 0
+        datatype Box<T> = Box(value: T)
+        function Identity<T>(value: T): T { value }
+        class Worker<T> { static function Identity(value: T): T { value } }
+        class Cell {}
+      }
+      module Client {
+        import Ops = Library
+        type Byte = b: int | b == 99 witness 99
+        datatype Box<T> = Other(value: T)
+        class Cell {}
+        method Entry(x: int) returns (r: int) ensures (EXPRESSION) == r { r := x; }
+      }
+      """.Replace("EXPRESSION", expression), "Client.Entry");
+    var original = prepared.Method.Ens[0].E;
+    var before = Printer.ExprToString(prepared.Program.Options, original);
+    var calls = original.DescendantsAndSelf.OfType<FunctionCallExpr>().ToList();
+    var callArguments = calls.Select(call => (call.TypeApplication_AtEnclosingClass, call.TypeApplication_JustFunction)).ToList();
+    var members = original.DescendantsAndSelf.OfType<MemberSelectExpr>().ToList();
+    var memberArguments = members.Select(member => (member.TypeApplicationAtEnclosingClass, member.TypeApplicationJustMember)).ToList();
+    var qualified = ContractQueryBuilder.QualifyExpression(prepared.Program,
+      prepared.Method.EnclosingClass.EnclosingModuleDefinition, original);
+    var qualifiedCalls = qualified.DescendantsAndSelf.OfType<FunctionCallExpr>().ToList();
+    Assert.Equal(calls.Count, qualifiedCalls.Count);
+    for (var index = 0; index < calls.Count; index++) {
+      Assert.Same(calls[index].Function, qualifiedCalls[index].Function);
+      Assert.Same(callArguments[index].TypeApplication_AtEnclosingClass, calls[index].TypeApplication_AtEnclosingClass);
+      Assert.Same(callArguments[index].TypeApplication_JustFunction, calls[index].TypeApplication_JustFunction);
+    }
+    var qualifiedMembers = qualified.DescendantsAndSelf.OfType<MemberSelectExpr>().ToList();
+    Assert.Equal(members.Count, qualifiedMembers.Count);
+    for (var index = 0; index < members.Count; index++) {
+      Assert.Same(members[index].Member, qualifiedMembers[index].Member);
+      Assert.Same(memberArguments[index].TypeApplicationAtEnclosingClass, members[index].TypeApplicationAtEnclosingClass);
+      Assert.Same(memberArguments[index].TypeApplicationJustMember, members[index].TypeApplicationJustMember);
+    }
+    Assert.Equal(before, Printer.ExprToString(prepared.Program.Options, original));
+    await CheckImportedClause(prepared, request, closed: true, wrong: wrong);
+    Assert.Equal(before, Printer.ExprToString(prepared.Program.Options, original));
+  }
+
+  // Public closed clauses render the concrete imported specialization selected for a generic entry.
+  [Theory]
+  [InlineData(2, false, ContractQueryOutcome.Unsat)]
+  [InlineData(3, false, ContractQueryOutcome.Sat)]
+  [InlineData(2, true, ContractQueryOutcome.Sat)]
+  [InlineData(3, true, ContractQueryOutcome.Unsat)]
+  public async Task ClosedClauseConcretizesImportedGenericEntryBeforeRendering(int output, bool negate,
+    ContractQueryOutcome expected) {
+    const string source = """
+      module Library { datatype Box<T> = Box(value: T) }
+      module Client {
+        import Ops = Library
+        datatype Box<T> = Local(value: T)
+        method Entry<T(==)>(x: T) returns (r: T) ensures r == x { r := x; }
+      }
+      """;
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.TimeLimit = 10;
+    var contractSource = new ContractSource("contract.dfy", source, ContractHarnessBuilder.Hash(source));
+    var reporter = new BatchErrorReporter(options);
+    var program = await ContractSourceSnapshot.ParseAsync(reporter, [contractSource], CancellationToken.None);
+    Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+    static ContractValue Box(int item) => new(ContractValueKind.Datatype, Constructor: "Library.Box.Box",
+      Fields: new Dictionary<string, ContractValue> {
+        ["value"] = new(ContractValueKind.Sequence, Items: [new(ContractValueKind.Integer, item.ToString())])
+      });
+    var request = new ContractTestRequest(1, [contractSource],
+      new ContractEntry("Client.Entry", ["Ops.Box<seq<int>>"]),
+      new Dictionary<string, ContractValue> { ["x"] = Box(2) });
+    var prepared = ContractHarnessBuilder.PrepareObservedHeap(program, request);
+    var descriptor = Assert.IsType<ContractConcreteMethod>(prepared.Method);
+    var original = Assert.IsType<Method>(prepared.Callable);
+    var originalTypeParameter = Assert.Single(original.TypeArgs);
+    var originalInputType = original.Ins.Single().Type;
+    var originalEnsure = original.Ens.Single().E;
+    Assert.Same(originalTypeParameter, originalInputType.AsTypeParameter);
+    Assert.Empty(descriptor.TypeArgs);
+    Assert.NotSame(original.Ins.Single(), descriptor.Ins.Single());
+    Assert.NotSame(original.Outs.Single(), descriptor.Outs.Single());
+    var boxes = prepared.Program.RawModules().SelectMany(module => module.TopLevelDecls)
+      .OfType<DatatypeDecl>().Where(declaration => declaration.Name == "Box").ToDictionary(declaration => declaration.FullDafnyName);
+    foreach (var formal in descriptor.Ins.Concat(descriptor.Outs)) {
+      var application = Assert.IsType<UserDefinedType>(formal.Type.NormalizeExpandKeepConstraints());
+      Assert.Same(boxes["Library.Box"], application.ResolvedClass);
+      Assert.NotSame(boxes["Client.Box"], application.ResolvedClass);
+      var sequence = Assert.IsType<SeqType>(Assert.Single(application.TypeArgs));
+      Assert.True(sequence.Arg.IsIntegerType);
+    }
+    var clause = new ContractRuntimeClause(new ContractRuntimeObligation("entry-post",
+      ContractRuntimeObligationKind.Postcondition, "contract.dfy", 1, 1, "original", null,
+      ContractRuntimeDecisionMethod.ClosedSmt, null, new()), descriptor.Ens.Single().E,
+      descriptor.Ins.Concat(descriptor.Outs).Cast<IVariable>().ToList(), descriptor);
+    var query = ContractQueryBuilder.BuildClosedClause(prepared, clause,
+      new Dictionary<string, ContractValue> { ["x"] = Box(2), ["r"] = Box(output) }, negate);
+    var result = await ContractSolver.CheckAsync(query, ContractQueryKind.ClosedClause, options, CancellationToken.None,
+      queryName: ContractQueryBuilder.Name(prepared), sourceSnapshots: prepared.SourceSnapshots,
+      sourcePath: prepared.Source.Path);
+    Assert.True(result.Outcome == expected, result.Diagnostics + "\n" + query);
+    Assert.Same(originalTypeParameter, Assert.Single(original.TypeArgs));
+    Assert.Same(originalInputType, original.Ins.Single().Type);
+    Assert.Same(originalEnsure, original.Ens.Single().E);
+    Assert.Empty(descriptor.TypeArgs);
+  }
+
+  // Qualifying a generic call preserves its imported scope, lexical binder identity and original resolved AST.
+  [Fact]
+  public async Task QualifiedExpressionPreservesLexicalParameterInsideImportedType() {
+    var (prepared, outer, call) = await PrepareGenericTypeParameterApplication();
+    var original = outer.Body!;
+    var before = Printer.ExprToString(prepared.Program.Options, original);
+    var originalApplications = call.TypeApplication_JustFunction;
+    var qualified = ContractQueryBuilder.QualifyExpression(prepared.Program,
+      prepared.Method.EnclosingClass.EnclosingModuleDefinition, original);
+    var qualifiedCall = Assert.Single(qualified.DescendantsAndSelf.OfType<FunctionCallExpr>()
+      .Where(candidate => candidate.Function.Name == "Identity"));
+    Assert.NotSame(call, qualifiedCall);
+    Assert.Same(call.Function, qualifiedCall.Function);
+    Assert.NotSame(originalApplications, qualifiedCall.TypeApplication_JustFunction);
+    Assert.Same(originalApplications, call.TypeApplication_JustFunction);
+    var receiver = Assert.IsType<StaticReceiverExpr>(qualifiedCall.Receiver);
+    Assert.Equal("Ops", Assert.IsType<UserDefinedType>(receiver.Type).Name);
+    var application = Assert.IsType<UserDefinedType>(Assert.Single(qualifiedCall.TypeApplication_JustFunction));
+    Assert.Equal("Ops.Box", application.Name);
+    var sequence = Assert.IsType<SeqType>(Assert.Single(application.TypeArgs));
+    Assert.Same(outer.TypeArgs.Single(), sequence.Arg.AsTypeParameter);
+    Assert.Equal(before, Printer.ExprToString(prepared.Program.Options, original));
+  }
+
+  private static async Task<(ContractPreparedProgram Prepared, Function Outer, FunctionCallExpr Call)>
+    PrepareGenericTypeParameterApplication() {
+    var (prepared, _) = await Prepare("""
+      module Library {
+        datatype Box<T> = Box(value: T)
+        function Identity<U>(value: U): U { value }
+      }
+      module Client {
+        import Ops = Library
+        datatype Box<T> = Local(value: T)
+        function Outer<T>(value: Ops.Box<seq<T>>): Ops.Box<seq<T>> {
+          Ops.Identity<Ops.Box<seq<T>>>(value)
+        }
+        method Entry(x: int) returns (r: int) ensures r == x { r := x; }
+      }
+      """, "Client.Entry");
+    var outer = ContractRuntimeObligationTransformer.Members(prepared.Program).OfType<Function>()
+      .Single(function => function.Name == "Outer");
+    var call = Assert.Single(outer.Body!.DescendantsAndSelf.OfType<FunctionCallExpr>()
+      .Where(candidate => candidate.Function.Name == "Identity"));
+    return (prepared, outer, call);
   }
 
   // Imported static function calls retain the import alias instead of the synthetic default class.

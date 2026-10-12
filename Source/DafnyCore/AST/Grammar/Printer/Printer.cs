@@ -57,18 +57,30 @@ NoGhost - disable printing of functions, ghost methods, and proof
     bool printingExportSet = false;
     bool printingDesugared = false;
     private readonly PrintFlags printFlags;
+    [CanBeNull] private readonly Action cancellationCheck;
 
     [ContractInvariantMethod]
     void ObjectInvariant() {
       Contract.Invariant(wr != null);
     }
 
-    public Printer(TextWriter wr, DafnyOptions options, PrintModes printMode = PrintModes.Everything, [CanBeNull] PrintFlags printFlags = null) {
+    public Printer(TextWriter wr, DafnyOptions options, PrintModes printMode = PrintModes.Everything,
+      [CanBeNull] PrintFlags printFlags = null)
+      : this(wr, options, printMode, printFlags, null) {
+    }
+
+    public Printer(TextWriter wr, DafnyOptions options, PrintModes printMode, [CanBeNull] PrintFlags printFlags,
+      [CanBeNull] Action cancellationCheck) {
       Contract.Requires(wr != null);
       this.wr = wr;
       this.options = options;
       this.printMode = printMode;
       this.printFlags = printFlags ?? new PrintFlags();
+      this.cancellationCheck = cancellationCheck;
+    }
+
+    private void CheckCancellation() {
+      cancellationCheck?.Invoke();
     }
 
     public static string ExprToString(DafnyOptions options, Expression expr, [CanBeNull] PrintFlags printFlags = null) {
@@ -840,7 +852,10 @@ NoGhost - disable printing of functions, ghost methods, and proof
 
     private void PrintTypeInstantiation(List<Type> typeArgs) {
       Contract.Requires(typeArgs == null || typeArgs.Count != 0);
-      wr.Write(Type.TypeArgsToString(options, typeArgs));
+      CheckCancellation();
+      var text = Type.TypeArgsToString(options, typeArgs);
+      CheckCancellation();
+      wr.Write(text);
     }
 
     public void PrintDatatype(DatatypeDecl dt, int indent, DafnyProject dafnyProject) {
@@ -874,6 +889,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
     /// Use an indent of -1 to put just a space after the @-Attribute
     /// </summary>
     public void PrintAttributes(Attributes a, bool atAttributes, int indent = -1) {
+      CheckCancellation();
       if (a != null) {
         PrintAttributes(a.Prev, atAttributes, indent);
         if (a is UserSuppliedAtAttribute usaa && atAttributes) {
@@ -893,18 +909,23 @@ NoGhost - disable printing of functions, ghost methods, and proof
 
     // @-Attributes are printed first, then the keywords typically, then the regular attributes
     public void PrintAttributes(Attributes a, int indent, Action printBetween) {
+      CheckCancellation();
       PrintAttributes(a, true, indent);
+      CheckCancellation();
       printBetween();
+      CheckCancellation();
       PrintAttributes(a, false, indent);
     }
 
     public void PrintOneAtAttribute(UserSuppliedAtAttribute usaa) {
       Contract.Requires(usaa != null);
+      CheckCancellation();
       wr.Write(UserSuppliedAtAttribute.AtName);
       PrintExpression(usaa.Arg, false, -1);
     }
     public void PrintOneAttribute(Attributes a, string nameSubstitution = null) {
       Contract.Requires(a != null);
+      CheckCancellation();
       var name = nameSubstitution ?? a.Name;
       var usAttribute = name.StartsWith("_") || (options.DisallowExterns && name == "extern");
       wr.Write("{1}{{:{0}", name, usAttribute ? "/*" : "");
@@ -917,8 +938,10 @@ NoGhost - disable printing of functions, ghost methods, and proof
 
     public void PrintAttributeArgs(List<Expression> args, bool isFollowedBySemicolon) {
       Contract.Requires(args != null);
+      CheckCancellation();
       string prefix = " ";
       foreach (var arg in args) {
+        CheckCancellation();
         Contract.Assert(arg != null);
         wr.Write(prefix);
         prefix = ", ";
@@ -1156,6 +1179,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
 
     internal void PrintDecreasesSpec(Specification<Expression> decs, int indent) {
       Contract.Requires(decs != null);
+      CheckCancellation();
       if (printMode == PrintModes.NoGhostOrIncludes) {
         return;
       }
@@ -1173,6 +1197,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
     internal void PrintFrameSpecLine(string kind, Specification<FrameExpression> ee, int indent) {
       Contract.Requires(kind != null);
       Contract.Requires(ee != null);
+      CheckCancellation();
       if (ee != null && ee.Expressions != null && ee.Expressions.Count != 0) {
         wr.WriteLine();
         Indent(indent);
@@ -1187,8 +1212,10 @@ NoGhost - disable printing of functions, ghost methods, and proof
     internal void PrintSpec(string kind, List<AttributedExpression> ee, int indent) {
       Contract.Requires(kind != null);
       Contract.Requires(ee != null);
+      CheckCancellation();
       if (printMode == PrintModes.NoGhostOrIncludes) { return; }
       foreach (AttributedExpression e in ee) {
+        CheckCancellation();
         Contract.Assert(e != null);
         wr.WriteLine();
         Indent(indent);
@@ -1199,6 +1226,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
 
     void PrintAttributedExpression(AttributedExpression e) {
       Contract.Requires(e != null);
+      CheckCancellation();
 
       if (e.HasAttributes()) {
         PrintAttributes(e.Attributes, AtAttributesOnSameLineIndent, () => {
@@ -1216,16 +1244,22 @@ NoGhost - disable printing of functions, ghost methods, and proof
 
     public void PrintType(Type ty) {
       Contract.Requires(ty != null);
-      wr.Write(ty.TypeName(options, null, true));
+      CheckCancellation();
+      var typeName = ty.TypeName(options, null, true);
+      CheckCancellation();
+      wr.Write(typeName);
     }
 
     public void PrintType(string prefix, Type ty) {
       Contract.Requires(prefix != null);
       Contract.Requires(ty != null);
+      CheckCancellation();
       if (options.DafnyPrintResolvedFile != null) {
         ty = TypeRefinementWrapper.NormalizeSansRefinementWrappers(ty);
+        CheckCancellation();
       }
       string s = ty.TypeName(options, null, true);
+      CheckCancellation();
       if (ty is TypeRefinementWrapper or not TypeProxy && !s.StartsWith("_")) {
         wr.Write("{0}{1}", prefix, s);
       }

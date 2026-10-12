@@ -42,15 +42,22 @@ internal sealed class QuantifierBounds {
   private readonly uint maxInstances;
   private readonly QuantifierExpansionBudget? expansionBudget;
   private readonly bool detectEmptyProduct;
+  private readonly Action? cancellationCheck;
 
   internal uint MaxInstances => maxInstances;
 
   internal QuantifierBounds(SystemModuleManager systemModuleManager, uint maxInstances,
-    QuantifierExpansionBudget? expansionBudget = null, bool detectEmptyProduct = false) {
+    QuantifierExpansionBudget? expansionBudget = null, bool detectEmptyProduct = false,
+    Action? cancellationCheck = null) {
     this.systemModuleManager = systemModuleManager ?? throw new ArgumentNullException(nameof(systemModuleManager));
     this.maxInstances = maxInstances;
     this.expansionBudget = expansionBudget;
     this.detectEmptyProduct = detectEmptyProduct;
+    this.cancellationCheck = cancellationCheck;
+  }
+
+  private void CheckForCancellation() {
+    cancellationCheck?.Invoke();
   }
 
   internal sealed class ConcreteDomain {
@@ -66,16 +73,34 @@ internal sealed class QuantifierBounds {
   }
 
   // === Expression normalization & pattern helpers ===
+  internal static Expression StripConcreteSyntax(Expression expr) => StripConcreteSyntax(expr, null);
+
+  internal static Expression NormalizeForPattern(Expression expr) => NormalizeForPattern(expr, null);
+
+  internal static Expression GetImpliedTypeConstraint(BoundVar boundVar) => GetImpliedTypeConstraint(boundVar, null);
+
+  internal static Expression ConjoinWithImpliedTypeConstraints(IReadOnlyList<BoundVar> boundVars, Expression? range, IOrigin origin) => ConjoinWithImpliedTypeConstraints(boundVars, range, origin, null);
+
+  internal static Expression GetLogicalBodyWithImpliedTypeConstraints(QuantifierExpr quantifierExpr) => GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr, null);
+
+  internal static void CollectConjuncts(Expression expr, List<Expression> conjuncts) => CollectConjuncts(expr, conjuncts, null);
+
+  internal static void CollectDisjuncts(Expression expr, List<Expression> disjuncts) => CollectDisjuncts(expr, disjuncts, null);
+
+  internal static bool IsBoundVar(Expression? expr, BoundVar boundVar) => IsBoundVar(expr, boundVar, null);
+
   internal static void EnsureExpressionType(Expression expr, Type type) {
     ExpressionRewriteUtil.EnsureExpressionType(expr, type);
   }
 
-  internal static Expression StripConcreteSyntax(Expression expr) {
+  internal static Expression StripConcreteSyntax(Expression expr, Action? cancellationCheck) {
+    cancellationCheck?.Invoke();
     return ExpressionRewriteUtil.StripConcreteSyntax(expr);
   }
 
-  internal static Expression NormalizeForPattern(Expression expr) {
-    expr = StripConcreteSyntax(expr);
+  internal static Expression NormalizeForPattern(Expression expr, Action? cancellationCheck) {
+    cancellationCheck?.Invoke();
+    expr = StripConcreteSyntax(expr, cancellationCheck);
     if (expr is ChainingExpression chainingExpression) {
       expr = chainingExpression.E;
     }
@@ -83,25 +108,29 @@ internal sealed class QuantifierBounds {
       expr = parens.ResolvedExpression;
     }
     if (expr is ConversionExpr conversionExpr) {
-      var fromType = conversionExpr.E.Type?.NormalizeExpand();
-      var toType = conversionExpr.Type?.NormalizeExpand();
-      if (fromType != null && toType != null && fromType.Equals(toType)) {
+      var fromType = conversionExpr.E.Type?.NormalizeExpandKeepConstraints();
+      var toType = conversionExpr.Type?.NormalizeExpandKeepConstraints();
+      if (fromType != null && toType != null && toType.AsSubsetType == null && toType.AsNewtype == null &&
+          fromType.Equals(toType, keepConstraints: true)) {
         expr = conversionExpr.E;
       }
     }
     return expr;
   }
 
-  internal static Expression GetImpliedTypeConstraint(BoundVar boundVar) {
+  internal static Expression GetImpliedTypeConstraint(BoundVar boundVar, Action? cancellationCheck) {
+    cancellationCheck?.Invoke();
     var constraint = ModuleResolver.GetImpliedTypeConstraint(boundVar, boundVar.Type);
     constraint.Type ??= Type.Bool;
     return constraint;
   }
 
-  internal static Expression ConjoinWithImpliedTypeConstraints(IReadOnlyList<BoundVar> boundVars, Expression? range, IOrigin origin) {
+  internal static Expression ConjoinWithImpliedTypeConstraints(IReadOnlyList<BoundVar> boundVars, Expression? range, IOrigin origin, Action? cancellationCheck) {
+    cancellationCheck?.Invoke();
     Expression? combined = range;
     foreach (var boundVar in boundVars) {
-      var constraint = GetImpliedTypeConstraint(boundVar);
+      cancellationCheck?.Invoke();
+      var constraint = GetImpliedTypeConstraint(boundVar, cancellationCheck);
       if (Expression.IsBoolLiteral(constraint, out var isTrue) && isTrue) {
         continue;
       }
@@ -120,8 +149,9 @@ internal sealed class QuantifierBounds {
     return combined;
   }
 
-  internal static Expression GetLogicalBodyWithImpliedTypeConstraints(QuantifierExpr quantifierExpr) {
-    var effectiveRange = ConjoinWithImpliedTypeConstraints(quantifierExpr.BoundVars, quantifierExpr.Range, quantifierExpr.Origin);
+  internal static Expression GetLogicalBodyWithImpliedTypeConstraints(QuantifierExpr quantifierExpr, Action? cancellationCheck) {
+    cancellationCheck?.Invoke();
+    var effectiveRange = ConjoinWithImpliedTypeConstraints(quantifierExpr.BoundVars, quantifierExpr.Range, quantifierExpr.Origin, cancellationCheck);
     if (Expression.IsBoolLiteral(effectiveRange, out var rangeValue) && rangeValue) {
       quantifierExpr.Term.Type ??= Type.Bool;
       return quantifierExpr.Term;
@@ -134,32 +164,35 @@ internal sealed class QuantifierBounds {
     return logicalBody;
   }
 
-  internal static void CollectConjuncts(Expression expr, List<Expression> conjuncts) {
-    expr = NormalizeForPattern(expr);
+  internal static void CollectConjuncts(Expression expr, List<Expression> conjuncts, Action? cancellationCheck) {
+    cancellationCheck?.Invoke();
+    expr = NormalizeForPattern(expr, cancellationCheck);
     if (expr is BinaryExpr binaryExpr && IsConjunction(binaryExpr)) {
-      CollectConjuncts(binaryExpr.E0, conjuncts);
-      CollectConjuncts(binaryExpr.E1, conjuncts);
+      CollectConjuncts(binaryExpr.E0, conjuncts, cancellationCheck);
+      CollectConjuncts(binaryExpr.E1, conjuncts, cancellationCheck);
       return;
     }
     conjuncts.Add(expr);
   }
 
-  internal static void CollectDisjuncts(Expression expr, List<Expression> disjuncts) {
-    expr = NormalizeForPattern(expr);
+  internal static void CollectDisjuncts(Expression expr, List<Expression> disjuncts, Action? cancellationCheck) {
+    cancellationCheck?.Invoke();
+    expr = NormalizeForPattern(expr, cancellationCheck);
     if (expr is BinaryExpr binaryExpr &&
         (binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Or || binaryExpr.Op == BinaryExpr.Opcode.Or)) {
-      CollectDisjuncts(binaryExpr.E0, disjuncts);
-      CollectDisjuncts(binaryExpr.E1, disjuncts);
+      CollectDisjuncts(binaryExpr.E0, disjuncts, cancellationCheck);
+      CollectDisjuncts(binaryExpr.E1, disjuncts, cancellationCheck);
       return;
     }
     disjuncts.Add(expr);
   }
 
-  internal static bool IsBoundVar(Expression? expr, BoundVar boundVar) {
+  internal static bool IsBoundVar(Expression? expr, BoundVar boundVar, Action? cancellationCheck) {
+    cancellationCheck?.Invoke();
     if (expr == null) {
       return false;
     }
-    expr = NormalizeForPattern(expr);
+    expr = NormalizeForPattern(expr, cancellationCheck);
     return expr is IdentifierExpr identifierExpr && (identifierExpr.Var == boundVar || identifierExpr.Name == boundVar.Name);
   }
 
@@ -172,25 +205,27 @@ internal sealed class QuantifierBounds {
   }
 
   // === Literal helpers (structural equality, dedup) ===
-  private static bool IsLiteralExpression(Expression expr) {
-    expr = StripConcreteSyntax(expr);
+  private static bool IsLiteralExpression(Expression expr, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    expr = StripConcreteSyntax(expr, cancellationCheck);
     switch (expr) {
       case LiteralExpr:
         return true;
       case DisplayExpression displayExpression:
-        return displayExpression.Elements.All(IsLiteralExpression);
+        return displayExpression.Elements.All(value => IsLiteralExpression(value, cancellationCheck));
       case MapDisplayExpr mapDisplayExpr:
-        return mapDisplayExpr.Elements.All(entry => IsLiteralExpression(entry.A) && IsLiteralExpression(entry.B));
+        return mapDisplayExpr.Elements.All(entry => IsLiteralExpression(entry.A, cancellationCheck) && IsLiteralExpression(entry.B, cancellationCheck));
       case DatatypeValue datatypeValue:
-        return datatypeValue.Arguments.All(IsLiteralExpression);
+        return datatypeValue.Arguments.All(value => IsLiteralExpression(value, cancellationCheck));
       default:
         return false;
     }
   }
 
-  private static bool LiteralStructuralEquals(Expression left, Expression right) {
-    left = StripConcreteSyntax(left);
-    right = StripConcreteSyntax(right);
+  private static bool LiteralStructuralEquals(Expression left, Expression right, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    left = StripConcreteSyntax(left, cancellationCheck);
+    right = StripConcreteSyntax(right, cancellationCheck);
     if (ReferenceEquals(left, right)) {
       return true;
     }
@@ -198,7 +233,7 @@ internal sealed class QuantifierBounds {
       case StringLiteralExpr leftString when right is StringLiteralExpr rightString
         && leftString.Value is string leftStringValue
         && rightString.Value is string rightStringValue:
-        return StringLiteralsSemanticallyEqual(leftStringValue, leftString.IsVerbatim, rightStringValue, rightString.IsVerbatim);
+        return StringLiteralsSemanticallyEqual(leftStringValue, leftString.IsVerbatim, rightStringValue, rightString.IsVerbatim, cancellationCheck);
       case LiteralExpr leftLiteral when right is LiteralExpr rightLiteral:
         return leftLiteral.GetType() == rightLiteral.GetType() && Equals(leftLiteral.Value, rightLiteral.Value);
       case DisplayExpression leftDisplay when right is DisplayExpression rightDisplay:
@@ -206,7 +241,8 @@ internal sealed class QuantifierBounds {
           return false;
         }
         for (var i = 0; i < leftDisplay.Elements.Count; i++) {
-          if (!LiteralStructuralEquals(leftDisplay.Elements[i], rightDisplay.Elements[i])) {
+          cancellationCheck?.Invoke();
+          if (!LiteralStructuralEquals(leftDisplay.Elements[i], rightDisplay.Elements[i], cancellationCheck)) {
             return false;
           }
         }
@@ -216,9 +252,10 @@ internal sealed class QuantifierBounds {
           return false;
         }
         for (var i = 0; i < leftMap.Elements.Count; i++) {
+          cancellationCheck?.Invoke();
           var leftEntry = leftMap.Elements[i];
           var rightEntry = rightMap.Elements[i];
-          if (!LiteralStructuralEquals(leftEntry.A, rightEntry.A) || !LiteralStructuralEquals(leftEntry.B, rightEntry.B)) {
+          if (!LiteralStructuralEquals(leftEntry.A, rightEntry.A, cancellationCheck) || !LiteralStructuralEquals(leftEntry.B, rightEntry.B, cancellationCheck)) {
             return false;
           }
         }
@@ -230,7 +267,8 @@ internal sealed class QuantifierBounds {
           return false;
         }
         for (var i = 0; i < leftDatatype.Arguments.Count; i++) {
-          if (!LiteralStructuralEquals(leftDatatype.Arguments[i], rightDatatype.Arguments[i])) {
+          cancellationCheck?.Invoke();
+          if (!LiteralStructuralEquals(leftDatatype.Arguments[i], rightDatatype.Arguments[i], cancellationCheck)) {
             return false;
           }
         }
@@ -242,28 +280,39 @@ internal sealed class QuantifierBounds {
 
   private sealed class LiteralExpressionStructuralComparer : IEqualityComparer<Expression> {
     public static readonly LiteralExpressionStructuralComparer Instance = new();
+    private readonly Action? cancellationCheck;
+
+    private LiteralExpressionStructuralComparer(Action? cancellationCheck = null) {
+      this.cancellationCheck = cancellationCheck;
+    }
+
+    internal static LiteralExpressionStructuralComparer For(Action? cancellationCheck) =>
+      cancellationCheck == null ? Instance : new LiteralExpressionStructuralComparer(cancellationCheck);
 
     public bool Equals(Expression? x, Expression? y) {
+      cancellationCheck?.Invoke();
       if (ReferenceEquals(x, y)) {
         return true;
       }
       if (x == null || y == null) {
         return false;
       }
-      return LiteralStructuralEquals(x, y);
+      return LiteralStructuralEquals(x, y, cancellationCheck);
     }
 
     public int GetHashCode(Expression obj) {
+      cancellationCheck?.Invoke();
       if (obj == null) {
         return 0;
       }
       return ComputeHash(obj);
     }
 
-    private static int ComputeHash(Expression expr) {
-      expr = StripConcreteSyntax(expr);
+    private int ComputeHash(Expression expr) {
+      cancellationCheck?.Invoke();
+      expr = StripConcreteSyntax(expr, cancellationCheck);
       if (expr is StringLiteralExpr stringLiteral && stringLiteral.Value is string stringValue) {
-        return ComputeSemanticStringHash(stringValue, stringLiteral.IsVerbatim);
+        return ComputeSemanticStringHash(stringValue, stringLiteral.IsVerbatim, cancellationCheck);
       }
       if (expr is LiteralExpr literal) {
         return HashCode.Combine(literal.GetType(), literal.Value);
@@ -273,6 +322,7 @@ internal sealed class QuantifierBounds {
         hash.Add(display.GetType());
         hash.Add(display.Elements.Count);
         foreach (var element in display.Elements) {
+          cancellationCheck?.Invoke();
           hash.Add(ComputeHash(element));
         }
         return hash.ToHashCode();
@@ -283,6 +333,7 @@ internal sealed class QuantifierBounds {
         hash.Add(mapDisplay.Finite);
         hash.Add(mapDisplay.Elements.Count);
         foreach (var entry in mapDisplay.Elements) {
+          cancellationCheck?.Invoke();
           hash.Add(ComputeHash(entry.A));
           hash.Add(ComputeHash(entry.B));
         }
@@ -295,6 +346,7 @@ internal sealed class QuantifierBounds {
         hash.Add(datatype.MemberName);
         hash.Add(datatype.Arguments.Count);
         foreach (var arg in datatype.Arguments) {
+          cancellationCheck?.Invoke();
           hash.Add(ComputeHash(arg));
         }
         return hash.ToHashCode();
@@ -303,17 +355,25 @@ internal sealed class QuantifierBounds {
     }
   }
 
-  private static List<int> GetSemanticStringCodePoints(string value, bool isVerbatim) {
-    return Util.UnescapedCharacters(DafnyOptions.DefaultImmutableOptions, value, isVerbatim).ToList();
+  private static List<int> GetSemanticStringCodePoints(string value, bool isVerbatim, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    var result = new List<int>();
+    foreach (var codePoint in Util.UnescapedCharacters(DafnyOptions.DefaultImmutableOptions, value, isVerbatim)) {
+      cancellationCheck?.Invoke();
+      result.Add(codePoint);
+    }
+    return result;
   }
 
-  private static bool StringLiteralsSemanticallyEqual(string leftValue, bool leftVerbatim, string rightValue, bool rightVerbatim) {
-    var leftCodePoints = GetSemanticStringCodePoints(leftValue, leftVerbatim);
-    var rightCodePoints = GetSemanticStringCodePoints(rightValue, rightVerbatim);
+  private static bool StringLiteralsSemanticallyEqual(string leftValue, bool leftVerbatim, string rightValue, bool rightVerbatim, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    var leftCodePoints = GetSemanticStringCodePoints(leftValue, leftVerbatim, cancellationCheck);
+    var rightCodePoints = GetSemanticStringCodePoints(rightValue, rightVerbatim, cancellationCheck);
     if (leftCodePoints.Count != rightCodePoints.Count) {
       return false;
     }
     for (var index = 0; index < leftCodePoints.Count; index++) {
+      cancellationCheck?.Invoke();
       if (leftCodePoints[index] != rightCodePoints[index]) {
         return false;
       }
@@ -321,17 +381,20 @@ internal sealed class QuantifierBounds {
     return true;
   }
 
-  private static int ComputeSemanticStringHash(string value, bool isVerbatim) {
+  private static int ComputeSemanticStringHash(string value, bool isVerbatim, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     var hash = new HashCode();
     hash.Add(typeof(StringLiteralExpr));
-    foreach (var codePoint in GetSemanticStringCodePoints(value, isVerbatim)) {
+    foreach (var codePoint in GetSemanticStringCodePoints(value, isVerbatim, cancellationCheck)) {
+      cancellationCheck?.Invoke();
       hash.Add(codePoint);
     }
     return hash.ToHashCode();
   }
 
-  private static bool AddUniqueLiteral(List<Expression> uniques, HashSet<Expression> uniqueSet, Expression candidate) {
-    var normalized = StripConcreteSyntax(candidate);
+  private static bool AddUniqueLiteral(List<Expression> uniques, HashSet<Expression> uniqueSet, Expression candidate, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    var normalized = StripConcreteSyntax(candidate, cancellationCheck);
     if (!uniqueSet.Add(normalized)) {
       return false;
     }
@@ -341,7 +404,7 @@ internal sealed class QuantifierBounds {
 
   private bool TryAddUniqueLiteral(List<Expression> uniques, HashSet<Expression> uniqueSet,
     Expression candidate, uint? cap) {
-    if (AddUniqueLiteral(uniques, uniqueSet, candidate)) {
+    if (AddUniqueLiteral(uniques, uniqueSet, candidate, cancellationCheck)) {
       if (cap.HasValue && uniques.Count > cap.Value) {
         return false;
       }
@@ -349,11 +412,13 @@ internal sealed class QuantifierBounds {
     return true;
   }
 
-  private static List<Expression> DeduplicateLiterals(List<Expression> elements) {
+  private static List<Expression> DeduplicateLiterals(List<Expression> elements, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     var results = new List<Expression>();
-    var uniqueSet = new HashSet<Expression>(LiteralExpressionStructuralComparer.Instance);
+    var uniqueSet = new HashSet<Expression>(LiteralExpressionStructuralComparer.For(cancellationCheck));
     foreach (var element in elements) {
-      AddUniqueLiteral(results, uniqueSet, element);
+      cancellationCheck?.Invoke();
+      AddUniqueLiteral(results, uniqueSet, element, cancellationCheck);
     }
     return results;
   }
@@ -368,6 +433,7 @@ internal sealed class QuantifierBounds {
   internal bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, Func<Expression, Expression> simplifyAfterSubst,
     out Expression rewritten, bool emitOverflowResidual = true,
     Func<Expression, IReadOnlyDictionary<IVariable, Expression>, bool>? reserveInstanceExpansion = null) {
+    CheckForCancellation();
     rewritten = quantifierExpr;
 
     if (quantifierExpr.SplitQuantifier != null || quantifierExpr.SplitQuantifierExpression != null) {
@@ -378,7 +444,7 @@ internal sealed class QuantifierBounds {
     }
 
     var bounds = TryGetBoundsOrDiscover(quantifierExpr.BoundVars, quantifierExpr.Bounds,
-      () => GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr), quantifierExpr is ExistsExpr);
+      () => GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr, cancellationCheck), quantifierExpr is ExistsExpr, cancellationCheck);
     if (bounds == null || bounds.Count != quantifierExpr.BoundVars.Count) {
       return false;
     }
@@ -393,6 +459,7 @@ internal sealed class QuantifierBounds {
     var domains = new ConcreteDomain[quantifierExpr.BoundVars.Count];
     var allConcrete = true;
     for (var i = 0; i < quantifierExpr.BoundVars.Count; i++) {
+      CheckForCancellation();
       var bv = quantifierExpr.BoundVars[i];
       var bound = bounds[i];
       if (!TryGetConcreteDomain(bv, bound, simplifyAfterSubst, out var domain)) {
@@ -417,6 +484,7 @@ internal sealed class QuantifierBounds {
     var exceedsMaxInstances = false;
     var size = BigInteger.One;
     for (var i = 0; i < domains.Length; i++) {
+      CheckForCancellation();
       var domainSize = domains[i].Size;
       if (domainSize <= BigInteger.Zero) {
         rewritten = Expression.CreateBoolLiteral(quantifierExpr.Origin, isForall);
@@ -434,7 +502,7 @@ internal sealed class QuantifierBounds {
 
     // Use the original logical body and simplify per-instance after substitution. This naturally drops
     // guaranteed bounds like 0 <= i < N from the instantiated formula.
-    var logicalBody = GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr);
+    var logicalBody = GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr, cancellationCheck);
     if (logicalBody.Type == null) {
       logicalBody.Type = Type.Bool;
     }
@@ -453,6 +521,7 @@ internal sealed class QuantifierBounds {
     }
 
     void AddInstance(Expression instance) {
+      CheckForCancellation();
       if (Expression.IsBoolLiteral(instance, out var b)) {
         if (isForall && !b) {
           accumulator = Expression.CreateBoolLiteral(instance.Origin, false);
@@ -480,6 +549,7 @@ internal sealed class QuantifierBounds {
     bool reachedExpressionNodeLimit = false;
 
     bool HandleInstance(Substituter substituter) {
+      CheckForCancellation();
       if (reserveInstanceExpansion != null && !reserveInstanceExpansion(logicalBody, substMap)) {
         reachedExpressionNodeLimit = true;
         return true;
@@ -546,14 +616,19 @@ internal sealed class QuantifierBounds {
   /// </summary>
   internal bool TryMaterializeSetElements(Expression setExpr, uint? materializationCap, Func<Expression, Expression> simplify,
     out List<Expression> elements) {
+    CheckForCancellation();
     elements = null!;
-    var resolved = StripConcreteSyntax(setExpr);
+    var resolved = StripConcreteSyntax(setExpr, cancellationCheck);
 
     if (resolved is SetDisplayExpr setDisplay) {
       if (materializationCap.HasValue && setDisplay.Elements.Count > materializationCap.Value) {
         return false;
       }
-      elements = setDisplay.Elements.ToList();
+      elements = new List<Expression>();
+      foreach (var element in setDisplay.Elements) {
+        CheckForCancellation();
+        elements.Add(element);
+      }
       return true;
     }
 
@@ -570,19 +645,20 @@ internal sealed class QuantifierBounds {
   /// </summary>
   internal bool TryMaterializeSetComprehension(SetComprehension setComprehension, Func<Expression, Expression> simplify,
     out List<Expression> elements) {
+    CheckForCancellation();
     elements = null!;
 
     if (!setComprehension.Finite) {
       return false;
     }
 
-    var effectiveRange = ConjoinWithImpliedTypeConstraints(setComprehension.BoundVars, setComprehension.Range, setComprehension.Origin);
+    var effectiveRange = ConjoinWithImpliedTypeConstraints(setComprehension.BoundVars, setComprehension.Range, setComprehension.Origin, cancellationCheck);
     var bounds = TryGetBoundsOrDiscover(setComprehension.BoundVars, setComprehension.Bounds,
-      () => effectiveRange, polarity: true);
+      () => effectiveRange, polarity: true, cancellationCheck);
     if (bounds == null || bounds.Count != setComprehension.BoundVars.Count) {
       return false;
     }
-    if (bounds.Any(bound => bound == null)) {
+    if (bounds.Any(bound => { CheckForCancellation(); return bound == null; })) {
       if (setComprehension.Range == null) {
         return false;
       }
@@ -595,6 +671,7 @@ internal sealed class QuantifierBounds {
 
     var domains = new ConcreteDomain[setComprehension.BoundVars.Count];
     for (var i = 0; i < setComprehension.BoundVars.Count; i++) {
+      CheckForCancellation();
       var bv = setComprehension.BoundVars[i];
       var bound = bounds[i];
       ConcreteDomain domain;
@@ -618,6 +695,7 @@ internal sealed class QuantifierBounds {
     var term = setComprehension.Term;
 
     bool HandleInstance(Substituter substituter) {
+      CheckForCancellation();
       if (maxInstances > 0 && results.Count >= maxInstances) {
         return false;
       }
@@ -629,7 +707,7 @@ internal sealed class QuantifierBounds {
       }
 
       var termInst = simplify(substituter.Substitute(term));
-      termInst = StripConcreteSyntax(termInst);
+      termInst = StripConcreteSyntax(termInst, cancellationCheck);
       results.Add(termInst);
       return true;
     }
@@ -641,6 +719,7 @@ internal sealed class QuantifierBounds {
     var elementType = setComprehension.Type.NormalizeExpand().AsSetType?.Arg;
     if (elementType != null) {
       foreach (var element in results) {
+        CheckForCancellation();
         EnsureExpressionType(element, elementType);
       }
     }
@@ -654,20 +733,22 @@ internal sealed class QuantifierBounds {
   /// </summary>
   internal bool TryMaterializeMapComprehension(MapComprehension mapComprehension, Func<Expression, Expression> simplify,
     out List<MapDisplayEntry> entries) {
+    CheckForCancellation();
     entries = null!;
     if (!mapComprehension.Finite) {
       return false;
     }
 
-    var effectiveRange = ConjoinWithImpliedTypeConstraints(mapComprehension.BoundVars, mapComprehension.Range, mapComprehension.Origin);
+    var effectiveRange = ConjoinWithImpliedTypeConstraints(mapComprehension.BoundVars, mapComprehension.Range, mapComprehension.Origin, cancellationCheck);
     var bounds = TryGetBoundsOrDiscover(mapComprehension.BoundVars, mapComprehension.Bounds,
-      () => effectiveRange, polarity: true);
+      () => effectiveRange, polarity: true, cancellationCheck);
     if (bounds == null || bounds.Count != mapComprehension.BoundVars.Count) {
       return false;
     }
 
     var domains = new ConcreteDomain[mapComprehension.BoundVars.Count];
     for (var i = 0; i < mapComprehension.BoundVars.Count; i++) {
+      CheckForCancellation();
       var bv = mapComprehension.BoundVars[i];
       var bound = bounds[i];
       if (!TryGetConcreteDomain(bv, bound, simplify, out var domain)) {
@@ -681,7 +762,7 @@ internal sealed class QuantifierBounds {
     }
 
     var resultEntries = new List<MapDisplayEntry>();
-    var keyIndexByLiteral = new Dictionary<Expression, int>(LiteralExpressionStructuralComparer.Instance);
+    var keyIndexByLiteral = new Dictionary<Expression, int>(LiteralExpressionStructuralComparer.For(cancellationCheck));
     var substMap = new Dictionary<IVariable, Expression>();
     var typeMap = new Dictionary<TypeParameter, Type>();
 
@@ -697,6 +778,7 @@ internal sealed class QuantifierBounds {
     }
 
     bool HandleInstance(Substituter substituter) {
+      CheckForCancellation();
       if (maxInstances > 0 && resultEntries.Count >= maxInstances) {
         return false;
       }
@@ -708,16 +790,16 @@ internal sealed class QuantifierBounds {
       }
 
       var keyExpr = simplify(substituter.Substitute(keyTemplate));
-      keyExpr = StripConcreteSyntax(keyExpr);
-      if (!IsLiteralExpression(keyExpr)) {
+      keyExpr = StripConcreteSyntax(keyExpr, cancellationCheck);
+      if (!IsLiteralExpression(keyExpr, cancellationCheck)) {
         return false;
       }
 
       var valueExpr = simplify(substituter.Substitute(mapComprehension.Term));
-      valueExpr = StripConcreteSyntax(valueExpr);
+      valueExpr = StripConcreteSyntax(valueExpr, cancellationCheck);
 
       if (keyIndexByLiteral.TryGetValue(keyExpr, out var existingIndex)) {
-        if (!LiteralStructuralEquals(resultEntries[existingIndex].B, valueExpr)) {
+        if (!LiteralStructuralEquals(resultEntries[existingIndex].B, valueExpr, cancellationCheck)) {
           return false;
         }
         return true;
@@ -743,16 +825,18 @@ internal sealed class QuantifierBounds {
   /// </summary>
   private bool TryMaterializeMapComprehensionKeys(MapComprehension mapComprehension, Func<Expression, Expression> simplify,
     out List<Expression> keys) {
+    CheckForCancellation();
     keys = null!;
-    var effectiveRange = ConjoinWithImpliedTypeConstraints(mapComprehension.BoundVars, mapComprehension.Range, mapComprehension.Origin);
+    var effectiveRange = ConjoinWithImpliedTypeConstraints(mapComprehension.BoundVars, mapComprehension.Range, mapComprehension.Origin, cancellationCheck);
     var bounds = TryGetBoundsOrDiscover(mapComprehension.BoundVars, mapComprehension.Bounds,
-      () => effectiveRange, polarity: true);
+      () => effectiveRange, polarity: true, cancellationCheck);
     if (bounds == null || bounds.Count != mapComprehension.BoundVars.Count) {
       return false;
     }
 
     var domains = new ConcreteDomain[mapComprehension.BoundVars.Count];
     for (var i = 0; i < mapComprehension.BoundVars.Count; i++) {
+      CheckForCancellation();
       var boundVar = mapComprehension.BoundVars[i];
       var boundPool = bounds[i];
       if (!TryGetConcreteDomain(boundVar, boundPool, simplify, out var concreteDomain)) {
@@ -776,12 +860,13 @@ internal sealed class QuantifierBounds {
     }
 
     var resultKeys = new List<Expression>();
-    var resultKeySet = new HashSet<Expression>(LiteralExpressionStructuralComparer.Instance);
+    var resultKeySet = new HashSet<Expression>(LiteralExpressionStructuralComparer.For(cancellationCheck));
     var substMap = new Dictionary<IVariable, Expression>();
     var typeMap = new Dictionary<TypeParameter, Type>();
     var range = effectiveRange;
 
     bool HandleInstance(Substituter substituter) {
+      CheckForCancellation();
       if (!TryEvaluateRangeToBool(range, substituter, simplify, out var rangeValue)) {
         return false;
       }
@@ -790,8 +875,8 @@ internal sealed class QuantifierBounds {
       }
 
       var keyInst = simplify(substituter.Substitute(keyTemplate));
-      keyInst = StripConcreteSyntax(keyInst);
-      if (!IsLiteralExpression(keyInst)) {
+      keyInst = StripConcreteSyntax(keyInst, cancellationCheck);
+      if (!IsLiteralExpression(keyInst, cancellationCheck)) {
         return false;
       }
       var cap = maxInstances == 0 ? (uint?)null : maxInstances;
@@ -813,7 +898,7 @@ internal sealed class QuantifierBounds {
   /// </summary>
   internal bool TryGetSeqLengthConstraint(Expression expr, BoundVar seqVar, out int length) {
     length = default;
-    expr = NormalizeForPattern(expr);
+    expr = NormalizeForPattern(expr, cancellationCheck);
     if (expr is not BinaryExpr binaryExpr) {
       return false;
     }
@@ -822,14 +907,14 @@ internal sealed class QuantifierBounds {
       return false;
     }
 
-    if (TryGetSeqLength(binaryExpr.E0, seqVar, out var lengthValue) &&
-        TryGetIntLiteralValue(binaryExpr.E1, out var lengthLiteral)) {
+    if (TryGetSeqLength(binaryExpr.E0, seqVar, out var lengthValue, cancellationCheck) &&
+        TryGetIntLiteralValue(binaryExpr.E1, out var lengthLiteral, cancellationCheck)) {
       length = lengthLiteral;
       return lengthValue;
     }
 
-    if (TryGetSeqLength(binaryExpr.E1, seqVar, out var lengthValueAlt) &&
-        TryGetIntLiteralValue(binaryExpr.E0, out var lengthLiteralAlt)) {
+    if (TryGetSeqLength(binaryExpr.E1, seqVar, out var lengthValueAlt, cancellationCheck) &&
+        TryGetIntLiteralValue(binaryExpr.E0, out var lengthLiteralAlt, cancellationCheck)) {
       length = lengthLiteralAlt;
       return lengthValueAlt;
     }
@@ -852,14 +937,14 @@ internal sealed class QuantifierBounds {
       return false;
     }
 
-    var term = NormalizeForPattern(forallExpr.Term);
-    if (TryGetSetMembershipDomain(term, seqVar, indexVar, out domain)) {
+    var term = NormalizeForPattern(forallExpr.Term, cancellationCheck);
+    if (TryGetSetMembershipDomain(term, seqVar, indexVar, out domain, cancellationCheck)) {
       return true;
     }
-    if (TryGetOrEqualityDomain(term, seqVar, indexVar, out domain)) {
+    if (TryGetOrEqualityDomain(term, seqVar, indexVar, out domain, cancellationCheck)) {
       return true;
     }
-    if (TryGetIntRangeDomain(term, seqVar, indexVar, out domain)) {
+    if (TryGetIntRangeDomain(term, seqVar, indexVar, out domain, cancellationCheck)) {
       return true;
     }
 
@@ -867,22 +952,24 @@ internal sealed class QuantifierBounds {
   }
 
   // === Seq domain extraction helpers ===
-  private static bool TryGetSeqLength(Expression expr, BoundVar seqVar, out bool matched) {
+  private static bool TryGetSeqLength(Expression expr, BoundVar seqVar, out bool matched, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     matched = false;
-    expr = NormalizeForPattern(expr);
+    expr = NormalizeForPattern(expr, cancellationCheck);
     if (expr is not UnaryOpExpr unaryExpr) {
       return false;
     }
     if (unaryExpr.ResolvedOp != UnaryOpExpr.ResolvedOpcode.SeqLength) {
       return false;
     }
-    matched = IsBoundVar(unaryExpr.E, seqVar);
+    matched = IsBoundVar(unaryExpr.E, seqVar, cancellationCheck);
     return true;
   }
 
-  private static bool TryGetIntLiteralValue(Expression expr, out int value) {
+  private static bool TryGetIntLiteralValue(Expression expr, out int value, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     value = default;
-    if (!Expression.IsIntLiteral(expr, out var literal)) {
+    if (!PartialEvaluatorEngine.TryGetReducedIntLiteral(expr, out var literal, cancellationCheck)) {
       return false;
     }
     if (literal < 0 || literal > int.MaxValue) {
@@ -893,61 +980,59 @@ internal sealed class QuantifierBounds {
   }
 
   private bool TryGetIndexRange(Expression rangeExpr, BoundVar indexVar, int length) {
+    cancellationCheck?.Invoke();
+    var indexType = indexVar.Type.NormalizeExpandKeepConstraints();
+    var isNat = indexType.AsSubsetType == systemModuleManager.NatDecl;
+    if (indexType is not IntType && !isNat) {
+      // A refined index type can omit positions even when its explicit range looks complete.
+      return false;
+    }
     var conjuncts = new List<Expression>();
-    CollectConjuncts(rangeExpr, conjuncts);
-    var hasLower = indexVar.Type.AsSubsetType == systemModuleManager.NatDecl;
-    var hasUpper = false;
+    CollectConjuncts(rangeExpr, conjuncts, cancellationCheck);
+    BigInteger? lower = isNat ? BigInteger.Zero : null;
+    BigInteger? upper = null;
     foreach (var conjunct in conjuncts) {
-      var normalized = NormalizeForPattern(conjunct);
+      cancellationCheck?.Invoke();
+      var normalized = NormalizeForPattern(conjunct, cancellationCheck);
       if (normalized is not BinaryExpr binaryExpr) {
-        continue;
+        return false;
       }
       var isGe = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Ge || binaryExpr.Op == BinaryExpr.Opcode.Ge;
       var isGt = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Gt || binaryExpr.Op == BinaryExpr.Opcode.Gt;
       var isLe = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Le || binaryExpr.Op == BinaryExpr.Opcode.Le;
       var isLt = binaryExpr.ResolvedOp == BinaryExpr.ResolvedOpcode.Lt || binaryExpr.Op == BinaryExpr.Opcode.Lt;
       if (!isGe && !isGt && !isLe && !isLt) {
-        continue;
+        return false;
       }
 
-      if (IsBoundVar(binaryExpr.E0, indexVar) && Expression.IsIntLiteral(binaryExpr.E1, out var rightLiteral)) {
-        if (isLt && rightLiteral == length) {
-          hasUpper = true;
-          continue;
-        }
-        if (isLe && rightLiteral == length - 1) {
-          hasUpper = true;
-          continue;
-        }
-        if ((isGe || isGt) && rightLiteral == 0) {
-          hasLower = true;
-          continue;
-        }
-        continue;
+      BigInteger endpoint;
+      if (IsBoundVar(binaryExpr.E0, indexVar, cancellationCheck) &&
+          PartialEvaluatorEngine.TryGetReducedIntLiteral(binaryExpr.E1, out endpoint, cancellationCheck)) {
+        // The comparison already has the index on the left.
+      } else if (IsBoundVar(binaryExpr.E1, indexVar, cancellationCheck) &&
+                 PartialEvaluatorEngine.TryGetReducedIntLiteral(binaryExpr.E0, out endpoint, cancellationCheck)) {
+        (isGe, isLe) = (isLe, isGe);
+        (isGt, isLt) = (isLt, isGt);
+      } else {
+        return false;
       }
 
-      if (IsBoundVar(binaryExpr.E1, indexVar) && Expression.IsIntLiteral(binaryExpr.E0, out var leftLiteral)) {
-        if (isLe && leftLiteral == length - 1) {
-          hasUpper = true;
-          continue;
-        }
-        if (isLt && leftLiteral == length) {
-          hasUpper = true;
-          continue;
-        }
-        if ((isLe || isLt) && leftLiteral == 0) {
-          hasLower = true;
-          continue;
-        }
-        continue;
+      // Intersect inclusive integer endpoints; every conjunct must preserve exactly the valid index domain.
+      if (isGe || isGt) {
+        var inclusiveLower = endpoint + (isGt ? BigInteger.One : BigInteger.Zero);
+        lower = lower == null ? inclusiveLower : BigInteger.Max(lower.Value, inclusiveLower);
+      } else {
+        var inclusiveUpper = endpoint - (isLt ? BigInteger.One : BigInteger.Zero);
+        upper = upper == null ? inclusiveUpper : BigInteger.Min(upper.Value, inclusiveUpper);
       }
     }
 
-    return hasUpper && (hasLower || length == 0);
+    return lower == BigInteger.Zero && upper == new BigInteger(length) - BigInteger.One;
   }
 
   private static bool TryGetSetMembershipDomain(Expression term, BoundVar seqVar, BoundVar indexVar,
-    out List<Expression> domain) {
+    out List<Expression> domain, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     domain = null!;
     if (term is not BinaryExpr binaryExpr) {
       return false;
@@ -956,25 +1041,27 @@ internal sealed class QuantifierBounds {
     if (!isInSet) {
       return false;
     }
-    if (!TryGetSeqSelect(binaryExpr.E0, seqVar, indexVar, out _) ||
-        NormalizeForPattern(binaryExpr.E1) is not SetDisplayExpr setDisplay) {
+    if (!TryGetSeqSelect(binaryExpr.E0, seqVar, indexVar, out _, cancellationCheck) ||
+        NormalizeForPattern(binaryExpr.E1, cancellationCheck) is not SetDisplayExpr setDisplay) {
       return false;
     }
-    if (!setDisplay.Elements.All(IsLiteralExpression)) {
+    if (!setDisplay.Elements.All(value => IsLiteralExpression(value, cancellationCheck))) {
       return false;
     }
-    domain = DeduplicateLiterals(setDisplay.Elements);
+    domain = DeduplicateLiterals(setDisplay.Elements, cancellationCheck);
     return domain.Count > 0;
   }
 
   private static bool TryGetOrEqualityDomain(Expression term, BoundVar seqVar, BoundVar indexVar,
-    out List<Expression> domain) {
+    out List<Expression> domain, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     domain = null!;
     var disjuncts = new List<Expression>();
-    CollectDisjuncts(term, disjuncts);
+    CollectDisjuncts(term, disjuncts, cancellationCheck);
     var elements = new List<Expression>();
     foreach (var disjunct in disjuncts) {
-      var normalized = NormalizeForPattern(disjunct);
+      cancellationCheck?.Invoke();
+      var normalized = NormalizeForPattern(disjunct, cancellationCheck);
       if (normalized is not BinaryExpr binaryExpr) {
         return false;
       }
@@ -982,34 +1069,36 @@ internal sealed class QuantifierBounds {
       if (!isEq) {
         return false;
       }
-      if (TryGetSeqSelect(binaryExpr.E0, seqVar, indexVar, out _) && IsLiteralExpression(binaryExpr.E1)) {
+      if (TryGetSeqSelect(binaryExpr.E0, seqVar, indexVar, out _, cancellationCheck) && IsLiteralExpression(binaryExpr.E1, cancellationCheck)) {
         elements.Add(binaryExpr.E1);
         continue;
       }
-      if (TryGetSeqSelect(binaryExpr.E1, seqVar, indexVar, out _) && IsLiteralExpression(binaryExpr.E0)) {
+      if (TryGetSeqSelect(binaryExpr.E1, seqVar, indexVar, out _, cancellationCheck) && IsLiteralExpression(binaryExpr.E0, cancellationCheck)) {
         elements.Add(binaryExpr.E0);
         continue;
       }
       return false;
     }
 
-    domain = DeduplicateLiterals(elements);
+    domain = DeduplicateLiterals(elements, cancellationCheck);
     return domain.Count > 0;
   }
 
   private static bool TryGetIntRangeDomain(Expression term, BoundVar seqVar, BoundVar indexVar,
-    out List<Expression> domain) {
+    out List<Expression> domain, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     domain = null!;
     var seqType = seqVar.Type.NormalizeExpand().AsSeqType;
     if (seqType == null || !seqType.Arg.IsNumericBased(Type.NumericPersuasion.Int)) {
       return false;
     }
     var conjuncts = new List<Expression>();
-    CollectConjuncts(term, conjuncts);
+    CollectConjuncts(term, conjuncts, cancellationCheck);
     BigInteger? lower = null;
     BigInteger? upper = null;
     foreach (var conjunct in conjuncts) {
-      var normalized = NormalizeForPattern(conjunct);
+      cancellationCheck?.Invoke();
+      var normalized = NormalizeForPattern(conjunct, cancellationCheck);
       if (normalized is not BinaryExpr binaryExpr) {
         continue;
       }
@@ -1021,8 +1110,8 @@ internal sealed class QuantifierBounds {
         continue;
       }
 
-      if (TryGetSeqSelect(binaryExpr.E0, seqVar, indexVar, out _) &&
-          Expression.IsIntLiteral(binaryExpr.E1, out var rightLiteral)) {
+      if (TryGetSeqSelect(binaryExpr.E0, seqVar, indexVar, out _, cancellationCheck) &&
+          PartialEvaluatorEngine.TryGetReducedIntLiteral(binaryExpr.E1, out var rightLiteral, cancellationCheck)) {
         if (isGe || isGt) {
           var candidate = isGt ? rightLiteral + 1 : rightLiteral;
           lower = lower == null ? candidate : BigInteger.Max(lower.Value, candidate);
@@ -1035,8 +1124,8 @@ internal sealed class QuantifierBounds {
         }
       }
 
-      if (TryGetSeqSelect(binaryExpr.E1, seqVar, indexVar, out _) &&
-          Expression.IsIntLiteral(binaryExpr.E0, out var leftLiteral)) {
+      if (TryGetSeqSelect(binaryExpr.E1, seqVar, indexVar, out _, cancellationCheck) &&
+          PartialEvaluatorEngine.TryGetReducedIntLiteral(binaryExpr.E0, out var leftLiteral, cancellationCheck)) {
         if (isLe || isLt) {
           var candidate = isLt ? leftLiteral + 1 : leftLiteral;
           lower = lower == null ? candidate : BigInteger.Max(lower.Value, candidate);
@@ -1058,20 +1147,23 @@ internal sealed class QuantifierBounds {
 
     var elements = new List<Expression>();
     for (var value = lower.Value; value < upper.Value; value++) {
+      cancellationCheck?.Invoke();
       elements.Add(new LiteralExpr(seqVar.Origin, value) { Type = seqType.Arg });
     }
 
-    domain = DeduplicateLiterals(elements);
+    domain = DeduplicateLiterals(elements, cancellationCheck);
     return domain.Count > 0;
   }
 
   // === Quantifier/comprehension enumeration helpers ===
   private bool IsDomainProductWithinMaxInstances(ConcreteDomain[] domains) {
+    CheckForCancellation();
     if (maxInstances == 0) {
       return true;
     }
     var size = BigInteger.One;
     foreach (var domain in domains) {
+      CheckForCancellation();
       size *= domain.Size;
       if (size > maxInstances) {
         return false;
@@ -1080,24 +1172,26 @@ internal sealed class QuantifierBounds {
     return true;
   }
 
-  private static bool TryEvaluateRangeToBool(Expression? range, Substituter substituter,
+  private bool TryEvaluateRangeToBool(Expression? range, Substituter substituter,
     Func<Expression, Expression> simplify, out bool value) {
+    CheckForCancellation();
     value = true;
     if (range == null) {
       return true;
     }
 
     var rangeInst = simplify(substituter.Substitute(range));
-    rangeInst = StripConcreteSyntax(rangeInst);
+    rangeInst = StripConcreteSyntax(rangeInst, cancellationCheck);
     return Expression.IsBoolLiteral(rangeInst, out value);
   }
 
   private bool TryEnumerateAssignments(IReadOnlyList<BoundVar> boundVars, ConcreteDomain[] domains,
     Dictionary<IVariable, Expression> substMap, Dictionary<TypeParameter, Type> typeMap,
     Func<Substituter, bool> onComplete, Func<bool>? shouldStopEarly = null) {
-    var substituter = new Substituter(null, substMap, typeMap);
+    var substituter = new ContractReductionSubstituter(null, substMap, typeMap, null, null, cancellationCheck);
 
     bool Enumerate(int varIndex) {
+      CheckForCancellation();
       if (shouldStopEarly?.Invoke() == true) {
         return true;
       }
@@ -1108,6 +1202,7 @@ internal sealed class QuantifierBounds {
 
       var boundVar = boundVars[varIndex];
       foreach (var value in domains[varIndex].Enumerate()) {
+        CheckForCancellation();
         if (shouldStopEarly?.Invoke() == true) {
           return true;
         }
@@ -1128,16 +1223,17 @@ internal sealed class QuantifierBounds {
     return Enumerate(0);
   }
 
-  private static bool TryGetSeqSelect(Expression expr, BoundVar seqVar, BoundVar indexVar, out SeqSelectExpr selectExpr) {
+  private static bool TryGetSeqSelect(Expression expr, BoundVar seqVar, BoundVar indexVar, out SeqSelectExpr selectExpr, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     selectExpr = null!;
-    expr = NormalizeForPattern(expr);
+    expr = NormalizeForPattern(expr, cancellationCheck);
     if (expr is not SeqSelectExpr seqSelect) {
       return false;
     }
-    if (!IsBoundVar(seqSelect.Seq, seqVar)) {
+    if (!IsBoundVar(seqSelect.Seq, seqVar, cancellationCheck)) {
       return false;
     }
-    if (seqSelect.SelectOne && IsBoundVar(seqSelect.E0, indexVar)) {
+    if (seqSelect.SelectOne && IsBoundVar(seqSelect.E0, indexVar, cancellationCheck)) {
       selectExpr = seqSelect;
       return true;
     }
@@ -1157,6 +1253,7 @@ internal sealed class QuantifierBounds {
     var boundVarIndices = new Dictionary<BoundVar, int>();
     var isNat = new bool[boundVars.Count];
     for (var i = 0; i < boundVars.Count; i++) {
+      cancellationCheck?.Invoke();
       var bv = boundVars[i];
       if (!TryGetIntOrNatType(bv, out var isNatType)) {
         return false;
@@ -1167,17 +1264,18 @@ internal sealed class QuantifierBounds {
 
     var constraints = new List<IntBoundConstraint>();
     for (var i = 0; i < boundVars.Count; i++) {
+      cancellationCheck?.Invoke();
       if (bounds[i] is not IntBoundedPool intPool) {
         return false;
       }
       if (intPool.LowerBound != null) {
-        if (!TryGetVarPlusConstant(intPool.LowerBound, boundVarIndices, out var sourceIndex, out var offset)) {
+        if (!TryGetVarPlusConstant(intPool.LowerBound, boundVarIndices, out var sourceIndex, out var offset, cancellationCheck)) {
           return false;
         }
         constraints.Add(new IntBoundConstraint(i, sourceIndex, offset, true));
       }
       if (intPool.UpperBound != null) {
-        if (!TryGetVarPlusConstant(intPool.UpperBound, boundVarIndices, out var sourceIndex, out var offset)) {
+        if (!TryGetVarPlusConstant(intPool.UpperBound, boundVarIndices, out var sourceIndex, out var offset, cancellationCheck)) {
           return false;
         }
         constraints.Add(new IntBoundConstraint(i, sourceIndex, offset, false));
@@ -1193,6 +1291,7 @@ internal sealed class QuantifierBounds {
     var boundVarIndices = new Dictionary<BoundVar, int>();
     var isNat = new bool[boundVars.Count];
     for (var i = 0; i < boundVars.Count; i++) {
+      cancellationCheck?.Invoke();
       var bv = boundVars[i];
       if (!TryGetIntOrNatType(bv, out var isNatType)) {
         return false;
@@ -1201,12 +1300,13 @@ internal sealed class QuantifierBounds {
       boundVarIndices[bv] = i;
     }
 
-    var logicalBody = GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr);
+    var logicalBody = GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr, cancellationCheck);
     Expression rangeExpr = logicalBody;
     if (quantifierExpr is ForallExpr) {
       Expression? accumulatedRange = null;
       var remainingBody = logicalBody;
-      while (NormalizeForPattern(remainingBody) is BinaryExpr implication && IsImplication(implication)) {
+      while (NormalizeForPattern(remainingBody, cancellationCheck) is BinaryExpr implication && IsImplication(implication)) {
+        cancellationCheck?.Invoke();
         accumulatedRange = accumulatedRange == null
           ? implication.E0
           : Expression.CreateAnd(accumulatedRange, implication.E0);
@@ -1218,11 +1318,12 @@ internal sealed class QuantifierBounds {
     }
 
     var conjuncts = new List<Expression>();
-    CollectConjuncts(rangeExpr, conjuncts);
+    CollectConjuncts(rangeExpr, conjuncts, cancellationCheck);
 
     var constraints = new List<IntBoundConstraint>();
     foreach (var conjunct in conjuncts) {
-      var resolved = NormalizeForPattern(conjunct);
+      cancellationCheck?.Invoke();
+      var resolved = NormalizeForPattern(conjunct, cancellationCheck);
       if (resolved is not BinaryExpr binaryExpr) {
         continue;
       }
@@ -1246,8 +1347,8 @@ internal sealed class QuantifierBounds {
       } else {
         continue;
       }
-      if (!TryGetVarPlusConstant(leftExpr, boundVarIndices, out var leftIndex, out var leftConst) ||
-          !TryGetVarPlusConstant(rightExpr, boundVarIndices, out var rightIndex, out var rightConst)) {
+      if (!TryGetVarPlusConstant(leftExpr, boundVarIndices, out var leftIndex, out var leftConst, cancellationCheck) ||
+          !TryGetVarPlusConstant(rightExpr, boundVarIndices, out var rightIndex, out var rightConst, cancellationCheck)) {
         continue;
       }
       if (leftIndex.HasValue) {
@@ -1267,12 +1368,13 @@ internal sealed class QuantifierBounds {
     domains = Array.Empty<ConcreteDomain>();
     var boundVars = quantifierExpr.BoundVars;
     for (var i = 0; i < boundVars.Count; i++) {
+      cancellationCheck?.Invoke();
       if (!boundVars[i].Type.NormalizeExpand().IsCharType) {
         return false;
       }
     }
 
-    var logicalBody = GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr);
+    var logicalBody = GetLogicalBodyWithImpliedTypeConstraints(quantifierExpr, cancellationCheck);
     Expression rangeExpr = logicalBody;
     if (quantifierExpr is ForallExpr && logicalBody is BinaryExpr impExpr && IsImplication(impExpr)) {
       rangeExpr = impExpr.E0;
@@ -1280,6 +1382,7 @@ internal sealed class QuantifierBounds {
 
     var charDomains = new ConcreteDomain[boundVars.Count];
     for (var i = 0; i < boundVars.Count; i++) {
+      cancellationCheck?.Invoke();
       if (!TryGetConcreteCharDomainFromRange(rangeExpr, boundVars[i], out var domain)) {
         return false;
       }
@@ -1301,13 +1404,14 @@ internal sealed class QuantifierBounds {
     }
 
     var disjuncts = new List<Expression>();
-    var normalizedRange = NormalizeForPattern(rangeExpr);
+    var normalizedRange = NormalizeForPattern(rangeExpr, cancellationCheck);
     if (normalizedRange is ChainingExpression chainingExpression) {
       normalizedRange = chainingExpression.E;
     }
-    CollectDisjuncts(normalizedRange, disjuncts);
+    CollectDisjuncts(normalizedRange, disjuncts, cancellationCheck);
     var ranges = new List<(int Lower, int Upper)>();
     foreach (var disjunct in disjuncts) {
+      cancellationCheck?.Invoke();
       if (!TryExtractCharRangeFromConjuncts(disjunct, boundVar, out var lower, out var upper)) {
         return false;
       }
@@ -1323,7 +1427,9 @@ internal sealed class QuantifierBounds {
 
     var elements = new List<Expression>();
     foreach (var (lower, upper) in ranges) {
+      cancellationCheck?.Invoke();
       for (var codePoint = lower; codePoint < upper; codePoint++) {
+        cancellationCheck?.Invoke();
         if (maxInstances > 0 && elements.Count >= maxInstances) {
           return false;
         }
@@ -1343,13 +1449,14 @@ internal sealed class QuantifierBounds {
     var hasLower = false;
     var hasUpper = false;
     var conjuncts = new List<Expression>();
-    var normalizedExpr = NormalizeForPattern(expr);
+    var normalizedExpr = NormalizeForPattern(expr, cancellationCheck);
     if (normalizedExpr is ChainingExpression chainingExpression) {
       normalizedExpr = chainingExpression.E;
     }
-    CollectConjuncts(normalizedExpr, conjuncts);
+    CollectConjuncts(normalizedExpr, conjuncts, cancellationCheck);
     foreach (var conjunct in conjuncts) {
-      var normalized = NormalizeForPattern(conjunct);
+      cancellationCheck?.Invoke();
+      var normalized = NormalizeForPattern(conjunct, cancellationCheck);
       if (normalized is not BinaryExpr binaryExpr) {
         continue;
       }
@@ -1460,7 +1567,7 @@ internal sealed class QuantifierBounds {
       return false;
     }
 
-    if (TryGetCharLiteral(binaryExpr.E0, out var leftLiteral) && IsBoundVarName(binaryExpr.E1, boundVar)) {
+    if (TryGetCharLiteral(binaryExpr.E0, out var leftLiteral, cancellationCheck) && IsBoundVarName(binaryExpr.E1, boundVar, cancellationCheck)) {
       if (isLess) {
         lower = leftLiteral + 1;
       } else if (isLe) {
@@ -1473,7 +1580,7 @@ internal sealed class QuantifierBounds {
       return true;
     }
 
-    if (TryGetCharLiteral(binaryExpr.E1, out var rightLiteral) && IsBoundVarName(binaryExpr.E0, boundVar)) {
+    if (TryGetCharLiteral(binaryExpr.E1, out var rightLiteral, cancellationCheck) && IsBoundVarName(binaryExpr.E0, boundVar, cancellationCheck)) {
       if (isLess) {
         upper = rightLiteral;
       } else if (isLe) {
@@ -1489,7 +1596,8 @@ internal sealed class QuantifierBounds {
     return false;
   }
 
-  private static bool IsBoundVarName(Expression expr, BoundVar boundVar) {
+  private static bool IsBoundVarName(Expression expr, BoundVar boundVar, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     if (expr is IdentifierExpr identifierExpr) {
       return identifierExpr.Name == boundVar.Name;
     }
@@ -1499,12 +1607,12 @@ internal sealed class QuantifierBounds {
   private bool TryGetCharBoundOperand(Expression expr, BoundVar boundVar, out bool isVar, out int? literal) {
     isVar = false;
     literal = null;
-    expr = NormalizeForPattern(expr);
+    expr = NormalizeForPattern(expr, cancellationCheck);
     if (expr is ConversionExpr conversionExpr) {
       var fromType = conversionExpr.E.Type?.NormalizeExpand();
       var toType = conversionExpr.Type?.NormalizeExpand();
       if (fromType != null && toType is IntType && fromType.IsCharType) {
-        expr = NormalizeForPattern(conversionExpr.E);
+        expr = NormalizeForPattern(conversionExpr.E, cancellationCheck);
       }
     }
     if (expr is IdentifierExpr identifierExpr &&
@@ -1512,21 +1620,22 @@ internal sealed class QuantifierBounds {
       isVar = true;
       return true;
     }
-    if (Expression.IsIntLiteral(expr, out var intLiteral)) {
+    if (PartialEvaluatorEngine.TryGetReducedIntLiteral(expr, out var intLiteral, cancellationCheck)) {
       if (intLiteral >= 0 && intLiteral <= 0xFFFF) {
         literal = (int)intLiteral;
         return true;
       }
       return false;
     }
-    if (TryGetCharLiteral(expr, out var value)) {
+    if (TryGetCharLiteral(expr, out var value, cancellationCheck)) {
       literal = value;
       return true;
     }
     return false;
   }
 
-  private static bool TryGetCharLiteral(Expression expr, out int value) {
+  private static bool TryGetCharLiteral(Expression expr, out int value, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     value = default;
     if (expr is not CharLiteralExpr charLiteral || charLiteral.Value is not string literal) {
       return false;
@@ -1552,14 +1661,14 @@ internal sealed class QuantifierBounds {
     }
 
     if (literal.StartsWith("\\u", StringComparison.Ordinal) && literal.Length == 6 &&
-        TryParseHex(literal.AsSpan(2), out var utf16Code)) {
+        TryParseHex(literal.AsSpan(2), out var utf16Code, cancellationCheck)) {
       value = utf16Code;
       return true;
     }
 
     if (literal.StartsWith("\\U{", StringComparison.Ordinal) && literal.EndsWith("}", StringComparison.Ordinal)) {
       var hexSpan = literal.AsSpan(3, literal.Length - 4);
-      if (TryParseHex(hexSpan, out var unicodeCode) && unicodeCode <= 0xFFFF) {
+      if (TryParseHex(hexSpan, out var unicodeCode, cancellationCheck) && unicodeCode <= 0xFFFF) {
         value = unicodeCode;
         return true;
       }
@@ -1568,12 +1677,14 @@ internal sealed class QuantifierBounds {
     return false;
   }
 
-  private static bool TryParseHex(ReadOnlySpan<char> hexSpan, out int value) {
+  private static bool TryParseHex(ReadOnlySpan<char> hexSpan, out int value, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     value = 0;
     if (hexSpan.IsEmpty) {
       return false;
     }
     foreach (var digit in hexSpan) {
+      cancellationCheck?.Invoke();
       int digitValue;
       if (digit >= '0' && digit <= '9') {
         digitValue = digit - '0';
@@ -1594,6 +1705,7 @@ internal sealed class QuantifierBounds {
     var lowerBounds = new BigInteger?[boundVars.Count];
     var upperBounds = new BigInteger?[boundVars.Count];
     for (var i = 0; i < boundVars.Count; i++) {
+      cancellationCheck?.Invoke();
       if (isNat[i]) {
         lowerBounds[i] = BigInteger.Zero;
       }
@@ -1603,9 +1715,11 @@ internal sealed class QuantifierBounds {
     var passes = 0;
     var maxPasses = boundVars.Count * boundVars.Count + 5;
     while (changed && passes < maxPasses) {
+      cancellationCheck?.Invoke();
       changed = false;
       passes++;
       foreach (var constraint in constraints) {
+        cancellationCheck?.Invoke();
         if (constraint.IsLower) {
           var sourceValue = constraint.SourceIndex.HasValue ? lowerBounds[constraint.SourceIndex.Value] : (BigInteger?)BigInteger.Zero;
           if (sourceValue == null) {
@@ -1634,16 +1748,21 @@ internal sealed class QuantifierBounds {
     // another factor has only relational (and therefore non-concrete) bounds.
     // Represent the product as empty so the caller returns the quantifier's
     // vacuous value before attempting enumeration.
-    if (detectEmptyProduct && Enumerable.Range(0, boundVars.Count).Any(index =>
-          lowerBounds[index].HasValue && upperBounds[index].HasValue &&
-          lowerBounds[index]!.Value >= upperBounds[index]!.Value)) {
-      domains = boundVars.Select(boundVar => new ConcreteDomain(
-        BigInteger.Zero, () => Enumerable.Empty<Expression>())).ToArray();
+    if (detectEmptyProduct && Enumerable.Range(0, boundVars.Count).Any(index => {
+      cancellationCheck?.Invoke();
+      return lowerBounds[index].HasValue && upperBounds[index].HasValue &&
+        lowerBounds[index]!.Value >= upperBounds[index]!.Value;
+    })) {
+      domains = boundVars.Select(boundVar => {
+        cancellationCheck?.Invoke();
+        return new ConcreteDomain(BigInteger.Zero, () => Enumerable.Empty<Expression>());
+      }).ToArray();
       return true;
     }
 
     domains = new ConcreteDomain[boundVars.Count];
     for (var i = 0; i < boundVars.Count; i++) {
+      cancellationCheck?.Invoke();
       if (lowerBounds[i] == null || upperBounds[i] == null) {
         return false;
       }
@@ -1668,9 +1787,10 @@ internal sealed class QuantifierBounds {
   }
 
   private static bool TryGetVarPlusConstant(Expression expr, IReadOnlyDictionary<BoundVar, int> boundVarIndices,
-    out int? varIndex, out BigInteger constant) {
-    expr = NormalizeForPattern(expr);
-    if (Expression.IsIntLiteral(expr, out var literal)) {
+    out int? varIndex, out BigInteger constant, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    expr = NormalizeForPattern(expr, cancellationCheck);
+    if (PartialEvaluatorEngine.TryGetReducedIntLiteral(expr, out var literal, cancellationCheck)) {
       varIndex = null;
       constant = literal;
       return true;
@@ -1689,8 +1809,8 @@ internal sealed class QuantifierBounds {
         constant = default;
         return false;
       }
-      if (!TryGetVarPlusConstant(binaryExpr.E0, boundVarIndices, out var leftIndex, out var leftConst) ||
-          !TryGetVarPlusConstant(binaryExpr.E1, boundVarIndices, out var rightIndex, out var rightConst)) {
+      if (!TryGetVarPlusConstant(binaryExpr.E0, boundVarIndices, out var leftIndex, out var leftConst, cancellationCheck) ||
+          !TryGetVarPlusConstant(binaryExpr.E1, boundVarIndices, out var rightIndex, out var rightConst, cancellationCheck)) {
         varIndex = null;
         constant = default;
         return false;
@@ -1726,6 +1846,7 @@ internal sealed class QuantifierBounds {
   /// </summary>
   internal bool TryGetConcreteDomain(BoundVar bv, BoundedPool? bound, Func<Expression, Expression> simplify,
     out ConcreteDomain domain) {
+    CheckForCancellation();
     domain = null!;
 
     if (bound == null) {
@@ -1752,8 +1873,8 @@ internal sealed class QuantifierBounds {
     }
 
     if (bound is ExactBoundedPool exactBoundedPool) {
-      var value = StripConcreteSyntax(exactBoundedPool.E);
-      if (!IsLiteralExpression(value)) {
+      var value = StripConcreteSyntax(exactBoundedPool.E, cancellationCheck);
+      if (!IsLiteralExpression(value, cancellationCheck)) {
         return false;
       }
       domain = new ConcreteDomain(BigInteger.One, () => new[] { value });
@@ -1774,14 +1895,15 @@ internal sealed class QuantifierBounds {
     }
 
     if (bound is SeqBoundedPool seqPool) {
-      var resolved = StripConcreteSyntax(seqPool.Seq);
+      var resolved = StripConcreteSyntax(seqPool.Seq, cancellationCheck);
       if (resolved is SeqDisplayExpr seqDisplay) {
         var elements = new List<Expression>();
-        var elementSet = new HashSet<Expression>(LiteralExpressionStructuralComparer.Instance);
+        var elementSet = new HashSet<Expression>(LiteralExpressionStructuralComparer.For(cancellationCheck));
         var cap = maxInstances == 0 ? (uint?)null : maxInstances;
         foreach (var element in seqDisplay.Elements) {
-          var value = StripConcreteSyntax(element);
-          if (!IsLiteralExpression(value)) {
+          CheckForCancellation();
+          var value = StripConcreteSyntax(element, cancellationCheck);
+          if (!IsLiteralExpression(value, cancellationCheck)) {
             return false;
           }
           if (!TryAddUniqueLiteral(elements, elementSet, value, cap)) {
@@ -1795,14 +1917,15 @@ internal sealed class QuantifierBounds {
     }
 
     if (bound is MultiSetBoundedPool multisetPool) {
-      var resolved = StripConcreteSyntax(multisetPool.MultiSet);
+      var resolved = StripConcreteSyntax(multisetPool.MultiSet, cancellationCheck);
       if (resolved is MultiSetDisplayExpr multisetDisplay) {
         var elements = new List<Expression>();
-        var elementSet = new HashSet<Expression>(LiteralExpressionStructuralComparer.Instance);
+        var elementSet = new HashSet<Expression>(LiteralExpressionStructuralComparer.For(cancellationCheck));
         var cap = maxInstances == 0 ? (uint?)null : maxInstances;
         foreach (var element in multisetDisplay.Elements) {
-          var value = StripConcreteSyntax(element);
-          if (!IsLiteralExpression(value)) {
+          CheckForCancellation();
+          var value = StripConcreteSyntax(element, cancellationCheck);
+          if (!IsLiteralExpression(value, cancellationCheck)) {
             return false;
           }
           if (!TryAddUniqueLiteral(elements, elementSet, value, cap)) {
@@ -1819,18 +1942,19 @@ internal sealed class QuantifierBounds {
       if (!mapPool.IsFiniteCollection) {
         return false;
       }
-      var resolved = StripConcreteSyntax(mapPool.Map);
+      var resolved = StripConcreteSyntax(mapPool.Map, cancellationCheck);
       if (resolved is MapDisplayExpr mapDisplay) {
         if (!mapDisplay.Finite) {
           return false;
         }
         var keys = new List<Expression>();
-        var keySet = new HashSet<Expression>(LiteralExpressionStructuralComparer.Instance);
+        var keySet = new HashSet<Expression>(LiteralExpressionStructuralComparer.For(cancellationCheck));
         var cap = maxInstances == 0 ? (uint?)null : maxInstances;
         foreach (var entry in mapDisplay.Elements) {
-          var key = StripConcreteSyntax(entry.A);
-          var value = StripConcreteSyntax(entry.B);
-          if (!IsLiteralExpression(key) || !IsLiteralExpression(value)) {
+          CheckForCancellation();
+          var key = StripConcreteSyntax(entry.A, cancellationCheck);
+          var value = StripConcreteSyntax(entry.B, cancellationCheck);
+          if (!IsLiteralExpression(key, cancellationCheck) || !IsLiteralExpression(value, cancellationCheck)) {
             return false;
           }
           if (!TryAddUniqueLiteral(keys, keySet, key, cap)) {
@@ -1862,7 +1986,7 @@ internal sealed class QuantifierBounds {
         return false;
       }
       if (maxInstances > 0 && TryGetSetElementUpperBound(subSetPool.UpperBound, simplify, out var elementUpperBound)) {
-        var maxElements = MaxSubsetElementCount(maxInstances);
+        var maxElements = MaxSubsetElementCount(maxInstances, cancellationCheck);
         if (elementUpperBound > maxElements) {
           return false;
         }
@@ -1886,7 +2010,7 @@ internal sealed class QuantifierBounds {
       }
 
       var singletonCtors = datatypePool.Decl.Ctors
-        .Where(ctor => ctor.Formals.Count == 0)
+        .Where(ctor => { CheckForCancellation(); return ctor.Formals.Count == 0; })
         .ToList();
       if (singletonCtors.Count == 0) {
         return false;
@@ -1906,11 +2030,13 @@ internal sealed class QuantifierBounds {
   // === Enumerators & small utilities ===
   private IEnumerable<Expression> EnumerateIntRange(BoundVar bv, BigInteger lower, BigInteger upper) {
     for (var v = lower; v < upper; v++) {
+      CheckForCancellation();
       yield return new LiteralExpr(bv.Origin, v) { Type = bv.Type };
     }
   }
 
-  private static IEnumerable<Expression> EnumerateBooleanValues(Type boolType, IOrigin origin) {
+  private IEnumerable<Expression> EnumerateBooleanValues(Type boolType, IOrigin origin) {
+    CheckForCancellation();
     var falseExpr = Expression.CreateBoolLiteral(origin, false);
     falseExpr.Type = boolType;
     yield return falseExpr;
@@ -1920,16 +2046,18 @@ internal sealed class QuantifierBounds {
     yield return trueExpr;
   }
 
-  private static IEnumerable<Expression> EnumerateAllChars(Type charType, IOrigin origin) {
+  private IEnumerable<Expression> EnumerateAllChars(Type charType, IOrigin origin) {
     for (var codePoint = 0; codePoint < CharDomainCardinality; codePoint++) {
+      CheckForCancellation();
       var charExpr = new CharLiteralExpr(origin, ((char)codePoint).ToString()) { Type = charType };
       yield return charExpr;
     }
   }
 
-  private static IEnumerable<Expression> EnumerateDatatypeSingletonConstructors(Type datatypeType, IOrigin origin,
+  private IEnumerable<Expression> EnumerateDatatypeSingletonConstructors(Type datatypeType, IOrigin origin,
     string datatypeName, IEnumerable<DatatypeCtor> constructors) {
     foreach (var constructor in constructors) {
+      CheckForCancellation();
       var value = new DatatypeValue(origin, datatypeName, constructor.Name, new List<Expression>()) {
         Type = datatypeType,
         Ctor = constructor
@@ -1938,24 +2066,28 @@ internal sealed class QuantifierBounds {
     }
   }
 
-  private static IEnumerable<Expression> EnumerateSetElements(List<Expression> elements, Type elementType) {
+  private IEnumerable<Expression> EnumerateSetElements(List<Expression> elements, Type elementType) {
     foreach (var element in elements) {
+      CheckForCancellation();
       EnsureExpressionType(element, elementType);
       yield return element;
     }
   }
 
-  private static IEnumerable<Expression> EnumerateSubsets(IOrigin origin, List<Expression> elements, SetType setType) {
+  private IEnumerable<Expression> EnumerateSubsets(IOrigin origin, List<Expression> elements, SetType setType) {
     var current = new List<Expression>();
     foreach (var subset in EnumerateSubsetsRecursive(origin, elements, setType, 0, current)) {
+      CheckForCancellation();
       yield return subset;
     }
   }
 
-  private static IEnumerable<Expression> EnumerateSubsetsRecursive(IOrigin origin, List<Expression> elements, SetType setType, int index, List<Expression> current) {
+  private IEnumerable<Expression> EnumerateSubsetsRecursive(IOrigin origin, List<Expression> elements, SetType setType, int index, List<Expression> current) {
+    CheckForCancellation();
     if (index == elements.Count) {
       var subsetElements = new List<Expression>(current);
       foreach (var element in subsetElements) {
+        CheckForCancellation();
         EnsureExpressionType(element, setType.Arg);
       }
       var subsetExpr = new SetDisplayExpr(origin, setType.Finite, subsetElements) { Type = setType };
@@ -1964,11 +2096,13 @@ internal sealed class QuantifierBounds {
     }
 
     foreach (var subset in EnumerateSubsetsRecursive(origin, elements, setType, index + 1, current)) {
+      CheckForCancellation();
       yield return subset;
     }
 
     current.Add(elements[index]);
     foreach (var subset in EnumerateSubsetsRecursive(origin, elements, setType, index + 1, current)) {
+      CheckForCancellation();
       yield return subset;
     }
     current.RemoveAt(current.Count - 1);
@@ -1976,7 +2110,7 @@ internal sealed class QuantifierBounds {
 
   private bool TryGetSetElementUpperBound(Expression setExpr, Func<Expression, Expression> simplify, out BigInteger upperBound) {
     upperBound = default;
-    var resolved = StripConcreteSyntax(setExpr);
+    var resolved = StripConcreteSyntax(setExpr, cancellationCheck);
 
     if (resolved is SetDisplayExpr setDisplay) {
       upperBound = setDisplay.Elements.Count;
@@ -2001,6 +2135,7 @@ internal sealed class QuantifierBounds {
 
     var product = BigInteger.One;
     for (var i = 0; i < setComprehension.BoundVars.Count; i++) {
+      cancellationCheck?.Invoke();
       var bv = setComprehension.BoundVars[i];
       var bound = setComprehension.Bounds[i];
       if (!TryGetConcreteIntDomain(bv, bound, out var lower, out var upper)) {
@@ -2018,13 +2153,15 @@ internal sealed class QuantifierBounds {
     return true;
   }
 
-  private static BigInteger MaxSubsetElementCount(uint maxInstances) {
+  private static BigInteger MaxSubsetElementCount(uint maxInstances, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     if (maxInstances == 0) {
       return BigInteger.Zero;
     }
     var value = maxInstances;
     var count = 0;
     while (value > 1) {
+      cancellationCheck?.Invoke();
       value >>= 1;
       count++;
     }
@@ -2048,16 +2185,16 @@ internal sealed class QuantifierBounds {
 
     Expression upperBound = intPool.UpperBound;
     if (upperBound != null) {
-      upperBound = StripConcreteSyntax(upperBound);
+      upperBound = StripConcreteSyntax(upperBound, cancellationCheck);
     }
 
-    if (upperBound == null || !Expression.IsIntLiteral(upperBound, out upper)) {
+    if (upperBound == null || !PartialEvaluatorEngine.TryGetReducedIntLiteral(upperBound, out upper, cancellationCheck)) {
       return false;
     }
 
     Expression lowerBound = intPool.LowerBound;
     if (lowerBound != null) {
-      lowerBound = StripConcreteSyntax(lowerBound);
+      lowerBound = StripConcreteSyntax(lowerBound, cancellationCheck);
     }
 
     if (lowerBound == null) {
@@ -2065,7 +2202,7 @@ internal sealed class QuantifierBounds {
         return false;
       }
       lower = BigInteger.Zero;
-    } else if (!Expression.IsIntLiteral(lowerBound, out lower)) {
+    } else if (!PartialEvaluatorEngine.TryGetReducedIntLiteral(lowerBound, out lower, cancellationCheck)) {
       return false;
     }
 
@@ -2081,7 +2218,8 @@ internal sealed class QuantifierBounds {
     List<BoundVar> boundVars,
     List<BoundedPool?>? existingBounds,
     Func<Expression?> getExpressionForDiscovery,
-    bool polarity) {
+    bool polarity, Action? cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     var bounds = existingBounds;
     if (bounds == null || bounds.Count != boundVars.Count) {
       var expr = getExpressionForDiscovery();

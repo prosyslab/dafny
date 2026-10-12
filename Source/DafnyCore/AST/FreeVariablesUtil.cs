@@ -1,6 +1,6 @@
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
-using System.Linq;
 
 namespace Microsoft.Dafny {
   public static class FreeVariablesUtil {
@@ -9,7 +9,12 @@ namespace Microsoft.Dafny {
     ///   (if 'v' is non-null) 'v' occurs as a free variable in 'expr' or
     ///   (if 'lookForReceiver' is true) 'this' occurs in 'expr'.
     /// </summary>
-    public static bool ContainsFreeVariable(Expression expr, bool lookForReceiver, IVariable v) {
+    public static bool ContainsFreeVariable(Expression expr, bool lookForReceiver, IVariable v) =>
+      ContainsFreeVariable(expr, lookForReceiver, v, null);
+
+    /// <summary>Checks free-variable occurrence while observing the supplied traversal boundary.</summary>
+    public static bool ContainsFreeVariable(Expression expr, bool lookForReceiver, IVariable v, Action cancellationCheck) {
+      cancellationCheck?.Invoke();
       Contract.Requires(expr != null);
       Contract.Requires(lookForReceiver || v != null);
 
@@ -19,7 +24,7 @@ namespace Microsoft.Dafny {
         IdentifierExpr e = (IdentifierExpr)expr;
         return e.Var == v;
       } else {
-        return Contract.Exists(expr.SubExpressions, ee => ContainsFreeVariable(ee, lookForReceiver, v));
+        return Contract.Exists(expr.SubExpressions, ee => ContainsFreeVariable(ee, lookForReceiver, v, cancellationCheck));
       }
     }
 
@@ -29,26 +34,43 @@ namespace Microsoft.Dafny {
       ComputeFreeVariables(options, expr, fvs);
       return fvs;
     }
-    public static void ComputeFreeVariables(DafnyOptions options, Expression expr, ISet<IVariable> fvs) {
+    public static void ComputeFreeVariables(DafnyOptions options, Expression expr, ISet<IVariable> fvs) =>
+      ComputeFreeVariables(options, expr, fvs, null);
+
+    /// <summary>Adds free variables while observing the supplied traversal boundary.</summary>
+    public static void ComputeFreeVariables(DafnyOptions options, Expression expr, ISet<IVariable> fvs, Action cancellationCheck) {
       Contract.Requires(expr != null);
       Contract.Requires(fvs != null);
       bool dontCare0 = false, dontCare1 = false;
       Type dontCareT = null;
       var dontCareHeapAt = new HashSet<Label>();
-      ComputeFreeVariables(options, expr, fvs, ref dontCare0, ref dontCare1, dontCareHeapAt, ref dontCareT, false);
+      ComputeFreeVariables(options, expr, fvs, ref dontCare0, ref dontCare1, dontCareHeapAt, ref dontCareT, false, cancellationCheck);
     }
-    public static void ComputeFreeVariables(DafnyOptions options, Expression expr, ISet<IVariable> fvs, ref bool usesHeap, bool includeStatements = false) {
+    public static void ComputeFreeVariables(DafnyOptions options, Expression expr, ISet<IVariable> fvs, ref bool usesHeap, bool includeStatements = false) =>
+      ComputeFreeVariables(options, expr, fvs, ref usesHeap, includeStatements, null);
+
+    /// <summary>Collects free variables and heap use with cancellation during recursive traversal.</summary>
+    public static void ComputeFreeVariables(DafnyOptions options, Expression expr, ISet<IVariable> fvs,
+      ref bool usesHeap, bool includeStatements, Action cancellationCheck) {
       Contract.Requires(expr != null);
       Contract.Requires(fvs != null);
       bool dontCare1 = false;
       Type dontCareT = null;
       var dontCareHeapAt = new HashSet<Label>();
-      ComputeFreeVariables(options, expr, fvs, ref usesHeap, ref dontCare1, dontCareHeapAt, ref dontCareT, includeStatements);
+      ComputeFreeVariables(options, expr, fvs, ref usesHeap, ref dontCare1, dontCareHeapAt, ref dontCareT, includeStatements, cancellationCheck);
     }
     public static void ComputeFreeVariables(DafnyOptions options, Expression expr,
       ISet<IVariable> fvs,
       ref bool usesHeap, ref bool usesOldHeap, ISet<Label> freeHeapAtVariables, ref Type usesThis,
-      bool includeStatements) {
+      bool includeStatements) =>
+      ComputeFreeVariables(options, expr, fvs, ref usesHeap, ref usesOldHeap, freeHeapAtVariables,
+        ref usesThis, includeStatements, null);
+
+    /// <summary>Tracks free variables, receivers and heap epochs while checking recursive expressions and statements.</summary>
+    public static void ComputeFreeVariables(DafnyOptions options, Expression expr, ISet<IVariable> fvs,
+      ref bool usesHeap, ref bool usesOldHeap, ISet<Label> freeHeapAtVariables, ref Type usesThis,
+      bool includeStatements, Action cancellationCheck) {
+      cancellationCheck?.Invoke();
       Contract.Requires(expr != null);
 
       if (expr is ThisExpr) {
@@ -117,12 +139,12 @@ namespace Microsoft.Dafny {
       bool uHeap = false, uOldHeap = false;
       Type uThis = null;
       if (expr is StmtExpr stmtExpr && includeStatements) {
-        foreach (var subExpression in stmtExpr.S.SubExpressionsIncludingTransitiveSubStatements) {
-          ComputeFreeVariables(options, subExpression, fvs, ref uHeap, ref uOldHeap, freeHeapAtVariables, ref uThis, includeStatements);
+        foreach (var subExpression in StatementExpressions(stmtExpr.S, cancellationCheck)) {
+          ComputeFreeVariables(options, subExpression, fvs, ref uHeap, ref uOldHeap, freeHeapAtVariables, ref uThis, includeStatements, cancellationCheck);
         }
       }
       foreach (var subExpression in expr.SubExpressions) {
-        ComputeFreeVariables(options, subExpression, fvs, ref uHeap, ref uOldHeap, freeHeapAtVariables, ref uThis, includeStatements);
+        ComputeFreeVariables(options, subExpression, fvs, ref uHeap, ref uOldHeap, freeHeapAtVariables, ref uThis, includeStatements, cancellationCheck);
       }
       Contract.Assert(usesThis == null || uThis == null || usesThis.Equals(uThis));
       usesThis = usesThis ?? uThis;
@@ -141,24 +163,64 @@ namespace Microsoft.Dafny {
 
       if (expr is LetExpr) {
         var e = (LetExpr)expr;
-        foreach (var v in e.BoundVars) {
-          fvs.Remove(v);
+        foreach (var pattern in e.LHSs) {
+          RemovePatternVariables(pattern, fvs, cancellationCheck);
         }
       } else if (expr is ComprehensionExpr) {
         var e = (ComprehensionExpr)expr;
         foreach (var v in e.BoundVars) {
+          cancellationCheck?.Invoke();
           fvs.Remove(v);
         }
       } else if (expr is MatchExpr me) {
-        foreach (var v in me.Cases.SelectMany(c => c.Arguments)) {
-          fvs.Remove(v);
+        foreach (var matchCase in me.Cases) {
+          cancellationCheck?.Invoke();
+          foreach (var variable in matchCase.Arguments) {
+            cancellationCheck?.Invoke();
+            fvs.Remove(variable);
+          }
         }
       } else if (expr is NestedMatchExpr nestedMatchExpr) {
-        foreach (var v in nestedMatchExpr.Cases.
-                   SelectMany(c => c.Pat.DescendantsAndSelf).
-                   OfType<IdPattern>().Where(id => id.Arguments == null).
-                   Select(id => id.BoundVar)) {
-          fvs.Remove(v);
+        foreach (var matchCase in nestedMatchExpr.Cases) {
+          cancellationCheck?.Invoke();
+          var pending = new Stack<INode>();
+          pending.Push(matchCase.Pat);
+          while (pending.TryPop(out var pattern)) {
+            cancellationCheck?.Invoke();
+            if (pattern is IdPattern { Arguments: null } identifier) {
+              fvs.Remove(identifier.BoundVar);
+            }
+            foreach (var child in pattern.Children) {
+              cancellationCheck?.Invoke();
+              pending.Push(child);
+            }
+          }
+        }
+      }
+    }
+
+    private static void RemovePatternVariables(CasePattern<BoundVar> pattern, ISet<IVariable> freeVariables,
+      Action cancellationCheck) {
+      cancellationCheck?.Invoke();
+      if (pattern.Var != null) {
+        freeVariables.Remove(pattern.Var);
+      } else if (pattern.Arguments != null) {
+        foreach (var argument in pattern.Arguments) {
+          RemovePatternVariables(argument, freeVariables, cancellationCheck);
+        }
+      }
+    }
+
+    private static IEnumerable<Expression> StatementExpressions(Statement statement, Action cancellationCheck) {
+      cancellationCheck?.Invoke();
+      foreach (var expression in statement.SubExpressions) {
+        cancellationCheck?.Invoke();
+        yield return expression;
+      }
+      foreach (var child in statement.SubStatements) {
+        cancellationCheck?.Invoke();
+        foreach (var expression in StatementExpressions(child, cancellationCheck)) {
+          yield return expression;
         }
       }
     }

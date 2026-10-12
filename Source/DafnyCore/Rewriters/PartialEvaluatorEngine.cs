@@ -25,17 +25,25 @@ internal sealed class ContractPredicateReductionCandidate {
   }
 }
 
+// An immutable calculation certificate is separate from the transaction that emits its assertions.
+internal sealed record ContractConcreteCallProof(
+  Expression Value, IReadOnlyList<ContractConcreteCallProof> Dependencies,
+  IReadOnlyList<Expression> Prerequisites, IReadOnlyList<Expression> Witnesses, Expression Equality);
+
 internal sealed class ExpressionExpansionBudget {
   private readonly uint limit;
+  private readonly Action cancellationCheck;
 
   internal uint Used { get; private set; }
   internal bool IsExhausted { get; private set; }
 
-  internal ExpressionExpansionBudget(uint limit) {
+  internal ExpressionExpansionBudget(uint limit, Action cancellationCheck = null) {
     this.limit = limit;
+    this.cancellationCheck = cancellationCheck;
   }
 
   internal bool TryReserve(Expression expression) {
+    cancellationCheck?.Invoke();
     return TryReserveNodeCount(CountExpressionNodes(expression));
   }
 
@@ -49,6 +57,7 @@ internal sealed class ExpressionExpansionBudget {
     pending.Push(template);
     ulong upperBound = 0;
     while (pending.Count > 0) {
+      cancellationCheck?.Invoke();
       var current = pending.Pop();
       Expression replacement = null;
       if (current is IdentifierExpr identifier) {
@@ -65,6 +74,7 @@ internal sealed class ExpressionExpansionBudget {
       } else {
         upperBound++;
         foreach (var child in current.SubExpressions) {
+          cancellationCheck?.Invoke();
           pending.Push(child);
         }
       }
@@ -77,6 +87,7 @@ internal sealed class ExpressionExpansionBudget {
   }
 
   private bool TryReserveNodeCount(uint nodeCount) {
+    cancellationCheck?.Invoke();
     if (nodeCount > limit - Used) {
       IsExhausted = true;
       return false;
@@ -85,16 +96,18 @@ internal sealed class ExpressionExpansionBudget {
     return true;
   }
 
-  private static uint CountExpressionNodes(Expression expression) {
+  private uint CountExpressionNodes(Expression expression) {
     var seen = new HashSet<Expression>();
     var pending = new Stack<Expression>();
     pending.Push(expression);
     while (pending.Count > 0) {
+      cancellationCheck?.Invoke();
       var current = pending.Pop();
       if (!seen.Add(current)) {
         continue;
       }
       foreach (var child in current.SubExpressions) {
+        cancellationCheck?.Invoke();
         pending.Push(child);
       }
     }
@@ -119,6 +132,10 @@ internal sealed partial class PartialEvaluatorEngine {
   private readonly bool collectProofCompositionCandidates;
   private readonly bool detectEmptyQuantifierProduct;
   private readonly bool proofCompositionMode;
+  private readonly Func<Function, bool> isExplicitlyRevealed;
+  private readonly ConcreteCallSession concreteCallSession;
+  private readonly bool concreteCallBody;
+  private readonly Action cancellationCheck;
   private readonly Dictionary<string, CachedLiteral> inlineCallCache = new(StringComparer.Ordinal);
   private readonly Dictionary<DatatypeCtor, uint> contractConcreteConstructorIds = new();
   private uint nextContractConcreteConstructorId;
@@ -130,7 +147,9 @@ internal sealed partial class PartialEvaluatorEngine {
   internal bool ExpressionNodeLimitExhausted => expressionExpansionBudget?.IsExhausted ?? false;
   internal uint ExpressionExpansionNodesReserved => expressionExpansionBudget?.Used ?? 0;
   internal List<Expression> ProofWitnesses { get; } = new();
+  internal List<Expression> ProofPrerequisites { get; } = new();
   internal List<ContractPredicateReductionCandidate> ProofCompositionCandidates { get; } = new();
+  internal List<ContractConcreteCallProof> ProofConcreteCalls { get; } = new();
 
   // ------------------- Construction and entry points -------------------
 
@@ -149,7 +168,9 @@ internal sealed partial class PartialEvaluatorEngine {
     PartialEvaluationProfile evaluationProfile = PartialEvaluationProfile.Default,
     ExpressionExpansionBudget expressionExpansionBudget = null, ContractHeapReductionSession heapReduction = null,
     bool collectProofCompositionCandidates = false, bool detectEmptyQuantifierProduct = false,
-    bool proofCompositionMode = false) {
+    bool proofCompositionMode = false, Func<Function, bool> isExplicitlyRevealed = null,
+    ConcreteCallSession concreteCallSession = null, bool concreteCallBody = false,
+    Action cancellationCheck = null) {
     this.options = options;
     this.module = module;
     this.systemModuleManager = systemModuleManager;
@@ -164,16 +185,37 @@ internal sealed partial class PartialEvaluatorEngine {
     this.collectProofCompositionCandidates = collectProofCompositionCandidates;
     this.detectEmptyQuantifierProduct = detectEmptyQuantifierProduct;
     this.proofCompositionMode = proofCompositionMode;
+    this.isExplicitlyRevealed = isExplicitlyRevealed;
+    this.concreteCallBody = concreteCallBody;
+    this.cancellationCheck = cancellationCheck;
+    this.concreteCallSession = concreteCallSession ?? (proofCompositionMode &&
+      quantifierExpansionBudget != null && expressionExpansionBudget != null ? new ConcreteCallSession() : null);
     helperInterpreter = new HelperFunctionInterpreter(this, systemModuleManager);
   }
 
   private PartialEvalState CreateInitialState() {
+    CheckForCancellation();
     // This state is shared across the traversal to limit inlining depth and detect inlining cycles.
     return new PartialEvalState((int)inlineDepth, new HashSet<Function>(), new HashSet<string>(StringComparer.Ordinal));
   }
 
   private PartialEvaluatorVisitor CreateVisitor() {
+    CheckForCancellation();
     return new PartialEvaluatorVisitor(this);
+  }
+
+  internal void CheckForCancellation() {
+    cancellationCheck?.Invoke();
+  }
+
+  internal Expression CloneResolvedExpression(Expression expression) {
+    return new ContractReductionCloner(cancellationCheck).CloneExpr(expression);
+  }
+
+  internal ContractReductionSubstituter CreateSubstituter(Expression receiver,
+    Dictionary<IVariable, Expression> substitutions, Dictionary<TypeParameter, Type> typeSubstitutions) {
+    return new ContractReductionSubstituter(receiver, substitutions, typeSubstitutions,
+      null, systemModuleManager, cancellationCheck);
   }
 
   /// <summary>
@@ -181,6 +223,7 @@ internal sealed partial class PartialEvaluatorEngine {
   /// the callable body in-place to simplify expressions and statements.
   /// </summary>
   public void PartialEvalEntry(ICallable callable) {
+    CheckForCancellation();
     var state = CreateInitialState();
     var visitor = CreateVisitor();
     switch (callable) {
@@ -194,9 +237,193 @@ internal sealed partial class PartialEvaluatorEngine {
   }
 
   internal Expression SimplifyExpression(Expression expr) {
+    CheckForCancellation();
     var state = CreateInitialState();
     var visitor = CreateVisitor();
     return visitor.SimplifyExpression(expr, state);
+  }
+
+  internal bool HasFreeTypeParametersIncludingUnexpandedArguments(Type type) {
+    CheckForCancellation();
+    var freeTypeParameters = new HashSet<TypeParameter>();
+    CheckForCancellation();
+    type.AddFreeTypeParameters(freeTypeParameters);
+    CheckForCancellation();
+    if (freeTypeParameters.Count != 0) {
+      return true;
+    }
+    foreach (var typeArgument in type.TypeArgs) {
+      CheckForCancellation();
+      if (HasFreeTypeParametersIncludingUnexpandedArguments(typeArgument)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private bool TryGetRevealedIntegerSubsetTarget(Type targetType, out SubsetTypeDecl targetSubset) {
+    targetSubset = null;
+    var current = targetType;
+    var visited = new HashSet<TypeSynonymDecl>();
+    while (current != null) {
+      CheckForCancellation();
+      if (HasFreeTypeParametersIncludingUnexpandedArguments(current)) {
+        return false;
+      }
+      current = current.Normalize();
+      if (current is IntType) {
+        return targetSubset != null;
+      }
+      if (current is not UserDefinedType userType) {
+        return false;
+      }
+      if (userType.ResolvedClass is InternalTypeSynonymDecl or NewtypeDecl) {
+        return false;
+      }
+      if (userType.ResolvedClass is not TypeSynonymDecl synonym ||
+          !synonym.IsRevealedInScope(effectiveScope) || !visited.Add(synonym)) {
+        return false;
+      }
+      if (synonym is SubsetTypeDecl subset) {
+        targetSubset ??= subset;
+      }
+      current = synonym.RhsWithArgumentIgnoringScope(userType.TypeArgs);
+    }
+    return false;
+  }
+
+  // Every node receives the existing local inline allowance, but shares all work budgets.
+  internal sealed class ConcreteCallSession {
+    private sealed class Entry(FunctionCallExpr call) {
+      internal readonly FunctionCallExpr Call = call;
+      internal ContractConcreteCallProof Proof;
+    }
+
+    private readonly List<Entry> entries = new();
+
+    private static bool SameCall(FunctionCallExpr left, FunctionCallExpr right, Action cancellationCheck = null) =>
+      ReferenceEquals(left.Function, right.Function) && left.Type.Equals(right.Type, keepConstraints: true) &&
+      SameTypes(left.TypeApplication_AtEnclosingClass, right.TypeApplication_AtEnclosingClass, cancellationCheck) &&
+      SameTypes(left.TypeApplication_JustFunction, right.TypeApplication_JustFunction, cancellationCheck) &&
+      left.Args.Count == right.Args.Count && left.Args.Zip(right.Args).All(pair =>
+        pair.First.Type.Equals(pair.Second.Type, keepConstraints: true) &&
+        AreContractConcreteExpressionsEqual(pair.First, pair.Second, cancellationCheck));
+
+    private static bool SameTypes(IReadOnlyList<Type> left, IReadOnlyList<Type> right, Action cancellationCheck = null) =>
+      left == null || right == null ? left == right : left.Count == right.Count &&
+      left.Zip(right).All(pair => { cancellationCheck?.Invoke(); return pair.First.Equals(pair.Second, keepConstraints: true); });
+
+    internal static Expression Membership(PartialEvaluatorEngine owner, Expression value, Type expected) {
+      owner.CheckForCancellation();
+      var constraint = ModuleResolver.GetImpliedTypeConstraint(value, expected);
+      var concrete = NormalizeContractConcreteExpression(value, owner.cancellationCheck);
+      if (concrete is SeqDisplayExpr sequence && expected.NormalizeExpand().AsSeqType is { } sequenceType) {
+        foreach (var element in sequence.Elements) {
+          owner.CheckForCancellation();
+          constraint = Expression.CreateAnd(constraint, Membership(owner, element, sequenceType.Arg));
+        }
+      } else if (concrete is StringLiteralExpr && expected.NormalizeExpand().AsSeqType is { } stringType) {
+        if (!owner.TryGetUnescapedStringCharacters(concrete, out var characters)) {
+          return Expression.CreateAnd(constraint, new TypeTestExpr(value.Origin, value, expected) { Type = Type.Bool });
+        }
+        // Keep original indexed characters in native prerequisites; decoded length follows the active character mode.
+        for (var index = 0; index < characters.Count; index++) {
+          owner.CheckForCancellation();
+          var element = new SeqSelectExpr(concrete.Origin, true, concrete,
+            Expression.CreateIntLiteral(concrete.Origin, index), null) { Type = Type.Char };
+          constraint = Expression.CreateAnd(constraint, Membership(owner, element, stringType.Arg));
+        }
+      } else if (concrete is SetDisplayExpr set && expected.NormalizeExpand().AsSetType is { } setType) {
+        foreach (var element in set.Elements) {
+          owner.CheckForCancellation();
+          constraint = Expression.CreateAnd(constraint, Membership(owner, element, setType.Arg));
+        }
+      } else if (concrete is MultiSetDisplayExpr multiset && expected.NormalizeExpand().AsMultiSetType is { } multisetType) {
+        foreach (var element in multiset.Elements) {
+          owner.CheckForCancellation();
+          constraint = Expression.CreateAnd(constraint, Membership(owner, element, multisetType.Arg));
+        }
+      } else if (concrete is MapDisplayExpr map && expected.NormalizeExpand().AsMapType is { } mapType &&
+                 TryNormalizeContractConcreteMapEntries(map, out var entries, owner.cancellationCheck)) {
+        foreach (var entry in entries) {
+          owner.CheckForCancellation();
+          constraint = Expression.CreateAnd(constraint, Membership(owner, entry.A, mapType.Domain));
+          constraint = Expression.CreateAnd(constraint, Membership(owner, entry.B, mapType.Range));
+        }
+      } else if (concrete is DatatypeValue datatype && expected.NormalizeExpand() is UserDefinedType userType) {
+        var typeMap = TypeParameter.SubstitutionMap(datatype.Ctor.EnclosingDatatype.TypeArgs, userType.TypeArgs);
+        foreach (var pair in datatype.Arguments.Zip(datatype.Ctor.Formals)) {
+          owner.CheckForCancellation();
+          constraint = Expression.CreateAnd(constraint, Membership(owner, pair.First, pair.Second.Type.Subst(typeMap)));
+        }
+      }
+      return constraint;
+    }
+
+    internal bool TryEvaluate(PartialEvaluatorEngine owner, FunctionCallExpr call, out ContractConcreteCallProof proof) {
+      owner.CheckForCancellation();
+      proof = null;
+      var existing = entries.FirstOrDefault(entry => {
+        owner.CheckForCancellation();
+        return SameCall(entry.Call, call, owner.cancellationCheck);
+      });
+      if (existing != null) {
+        // An active or failed calculation has no certificate and cannot justify a recursive cycle.
+        proof = existing.Proof;
+        return proof != null;
+      }
+      if (owner.inlineDepth == 0 || owner.quantifierExpansionBudget.Remaining == 0) {
+        if (owner.quantifierExpansionBudget.Remaining == 0) { owner.quantifierExpansionBudget.MarkExhausted(); }
+        return false;
+      }
+      owner.quantifierExpansionBudget.ConsumeInstance();
+      if (!owner.expressionExpansionBudget.TryReserve(call)) { return false; }
+      var clonedCall = (FunctionCallExpr)owner.CloneResolvedExpression(call);
+      var entry = new Entry(clonedCall);
+      entries.Add(entry);
+      var substitutions = call.Function.Ins.Zip(call.Args).ToDictionary(pair => (IVariable)pair.First, pair => pair.Second);
+      if (!owner.expressionExpansionBudget.TryReserveSubstitution(call.Function.Body, substitutions)) { return false; }
+      var substituter = owner.CreateSubstituter(null, substitutions, call.GetTypeArgumentSubstitutions());
+      var body = substituter.Substitute(owner.CloneResolvedExpression(call.Function.Body));
+      var evaluator = new PartialEvaluatorEngine(owner.options, owner.module, owner.systemModuleManager,
+        owner.inlineDepth, owner.effectiveScope, owner.quantifierUnrollCapOverride, owner.quantifierExpansionBudget,
+        owner.emitQuantifierOverflowResidual, PartialEvaluationProfile.ContractConcrete, owner.expressionExpansionBudget,
+        detectEmptyQuantifierProduct: true, proofCompositionMode: true,
+        isExplicitlyRevealed: owner.IsExplicitlyRevealed, concreteCallSession: this, concreteCallBody: true,
+        cancellationCheck: owner.cancellationCheck);
+      var requirements = new List<Expression>();
+      foreach (var pair in call.Args.Zip(call.Function.Ins)) {
+        owner.CheckForCancellation();
+        var argumentMembership = Membership(owner, pair.First, pair.Second.Type.Subst(call.GetTypeArgumentSubstitutions()));
+        if (!owner.expressionExpansionBudget.TryReserve(argumentMembership)) { return false; }
+        var checkedArgument = evaluator.SimplifyExpression(owner.CloneResolvedExpression(argumentMembership));
+        if (!Expression.IsBoolLiteral(checkedArgument, out var valid) || !valid) { return false; }
+        requirements.Add(argumentMembership);
+      }
+      foreach (var requirement in call.Function.Req) {
+        owner.CheckForCancellation();
+        if (!owner.expressionExpansionBudget.TryReserveSubstitution(requirement.E, substitutions)) { return false; }
+        var originalRequirement = substituter.Substitute(owner.CloneResolvedExpression(requirement.E));
+        var checkedRequirement = evaluator.SimplifyExpression(owner.CloneResolvedExpression(originalRequirement));
+        if (!Expression.IsBoolLiteral(checkedRequirement, out var holds) || !holds) { return false; }
+        requirements.Add(originalRequirement);
+      }
+      var value = evaluator.SimplifyExpression(body);
+      if (!IsContractConcreteValue(value, owner.cancellationCheck) || evaluator.ExpressionNodeLimitExhausted ||
+          evaluator.ProofWitnesses.Any(witness => !IsClosedProofExpression(owner.options, witness, owner.cancellationCheck))) { return false; }
+      value = owner.CloneResolvedExpression(value);
+      var equality = Expression.CreateEq(clonedCall, value, call.Type.NormalizeExpand());
+      // In particular, a concrete value cannot acquire a subset type from the function's return type.
+      var membership = Membership(owner, value, call.Type);
+      var checkedMembership = evaluator.SimplifyExpression(owner.CloneResolvedExpression(membership));
+      if (!Expression.IsBoolLiteral(checkedMembership, out var member) || !member) { return false; }
+      if (!owner.expressionExpansionBudget.TryReserve(equality) ||
+          !owner.expressionExpansionBudget.TryReserve(membership)) { return false; }
+      entry.Proof = proof = new ContractConcreteCallProof(value, evaluator.ProofConcreteCalls.ToArray(),
+        requirements.Concat(evaluator.ProofPrerequisites).Append(membership).ToArray(), evaluator.ProofWitnesses.ToArray(), equality);
+      owner.CheckForCancellation();
+      return true;
+    }
   }
 
   // ------------------- Quantifier bounds / finite materialization -------------------
@@ -230,7 +457,7 @@ internal sealed partial class PartialEvaluatorEngine {
       return quantifierBounds;
     }
     quantifierBounds = new QuantifierBounds(systemModuleManager, GetPartialEvalUnrollCap(), quantifierExpansionBudget,
-      detectEmptyQuantifierProduct);
+      detectEmptyQuantifierProduct, cancellationCheck);
     return quantifierBounds;
   }
 
@@ -263,6 +490,7 @@ internal sealed partial class PartialEvaluatorEngine {
 
   private bool TryReserveQuantifierInstanceExpansion(
     Expression expression, IReadOnlyDictionary<IVariable, Expression> substitutions) {
+    CheckForCancellation();
     return expressionExpansionBudget == null ||
            expressionExpansionBudget.TryReserveSubstitution(expression, substitutions);
   }
@@ -445,7 +673,7 @@ internal sealed partial class PartialEvaluatorEngine {
     return literal;
   }
 
-  private static Expression SimplifyBooleanBinary(BinaryExpr binary) {
+  private Expression SimplifyBooleanBinary(BinaryExpr binary) {
     switch (binary.ResolvedOp) {
       case BinaryExpr.ResolvedOpcode.And:
         if (Expression.IsBoolLiteral(binary.E0, out var leftAnd)) {
@@ -485,21 +713,21 @@ internal sealed partial class PartialEvaluatorEngine {
   }
 
   private Expression SimplifyIntBinary(BinaryExpr binary, Func<BigInteger, BigInteger, BigInteger> op, int identity, BinaryExpr.ResolvedOpcode opcode) {
-    if (Expression.IsIntLiteral(binary.E0, out var left) && Expression.IsIntLiteral(binary.E1, out var right)) {
+    if (TryGetReducedIntLiteral(binary.E0, out var left, cancellationCheck) && TryGetReducedIntLiteral(binary.E1, out var right, cancellationCheck)) {
       return CreateIntLiteral(binary.Origin, op(left, right));
     }
 
-    if (Expression.IsIntLiteral(binary.E0, out left) && left == identity && opcode == BinaryExpr.ResolvedOpcode.Add) {
+    if (TryGetReducedIntLiteral(binary.E0, out left, cancellationCheck) && left == identity && opcode == BinaryExpr.ResolvedOpcode.Add) {
       return binary.E1;
     }
 
-    if (Expression.IsIntLiteral(binary.E1, out right) && right == identity &&
+    if (TryGetReducedIntLiteral(binary.E1, out right, cancellationCheck) && right == identity &&
         opcode is BinaryExpr.ResolvedOpcode.Add or BinaryExpr.ResolvedOpcode.Sub) {
       return binary.E0;
     }
 
     if (opcode == BinaryExpr.ResolvedOpcode.Mul) {
-      if (Expression.IsIntLiteral(binary.E0, out left)) {
+      if (TryGetReducedIntLiteral(binary.E0, out left, cancellationCheck)) {
         if (left == 0) {
           return CreateIntLiteral(binary.Origin, BigInteger.Zero);
         }
@@ -507,7 +735,7 @@ internal sealed partial class PartialEvaluatorEngine {
           return binary.E1;
         }
       }
-      if (Expression.IsIntLiteral(binary.E1, out right)) {
+      if (TryGetReducedIntLiteral(binary.E1, out right, cancellationCheck)) {
         if (right == 0) {
           return CreateIntLiteral(binary.Origin, BigInteger.Zero);
         }
@@ -525,7 +753,7 @@ internal sealed partial class PartialEvaluatorEngine {
   }
 
   private Expression SimplifyIntDivMod(BinaryExpr binary, BinaryExpr.ResolvedOpcode opcode) {
-    if (Expression.IsIntLiteral(binary.E0, out var left) && Expression.IsIntLiteral(binary.E1, out var right)) {
+    if (TryGetReducedIntLiteral(binary.E0, out var left, cancellationCheck) && TryGetReducedIntLiteral(binary.E1, out var right, cancellationCheck)) {
       if (right != 0) {
         if (opcode == BinaryExpr.ResolvedOpcode.Div) {
           // Match Dafny integer folding semantics: Euclidean division.
@@ -546,22 +774,22 @@ internal sealed partial class PartialEvaluatorEngine {
         }
       }
     }
-    if (opcode == BinaryExpr.ResolvedOpcode.Div && Expression.IsIntLiteral(binary.E1, out right) && right == 1) {
+    if (opcode == BinaryExpr.ResolvedOpcode.Div && TryGetReducedIntLiteral(binary.E1, out right, cancellationCheck) && right == 1) {
       return binary.E0;
     }
-    if (opcode == BinaryExpr.ResolvedOpcode.Mod && Expression.IsIntLiteral(binary.E1, out right) && right == 1) {
+    if (opcode == BinaryExpr.ResolvedOpcode.Mod && TryGetReducedIntLiteral(binary.E1, out right, cancellationCheck) && right == 1) {
       return CreateIntLiteral(binary.Origin, BigInteger.Zero);
     }
     return binary;
   }
 
-  private static Expression SimplifyBitvectorBinary(BinaryExpr binary) {
+  private Expression SimplifyBitvectorBinary(BinaryExpr binary) {
     var bitvectorType = binary.Type.NormalizeExpand().AsBitVectorType;
     if (bitvectorType == null) {
       return binary;
     }
 
-    if (!Expression.IsIntLiteral(binary.E0, out var left) || !Expression.IsIntLiteral(binary.E1, out var right)) {
+    if (!TryGetReducedIntLiteral(binary.E0, out var left, cancellationCheck) || !TryGetReducedIntLiteral(binary.E1, out var right, cancellationCheck)) {
       return binary;
     }
 
@@ -588,31 +816,23 @@ internal sealed partial class PartialEvaluatorEngine {
   }
 
   private Expression SimplifyOrderedComparison(BinaryExpr binary, Func<BigInteger, BigInteger, bool> op) {
-    if (TryGetIntLiteralOrCharLiteral(binary.E0, out var left) &&
-        TryGetIntLiteralOrCharLiteral(binary.E1, out var right)) {
+    if (TryGetIntLiteralOrCharLiteral(binary.E0, out var left, cancellationCheck) &&
+        TryGetIntLiteralOrCharLiteral(binary.E1, out var right, cancellationCheck)) {
       return Expression.CreateBoolLiteral(binary.Origin, op(left, right));
     }
     return binary;
   }
 
-  private static bool TryGetIntLiteralOrCharLiteral(Expression expr, out BigInteger value) {
+  private static bool TryGetIntLiteralOrCharLiteral(Expression expr, out BigInteger value, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     value = default;
-    if (Expression.IsIntLiteral(expr, out var intLiteral)) {
+    if (TryGetReducedIntLiteral(expr, out var intLiteral, cancellationCheck)) {
       value = intLiteral;
       return true;
     }
-    if (TryGetCharLiteral(expr, out var charLiteral)) {
+    if (TryGetCharLiteral(expr, out var charLiteral, cancellationCheck)) {
       value = charLiteral;
       return true;
-    }
-    if (expr is ConversionExpr conversionExpr) {
-      var fromType = conversionExpr.E.Type?.NormalizeExpand();
-      var toType = conversionExpr.Type?.NormalizeExpand();
-      if (fromType != null && toType is IntType && fromType.IsCharType &&
-          TryGetCharLiteral(conversionExpr.E, out var convertedChar)) {
-        value = convertedChar;
-        return true;
-      }
     }
     return false;
   }
@@ -621,22 +841,22 @@ internal sealed partial class PartialEvaluatorEngine {
     if (Expression.IsBoolLiteral(binary.E0, out var leftBool) && Expression.IsBoolLiteral(binary.E1, out var rightBool)) {
       return CreateBoolLiteral(binary.Origin, isEq ? leftBool == rightBool : leftBool != rightBool);
     }
-    if (Expression.IsIntLiteral(binary.E0, out var leftInt) && Expression.IsIntLiteral(binary.E1, out var rightInt)) {
+    if (TryGetReducedIntLiteral(binary.E0, out var leftInt, cancellationCheck) && TryGetReducedIntLiteral(binary.E1, out var rightInt, cancellationCheck)) {
       return CreateBoolLiteral(binary.Origin, isEq ? leftInt == rightInt : leftInt != rightInt);
     }
-    if (TryGetCharLiteral(binary.E0, out var leftChar) && TryGetCharLiteral(binary.E1, out var rightChar)) {
+    if (TryGetCharLiteral(binary.E0, out var leftChar, cancellationCheck) && TryGetCharLiteral(binary.E1, out var rightChar, cancellationCheck)) {
       return CreateBoolLiteral(binary.Origin, isEq ? leftChar == rightChar : leftChar != rightChar);
     }
     if (TryGetTupleLiteral(binary.E0, out var leftTuple) &&
         TryGetTupleLiteral(binary.E1, out var rightTuple) &&
-        AllElementsAreLiterals(leftTuple.Arguments) &&
-        AllElementsAreLiterals(rightTuple.Arguments)) {
-      var equal = TupleLiteralsEqual(leftTuple, rightTuple);
+        AllElementsAreLiterals(leftTuple.Arguments, cancellationCheck) &&
+        AllElementsAreLiterals(rightTuple.Arguments, cancellationCheck)) {
+      var equal = TupleLiteralsEqual(leftTuple, rightTuple, cancellationCheck);
       return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
     }
     if (UsesContractConcreteProfile &&
-        IsContractConcreteValue(binary.E0) && IsContractConcreteValue(binary.E1)) {
-      var equal = AreContractConcreteExpressionsEqual(binary.E0, binary.E1);
+        IsContractConcreteValue(binary.E0, cancellationCheck) && IsContractConcreteValue(binary.E1, cancellationCheck)) {
+      var equal = AreContractConcreteExpressionsEqual(binary.E0, binary.E1, cancellationCheck);
       return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
     }
     return binary;
@@ -645,13 +865,14 @@ internal sealed partial class PartialEvaluatorEngine {
   private bool TrySimplifyContractConstructorEquality(BinaryExpr binary, out Expression replacement) {
     replacement = null;
     if (!UsesContractConcreteProfile || binary.ResolvedOp != BinaryExpr.ResolvedOpcode.EqCommon ||
-        NormalizeContractConcreteExpression(binary.E0) is not DatatypeValue { Ctor: { } leftCtor } left ||
-        NormalizeContractConcreteExpression(binary.E1) is not DatatypeValue { Ctor: { } rightCtor } right ||
+        NormalizeContractConcreteExpression(binary.E0, cancellationCheck) is not DatatypeValue { Ctor: { } leftCtor } left ||
+        NormalizeContractConcreteExpression(binary.E1, cancellationCheck) is not DatatypeValue { Ctor: { } rightCtor } right ||
         leftCtor.EnclosingDatatype is not IndDatatypeDecl ||
         !ReferenceEquals(leftCtor.EnclosingDatatype, rightCtor.EnclosingDatatype) ||
         !left.Type.NormalizeExpand().Equals(right.Type.NormalizeExpand()) ||
         leftCtor.IsGhost || rightCtor.IsGhost ||
-        leftCtor.Formals.Any(formal => formal.IsGhost) || rightCtor.Formals.Any(formal => formal.IsGhost)) {
+        leftCtor.Formals.Any(formal => { CheckForCancellation(); return formal.IsGhost; }) ||
+        rightCtor.Formals.Any(formal => { CheckForCancellation(); return formal.IsGhost; })) {
       return false;
     }
     if (!ReferenceEquals(leftCtor, rightCtor)) {
@@ -659,8 +880,10 @@ internal sealed partial class PartialEvaluatorEngine {
       return true;
     }
     if (left.Arguments.Count != leftCtor.Formals.Count || right.Arguments.Count != leftCtor.Formals.Count ||
-        !left.Arguments.Zip(right.Arguments).All(arguments =>
-          arguments.First.Type.NormalizeExpand().Equals(arguments.Second.Type.NormalizeExpand()))) {
+        !left.Arguments.Zip(right.Arguments).All(arguments => {
+          CheckForCancellation();
+          return arguments.First.Type.NormalizeExpand().Equals(arguments.Second.Type.NormalizeExpand());
+        })) {
       return false;
     }
 
@@ -668,6 +891,7 @@ internal sealed partial class PartialEvaluatorEngine {
     // Keep the equalities visible to point elimination, without selecting any field value.
     Expression fields = CreateBoolLiteral(binary.Origin, true);
     foreach (var (leftArgument, rightArgument) in left.Arguments.Zip(right.Arguments)) {
+      cancellationCheck?.Invoke();
       fields = Expression.CreateAnd(fields,
         Expression.CreateEq(leftArgument, rightArgument, leftArgument.Type.NormalizeExpand()));
     }
@@ -678,7 +902,7 @@ internal sealed partial class PartialEvaluatorEngine {
     return true;
   }
 
-  private static Expression SimplifySeqConcat(BinaryExpr binary) {
+  private Expression SimplifySeqConcat(BinaryExpr binary) {
     if (TryGetStringLiteral(binary.E0, out var leftString, out var leftVerbatim) &&
         TryGetStringLiteral(binary.E1, out var rightString, out var rightVerbatim)) {
       if (leftString.Length == 0) {
@@ -691,7 +915,7 @@ internal sealed partial class PartialEvaluatorEngine {
     }
 
     if (TryGetSeqDisplayLiteral(binary.E0, out var leftSeq) && TryGetSeqDisplayLiteral(binary.E1, out var rightSeq) &&
-        AllElementsAreLiterals(leftSeq) && AllElementsAreLiterals(rightSeq)) {
+        AllElementsAreLiterals(leftSeq, cancellationCheck) && AllElementsAreLiterals(rightSeq, cancellationCheck)) {
       if (leftSeq.Elements.Count == 0) {
         return binary.E1;
       }
@@ -710,74 +934,74 @@ internal sealed partial class PartialEvaluatorEngine {
   private Expression SimplifySeqEquality(BinaryExpr binary, bool isEq) {
     if (TryGetStringLiteral(binary.E0, out var leftString, out var leftVerbatim) &&
         TryGetStringLiteral(binary.E1, out var rightString, out var rightVerbatim)) {
-      var equal = StringLiteralsSemanticallyEqual(leftString, leftVerbatim, rightString, rightVerbatim);
+      var equal = StringLiteralsSemanticallyEqual(leftString, leftVerbatim, rightString, rightVerbatim, cancellationCheck);
       return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
     }
 
     if (TryGetSeqDisplayLiteral(binary.E0, out var leftSeq) && TryGetSeqDisplayLiteral(binary.E1, out var rightSeq) &&
-        AllElementsAreLiterals(leftSeq) && AllElementsAreLiterals(rightSeq)) {
-      var equal = SeqDisplayLiteralsEqual(leftSeq, rightSeq);
+        AllElementsAreLiterals(leftSeq, cancellationCheck) && AllElementsAreLiterals(rightSeq, cancellationCheck)) {
+      var equal = SeqDisplayLiteralsEqual(leftSeq, rightSeq, cancellationCheck);
       return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
     }
     if (UsesContractConcreteProfile &&
         binary.E0 is SeqDisplayExpr && binary.E1 is SeqDisplayExpr &&
-        IsContractConcreteValue(binary.E0) && IsContractConcreteValue(binary.E1)) {
-      var equal = AreContractConcreteExpressionsEqual(binary.E0, binary.E1);
+        IsContractConcreteValue(binary.E0, cancellationCheck) && IsContractConcreteValue(binary.E1, cancellationCheck)) {
+      var equal = AreContractConcreteExpressionsEqual(binary.E0, binary.E1, cancellationCheck);
       return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
     }
 
     if ((TryGetCharSeqDisplayLiteral(binary.E0, out var leftChars) && TryGetUnescapedStringCharacters(binary.E1, out var rightChars)) ||
         (TryGetUnescapedStringCharacters(binary.E0, out leftChars) && TryGetCharSeqDisplayLiteral(binary.E1, out rightChars))) {
-      var equal = CodePointSequencesEqual(leftChars, rightChars);
+      var equal = CodePointSequencesEqual(leftChars, rightChars, cancellationCheck);
       return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
     }
 
     return binary;
   }
 
-  private static Expression SimplifySeqPrefix(BinaryExpr binary, bool properPrefix) {
+  private Expression SimplifySeqPrefix(BinaryExpr binary, bool properPrefix) {
     if (TryGetStringLiteral(binary.E0, out var leftString, out var leftVerbatim) &&
         TryGetStringLiteral(binary.E1, out var rightString, out var rightVerbatim)) {
-      var leftCodePoints = GetSemanticStringCodePoints(leftString, leftVerbatim);
-      var rightCodePoints = GetSemanticStringCodePoints(rightString, rightVerbatim);
-      var isPrefix = CodePointSequenceHasPrefix(leftCodePoints, rightCodePoints, out var isProper);
+      var leftCodePoints = GetSemanticStringCodePoints(leftString, leftVerbatim, cancellationCheck);
+      var rightCodePoints = GetSemanticStringCodePoints(rightString, rightVerbatim, cancellationCheck);
+      var isPrefix = CodePointSequenceHasPrefix(leftCodePoints, rightCodePoints, out var isProper, cancellationCheck);
       return CreateBoolLiteral(binary.Origin, properPrefix ? isProper : isPrefix);
     }
 
     if (TryGetSeqDisplayLiteral(binary.E0, out var leftSeq) && TryGetSeqDisplayLiteral(binary.E1, out var rightSeq) &&
-        AllElementsAreLiterals(leftSeq) && AllElementsAreLiterals(rightSeq)) {
-      var isPrefix = SeqDisplayIsPrefix(leftSeq, rightSeq, out var isProper);
+        AllElementsAreLiterals(leftSeq, cancellationCheck) && AllElementsAreLiterals(rightSeq, cancellationCheck)) {
+      var isPrefix = SeqDisplayIsPrefix(leftSeq, rightSeq, out var isProper, cancellationCheck);
       return CreateBoolLiteral(binary.Origin, properPrefix ? isProper : isPrefix);
     }
 
     return binary;
   }
 
-  private static Expression SimplifySetEquality(BinaryExpr binary, bool isEq) {
+  private Expression SimplifySetEquality(BinaryExpr binary, bool isEq) {
     if (TryGetSetDisplayLiteral(binary.E0, out var leftSet) &&
         TryGetSetDisplayLiteral(binary.E1, out var rightSet) &&
-        AllElementsAreLiterals(leftSet.Elements) &&
-        AllElementsAreLiterals(rightSet.Elements)) {
-      var equal = SetDisplayLiteralsEqual(leftSet, rightSet);
+        AllElementsAreLiterals(leftSet.Elements, cancellationCheck) &&
+        AllElementsAreLiterals(rightSet.Elements, cancellationCheck)) {
+      var equal = SetDisplayLiteralsEqual(leftSet, rightSet, cancellationCheck);
       return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
     }
     return binary;
   }
 
-  private static Expression SimplifySetMembership(BinaryExpr binary, bool isIn) {
+  private Expression SimplifySetMembership(BinaryExpr binary, bool isIn) {
     if (LiteralExpr.IsEmptySet(binary.E1)) {
       return CreateBoolLiteral(binary.Origin, !isIn);
     }
     if (TryGetSetDisplayLiteral(binary.E1, out var setDisplay) &&
-        AllElementsAreLiterals(setDisplay.Elements) &&
-        IsLiteralLike(binary.E0)) {
-      var contains = ContainsLiteralElement(setDisplay.Elements, binary.E0);
+        AllElementsAreLiterals(setDisplay.Elements, cancellationCheck) &&
+        IsLiteralLike(binary.E0, cancellationCheck)) {
+      var contains = ContainsLiteralElement(setDisplay.Elements, binary.E0, cancellationCheck);
       return CreateBoolLiteral(binary.Origin, isIn ? contains : !contains);
     }
     return binary;
   }
 
-  private static Expression SimplifySetSubset(BinaryExpr binary, Expression left, Expression right, bool proper) {
+  private Expression SimplifySetSubset(BinaryExpr binary, Expression left, Expression right, bool proper) {
     if (LiteralExpr.IsEmptySet(left)) {
       if (!proper) {
         return CreateBoolLiteral(binary.Origin, true);
@@ -792,10 +1016,10 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     if (TryGetSetDisplayLiteral(left, out leftDisplay) &&
         TryGetSetDisplayLiteral(right, out var rightDisplayLiteral) &&
-        AllElementsAreLiterals(leftDisplay.Elements) &&
-        AllElementsAreLiterals(rightDisplayLiteral.Elements)) {
-      var leftDistinct = new LiteralSet(leftDisplay.Elements);
-      var rightDistinct = new LiteralSet(rightDisplayLiteral.Elements);
+        AllElementsAreLiterals(leftDisplay.Elements, cancellationCheck) &&
+        AllElementsAreLiterals(rightDisplayLiteral.Elements, cancellationCheck)) {
+      var leftDistinct = new LiteralSet(leftDisplay.Elements, cancellationCheck);
+      var rightDistinct = new LiteralSet(rightDisplayLiteral.Elements, cancellationCheck);
       var isSubset = leftDistinct.Elements.All(element => rightDistinct.Contains(element));
       var isProper = isSubset && leftDistinct.Count < rightDistinct.Count;
       return CreateBoolLiteral(binary.Origin, proper ? isProper : isSubset);
@@ -803,23 +1027,23 @@ internal sealed partial class PartialEvaluatorEngine {
     return binary;
   }
 
-  private static Expression SimplifySetDisjoint(BinaryExpr binary) {
+  private Expression SimplifySetDisjoint(BinaryExpr binary) {
     if (LiteralExpr.IsEmptySet(binary.E0) || LiteralExpr.IsEmptySet(binary.E1)) {
       return CreateBoolLiteral(binary.Origin, true);
     }
     if (TryGetSetDisplayLiteral(binary.E0, out var leftDisplay) &&
         TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
-        AllElementsAreLiterals(leftDisplay.Elements) &&
-        AllElementsAreLiterals(rightDisplay.Elements)) {
-      var leftDistinct = new LiteralSet(leftDisplay.Elements);
-      var rightDistinct = new LiteralSet(rightDisplay.Elements);
+        AllElementsAreLiterals(leftDisplay.Elements, cancellationCheck) &&
+        AllElementsAreLiterals(rightDisplay.Elements, cancellationCheck)) {
+      var leftDistinct = new LiteralSet(leftDisplay.Elements, cancellationCheck);
+      var rightDistinct = new LiteralSet(rightDisplay.Elements, cancellationCheck);
       var disjoint = leftDistinct.Elements.All(element => !rightDistinct.Contains(element));
       return CreateBoolLiteral(binary.Origin, disjoint);
     }
     return binary;
   }
 
-  private static Expression SimplifySetUnion(BinaryExpr binary) {
+  private Expression SimplifySetUnion(BinaryExpr binary) {
     if (LiteralExpr.IsEmptySet(binary.E0)) {
       return binary.E1;
     }
@@ -831,10 +1055,11 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     if (TryGetSetDisplayLiteral(binary.E0, out var leftDisplay) &&
         TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
-        AllElementsAreLiterals(leftDisplay.Elements) &&
-        AllElementsAreLiterals(rightDisplay.Elements)) {
-      var merged = new LiteralSet(leftDisplay.Elements);
+        AllElementsAreLiterals(leftDisplay.Elements, cancellationCheck) &&
+        AllElementsAreLiterals(rightDisplay.Elements, cancellationCheck)) {
+      var merged = new LiteralSet(leftDisplay.Elements, cancellationCheck);
       foreach (var element in rightDisplay.Elements) {
+        cancellationCheck?.Invoke();
         merged.Add(element);
       }
       return CreateSetDisplayLiteral(binary.Origin, merged.Elements, binary.Type);
@@ -842,7 +1067,7 @@ internal sealed partial class PartialEvaluatorEngine {
     return binary;
   }
 
-  private static Expression SimplifySetIntersection(BinaryExpr binary) {
+  private Expression SimplifySetIntersection(BinaryExpr binary) {
     if (LiteralExpr.IsEmptySet(binary.E0)) {
       return binary.E0;
     }
@@ -854,12 +1079,13 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     if (TryGetSetDisplayLiteral(binary.E0, out var leftDisplay) &&
         TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
-        AllElementsAreLiterals(leftDisplay.Elements) &&
-        AllElementsAreLiterals(rightDisplay.Elements)) {
-      var leftDistinct = new LiteralSet(leftDisplay.Elements);
-      var rightDistinct = new LiteralSet(rightDisplay.Elements);
+        AllElementsAreLiterals(leftDisplay.Elements, cancellationCheck) &&
+        AllElementsAreLiterals(rightDisplay.Elements, cancellationCheck)) {
+      var leftDistinct = new LiteralSet(leftDisplay.Elements, cancellationCheck);
+      var rightDistinct = new LiteralSet(rightDisplay.Elements, cancellationCheck);
       var intersection = new List<Expression>();
       foreach (var element in leftDistinct.Elements) {
+        cancellationCheck?.Invoke();
         if (rightDistinct.Contains(element)) {
           intersection.Add(element);
         }
@@ -869,7 +1095,7 @@ internal sealed partial class PartialEvaluatorEngine {
     return binary;
   }
 
-  private static Expression SimplifySetDifference(BinaryExpr binary) {
+  private Expression SimplifySetDifference(BinaryExpr binary) {
     if (LiteralExpr.IsEmptySet(binary.E0) || LiteralExpr.IsEmptySet(binary.E1)) {
       return binary.E0;
     }
@@ -878,35 +1104,35 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     if (TryGetSetDisplayLiteral(binary.E0, out var leftDisplay) &&
         TryGetSetDisplayLiteral(binary.E1, out var rightDisplay) &&
-        AllElementsAreLiterals(leftDisplay.Elements) &&
-        AllElementsAreLiterals(rightDisplay.Elements)) {
-      var leftDistinct = new LiteralSet(leftDisplay.Elements);
-      var rightDistinct = new LiteralSet(rightDisplay.Elements);
+        AllElementsAreLiterals(leftDisplay.Elements, cancellationCheck) &&
+        AllElementsAreLiterals(rightDisplay.Elements, cancellationCheck)) {
+      var leftDistinct = new LiteralSet(leftDisplay.Elements, cancellationCheck);
+      var rightDistinct = new LiteralSet(rightDisplay.Elements, cancellationCheck);
       var difference = leftDistinct.Elements.Where(element => !rightDistinct.Contains(element)).ToList();
       return CreateSetDisplayLiteral(binary.Origin, difference, binary.Type);
     }
     return binary;
   }
 
-  private static Expression SimplifyMultiSetEquality(BinaryExpr binary, bool isEq) {
+  private Expression SimplifyMultiSetEquality(BinaryExpr binary, bool isEq) {
     if (TryGetMultiSetDisplayLiteral(binary.E0, out var leftDisplay) &&
         TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
-        AllElementsAreLiterals(leftDisplay.Elements) &&
-        AllElementsAreLiterals(rightDisplay.Elements)) {
-      var equal = MultiSetDisplayLiteralsEqual(leftDisplay, rightDisplay);
+        AllElementsAreLiterals(leftDisplay.Elements, cancellationCheck) &&
+        AllElementsAreLiterals(rightDisplay.Elements, cancellationCheck)) {
+      var equal = MultiSetDisplayLiteralsEqual(leftDisplay, rightDisplay, cancellationCheck);
       return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
     }
     return binary;
   }
 
-  private static Expression SimplifyMultiSetMembership(BinaryExpr binary, bool isIn) {
+  private Expression SimplifyMultiSetMembership(BinaryExpr binary, bool isIn) {
     if (LiteralExpr.IsEmptyMultiset(binary.E1)) {
       return CreateBoolLiteral(binary.Origin, !isIn);
     }
     if (TryGetMultiSetDisplayLiteral(binary.E1, out var multiSetDisplay) &&
-        AllElementsAreLiterals(multiSetDisplay.Elements) &&
-        IsLiteralLike(binary.E0)) {
-      var counts = BuildMultisetCountsDict(multiSetDisplay.Elements);
+        AllElementsAreLiterals(multiSetDisplay.Elements, cancellationCheck) &&
+        IsLiteralLike(binary.E0, cancellationCheck)) {
+      var counts = BuildMultisetCountsDict(multiSetDisplay.Elements, cancellationCheck);
       var contains = counts.ContainsKey(binary.E0);
       return CreateBoolLiteral(binary.Origin, isIn ? contains : !contains);
     }
@@ -915,27 +1141,27 @@ internal sealed partial class PartialEvaluatorEngine {
 
   private Expression SimplifySeqMembership(BinaryExpr binary, bool isIn) {
     if (UsesContractConcreteProfile && binary.E1 is SeqDisplayExpr concreteSequence &&
-        IsContractConcreteValue(binary.E0) && concreteSequence.Elements.All(IsContractConcreteValue)) {
-      var contains = concreteSequence.Elements.Any(element => AreContractConcreteExpressionsEqual(element, binary.E0));
+        IsContractConcreteValue(binary.E0, cancellationCheck) && concreteSequence.Elements.All(value => IsContractConcreteValue(value, cancellationCheck))) {
+      var contains = concreteSequence.Elements.Any(element => AreContractConcreteExpressionsEqual(element, binary.E0, cancellationCheck));
       return CreateBoolLiteral(binary.Origin, isIn ? contains : !contains);
     }
     if (TryGetSeqDisplayLiteral(binary.E1, out var seqDisplay) &&
-        AllElementsAreLiterals(seqDisplay.Elements) &&
-        IsLiteralLike(binary.E0)) {
-      var contains = ContainsLiteralElement(seqDisplay.Elements, binary.E0);
+        AllElementsAreLiterals(seqDisplay.Elements, cancellationCheck) &&
+        IsLiteralLike(binary.E0, cancellationCheck)) {
+      var contains = ContainsLiteralElement(seqDisplay.Elements, binary.E0, cancellationCheck);
       return CreateBoolLiteral(binary.Origin, isIn ? contains : !contains);
     }
     return binary;
   }
 
-  private static Expression SimplifyMapMembership(BinaryExpr binary, bool isIn) {
+  private Expression SimplifyMapMembership(BinaryExpr binary, bool isIn) {
     if (binary.E1 is MapDisplayExpr { Elements.Count: 0 }) {
       return CreateBoolLiteral(binary.Origin, !isIn);
     }
     if (binary.E1 is MapDisplayExpr mapDisplay &&
-        AllElementsAreLiterals(mapDisplay) &&
-        IsLiteralLike(binary.E0)) {
-      var contains = mapDisplay.Elements.Any(e => AreLiteralExpressionsEqual(e.A, binary.E0));
+        AllElementsAreLiterals(mapDisplay, cancellationCheck) &&
+        IsLiteralLike(binary.E0, cancellationCheck)) {
+      var contains = mapDisplay.Elements.Any(e => AreLiteralExpressionsEqual(e.A, binary.E0, cancellationCheck));
       return CreateBoolLiteral(binary.Origin, isIn ? contains : !contains);
     }
     return binary;
@@ -946,25 +1172,27 @@ internal sealed partial class PartialEvaluatorEngine {
       return binary;
     }
 
-    if (!TryNormalizeLiteralMapEntries(leftMap, out var leftEntries) ||
-        !TryNormalizeLiteralMapEntries(rightMap, out var rightEntries)) {
-      if (UsesContractConcreteProfile && IsContractConcreteValue(leftMap) && IsContractConcreteValue(rightMap)) {
-        var contractEqual = AreContractConcreteExpressionsEqual(leftMap, rightMap);
+    if (!TryNormalizeLiteralMapEntries(leftMap, out var leftEntries, cancellationCheck) ||
+        !TryNormalizeLiteralMapEntries(rightMap, out var rightEntries, cancellationCheck)) {
+      if (UsesContractConcreteProfile && IsContractConcreteValue(leftMap, cancellationCheck) && IsContractConcreteValue(rightMap, cancellationCheck)) {
+        var contractEqual = AreContractConcreteExpressionsEqual(leftMap, rightMap, cancellationCheck);
         return CreateBoolLiteral(binary.Origin, isEq ? contractEqual : !contractEqual);
       }
       return binary;
     }
 
-    var rightByKey = new Dictionary<Expression, Expression>(LiteralExpressionEqualityComparer.Instance);
+    var rightByKey = new Dictionary<Expression, Expression>(LiteralExpressionEqualityComparer.For(cancellationCheck));
     foreach (var entry in rightEntries) {
+      cancellationCheck?.Invoke();
       rightByKey[entry.A] = entry.B;
     }
 
     var equal = leftEntries.Count == rightEntries.Count;
     if (equal) {
       foreach (var entry in leftEntries) {
+        cancellationCheck?.Invoke();
         if (!rightByKey.TryGetValue(entry.A, out var rightValue) ||
-            !AreLiteralExpressionsEqual(entry.B, rightValue)) {
+            !AreLiteralExpressionsEqual(entry.B, rightValue, cancellationCheck)) {
           equal = false;
           break;
         }
@@ -974,7 +1202,7 @@ internal sealed partial class PartialEvaluatorEngine {
     return CreateBoolLiteral(binary.Origin, isEq ? equal : !equal);
   }
 
-  private static Expression SimplifyMapMerge(BinaryExpr binary) {
+  private Expression SimplifyMapMerge(BinaryExpr binary) {
     if (binary.E0 is not MapDisplayExpr leftMap || binary.E1 is not MapDisplayExpr rightMap) {
       return binary;
     }
@@ -989,18 +1217,21 @@ internal sealed partial class PartialEvaluatorEngine {
       return binary.E0;
     }
 
-    if (!TryNormalizeLiteralMapEntries(leftMap, out var leftEntries) ||
-        !TryNormalizeLiteralMapEntries(rightMap, out var rightEntries)) {
+    if (!TryNormalizeLiteralMapEntries(leftMap, out var leftEntries, cancellationCheck) ||
+        !TryNormalizeLiteralMapEntries(rightMap, out var rightEntries, cancellationCheck)) {
       return binary;
     }
 
     var merged = new List<MapDisplayEntry>(leftEntries);
-    var indexByKey = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.Instance);
+    var indexByKey = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.For(cancellationCheck));
     for (var index = 0; index < merged.Count; index++) {
+      cancellationCheck?.Invoke();
       indexByKey[merged[index].A] = index;
     }
 
     foreach (var entry in rightEntries) {
+
+      cancellationCheck?.Invoke();
       if (indexByKey.TryGetValue(entry.A, out var existingIndex)) {
         merged[existingIndex] = new MapDisplayEntry(entry.A, entry.B);
       } else {
@@ -1012,7 +1243,7 @@ internal sealed partial class PartialEvaluatorEngine {
     return CreateMapDisplayLiteral(binary.Origin, merged, binary.Type);
   }
 
-  private static Expression SimplifyMapSubtraction(BinaryExpr binary) {
+  private Expression SimplifyMapSubtraction(BinaryExpr binary) {
     if (binary.E0 is not MapDisplayExpr leftMap || binary.E1 is not SetDisplayExpr rightKeySet) {
       return binary;
     }
@@ -1024,15 +1255,16 @@ internal sealed partial class PartialEvaluatorEngine {
       return binary.E0;
     }
 
-    if (!TryNormalizeLiteralMapEntries(leftMap, out var leftEntries) ||
-        !AllElementsAreLiterals(rightKeySet.Elements)) {
+    if (!TryNormalizeLiteralMapEntries(leftMap, out var leftEntries, cancellationCheck) ||
+        !AllElementsAreLiterals(rightKeySet.Elements, cancellationCheck)) {
       return binary;
     }
 
-    var keysToRemove = new LiteralSet(rightKeySet.Elements);
+    var keysToRemove = new LiteralSet(rightKeySet.Elements, cancellationCheck);
 
     var remaining = new List<MapDisplayEntry>();
     foreach (var entry in leftEntries) {
+      cancellationCheck?.Invoke();
       if (!keysToRemove.Contains(entry.A)) {
         remaining.Add(new MapDisplayEntry(entry.A, entry.B));
       }
@@ -1041,7 +1273,7 @@ internal sealed partial class PartialEvaluatorEngine {
     return CreateMapDisplayLiteral(binary.Origin, remaining, binary.Type);
   }
 
-  private static Expression SimplifyMultiSetSubset(BinaryExpr binary, Expression left, Expression right, bool proper) {
+  private Expression SimplifyMultiSetSubset(BinaryExpr binary, Expression left, Expression right, bool proper) {
     if (LiteralExpr.IsEmptyMultiset(left)) {
       if (!proper) {
         return CreateBoolLiteral(binary.Origin, true);
@@ -1056,10 +1288,10 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     if (TryGetMultiSetDisplayLiteral(left, out leftDisplay) &&
         TryGetMultiSetDisplayLiteral(right, out var rightDisplayLiteral) &&
-        AllElementsAreLiterals(leftDisplay.Elements) &&
-        AllElementsAreLiterals(rightDisplayLiteral.Elements)) {
-      var leftCounts = BuildMultisetCountsDict(leftDisplay.Elements);
-      var rightCounts = BuildMultisetCountsDict(rightDisplayLiteral.Elements);
+        AllElementsAreLiterals(leftDisplay.Elements, cancellationCheck) &&
+        AllElementsAreLiterals(rightDisplayLiteral.Elements, cancellationCheck)) {
+      var leftCounts = BuildMultisetCountsDict(leftDisplay.Elements, cancellationCheck);
+      var rightCounts = BuildMultisetCountsDict(rightDisplayLiteral.Elements, cancellationCheck);
       var isSubset = leftCounts.All(entry =>
         rightCounts.TryGetValue(entry.Key, out var rightCount) && entry.Value <= rightCount);
       var isProper = isSubset && leftCounts.Values.Sum() < rightCounts.Values.Sum();
@@ -1068,23 +1300,23 @@ internal sealed partial class PartialEvaluatorEngine {
     return binary;
   }
 
-  private static Expression SimplifyMultiSetDisjoint(BinaryExpr binary) {
+  private Expression SimplifyMultiSetDisjoint(BinaryExpr binary) {
     if (LiteralExpr.IsEmptyMultiset(binary.E0) || LiteralExpr.IsEmptyMultiset(binary.E1)) {
       return CreateBoolLiteral(binary.Origin, true);
     }
     if (TryGetMultiSetDisplayLiteral(binary.E0, out var leftDisplay) &&
         TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
-        AllElementsAreLiterals(leftDisplay.Elements) &&
-        AllElementsAreLiterals(rightDisplay.Elements)) {
-      var leftCounts = BuildMultisetCountsDict(leftDisplay.Elements);
-      var rightCounts = BuildMultisetCountsDict(rightDisplay.Elements);
+        AllElementsAreLiterals(leftDisplay.Elements, cancellationCheck) &&
+        AllElementsAreLiterals(rightDisplay.Elements, cancellationCheck)) {
+      var leftCounts = BuildMultisetCountsDict(leftDisplay.Elements, cancellationCheck);
+      var rightCounts = BuildMultisetCountsDict(rightDisplay.Elements, cancellationCheck);
       var disjoint = leftCounts.Keys.All(key => !rightCounts.ContainsKey(key));
       return CreateBoolLiteral(binary.Origin, disjoint);
     }
     return binary;
   }
 
-  private static Expression SimplifyMultiSetUnion(BinaryExpr binary) {
+  private Expression SimplifyMultiSetUnion(BinaryExpr binary) {
     if (LiteralExpr.IsEmptyMultiset(binary.E0)) {
       return binary.E1;
     }
@@ -1093,19 +1325,20 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     if (TryGetMultiSetDisplayLiteral(binary.E0, out var leftDisplay) &&
         TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
-        AllElementsAreLiterals(leftDisplay.Elements) &&
-        AllElementsAreLiterals(rightDisplay.Elements)) {
-      var combined = BuildMultisetCountsDict(leftDisplay.Elements);
-      foreach (var entry in BuildMultisetCountsDict(rightDisplay.Elements)) {
+        AllElementsAreLiterals(leftDisplay.Elements, cancellationCheck) &&
+        AllElementsAreLiterals(rightDisplay.Elements, cancellationCheck)) {
+      var combined = BuildMultisetCountsDict(leftDisplay.Elements, cancellationCheck);
+      foreach (var entry in BuildMultisetCountsDict(rightDisplay.Elements, cancellationCheck)) {
+        cancellationCheck?.Invoke();
         combined.TryGetValue(entry.Key, out var existing);
         combined[entry.Key] = existing + entry.Value;
       }
-      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCountsDict(combined), binary.Type);
+      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCountsDict(combined, cancellationCheck), binary.Type);
     }
     return binary;
   }
 
-  private static Expression SimplifyMultiSetIntersection(BinaryExpr binary) {
+  private Expression SimplifyMultiSetIntersection(BinaryExpr binary) {
     if (LiteralExpr.IsEmptyMultiset(binary.E0)) {
       return binary.E0;
     }
@@ -1117,12 +1350,13 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     if (TryGetMultiSetDisplayLiteral(binary.E0, out var leftDisplay) &&
         TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
-        AllElementsAreLiterals(leftDisplay.Elements) &&
-        AllElementsAreLiterals(rightDisplay.Elements)) {
-      var leftCounts = BuildMultisetCountsDict(leftDisplay.Elements);
-      var rightCounts = BuildMultisetCountsDict(rightDisplay.Elements);
-      var intersection = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.Instance);
+        AllElementsAreLiterals(leftDisplay.Elements, cancellationCheck) &&
+        AllElementsAreLiterals(rightDisplay.Elements, cancellationCheck)) {
+      var leftCounts = BuildMultisetCountsDict(leftDisplay.Elements, cancellationCheck);
+      var rightCounts = BuildMultisetCountsDict(rightDisplay.Elements, cancellationCheck);
+      var intersection = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.For(cancellationCheck));
       foreach (var entry in leftCounts) {
+        cancellationCheck?.Invoke();
         if (rightCounts.TryGetValue(entry.Key, out var rightCount)) {
           var count = Math.Min(entry.Value, rightCount);
           if (count > 0) {
@@ -1130,12 +1364,12 @@ internal sealed partial class PartialEvaluatorEngine {
           }
         }
       }
-      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCountsDict(intersection), binary.Type);
+      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCountsDict(intersection, cancellationCheck), binary.Type);
     }
     return binary;
   }
 
-  private static Expression SimplifyMultiSetDifference(BinaryExpr binary) {
+  private Expression SimplifyMultiSetDifference(BinaryExpr binary) {
     if (LiteralExpr.IsEmptyMultiset(binary.E0) || LiteralExpr.IsEmptyMultiset(binary.E1)) {
       return binary.E0;
     }
@@ -1144,27 +1378,31 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     if (TryGetMultiSetDisplayLiteral(binary.E0, out var leftDisplay) &&
         TryGetMultiSetDisplayLiteral(binary.E1, out var rightDisplay) &&
-        AllElementsAreLiterals(leftDisplay.Elements) &&
-        AllElementsAreLiterals(rightDisplay.Elements)) {
-      var leftCounts = BuildMultisetCountsDict(leftDisplay.Elements);
-      var rightCounts = BuildMultisetCountsDict(rightDisplay.Elements);
-      var difference = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.Instance);
+        AllElementsAreLiterals(leftDisplay.Elements, cancellationCheck) &&
+        AllElementsAreLiterals(rightDisplay.Elements, cancellationCheck)) {
+      var leftCounts = BuildMultisetCountsDict(leftDisplay.Elements, cancellationCheck);
+      var rightCounts = BuildMultisetCountsDict(rightDisplay.Elements, cancellationCheck);
+      var difference = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.For(cancellationCheck));
       foreach (var entry in leftCounts) {
+        cancellationCheck?.Invoke();
         rightCounts.TryGetValue(entry.Key, out var rightCount);
         var count = entry.Value - rightCount;
         if (count > 0) {
           difference[entry.Key] = count;
         }
       }
-      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCountsDict(difference), binary.Type);
+      return CreateMultiSetDisplayLiteral(binary.Origin, ExpandMultisetCountsDict(difference, cancellationCheck), binary.Type);
     }
     return binary;
   }
 
-  private static List<Expression> ExpandMultisetCountsDict(Dictionary<Expression, int> counts) {
+  private static List<Expression> ExpandMultisetCountsDict(Dictionary<Expression, int> counts, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     var elements = new List<Expression>();
     foreach (var entry in counts) {
+      cancellationCheck?.Invoke();
       for (var i = 0; i < entry.Value; i++) {
+        cancellationCheck?.Invoke();
         elements.Add(entry.Key);
       }
     }
@@ -1181,6 +1419,7 @@ internal sealed partial class PartialEvaluatorEngine {
   /// - caches static calls that fold to a literal to avoid repeated work
   /// </summary>
   private bool TryInlineCall(FunctionCallExpr callExpr, PartialEvalState state, PartialEvaluatorVisitor visitor, out Expression inlined) {
+    CheckForCancellation();
     inlined = null;
     var function = callExpr.Function;
     if (function == null || function.Body == null) {
@@ -1188,29 +1427,42 @@ internal sealed partial class PartialEvaluatorEngine {
     }
 
     var is_revealed_in_effective_scope = function.IsRevealedInScope(effectiveScope);
-    if ((BoogieGenerator.IsOpaque(function, options) && !(heapReduction?.Context.IsRevealed(function) ?? false)) ||
+    if ((BoogieGenerator.IsOpaque(function, options) && !IsExplicitlyRevealed(function)) ||
         !is_revealed_in_effective_scope) {
       return false;
     }
 
     var stateful = function.ReadsHeap;
     if (heapReduction != null && (callExpr.AtLabel != null ||
-        !ContractHeapReductionContext.IsHeapIndependent(callExpr.Receiver) ||
-        !callExpr.Args.All(ContractHeapReductionContext.IsHeapIndependent))) {
+        !ContractHeapReductionContext.IsHeapIndependent(callExpr.Receiver, cancellationCheck) ||
+        !callExpr.Args.All(argument => ContractHeapReductionContext.IsHeapIndependent(argument, cancellationCheck)))) {
       heapReduction.ResidualReasons.Add("uncaptured_call_argument_or_label");
       return false;
     }
     if (heapReduction == null && function.Reads.Expressions is { Count: > 0 }) { return false; }
 
+    var requiresConcreteCall = concreteCallBody || state.Depth <= 0;
+    if (proofCompositionMode && concreteCallSession != null && (requiresConcreteCall || function.IsRecursive) &&
+        function.IsStatic && !function.ReadsHeap && callExpr.AtLabel == null &&
+        callExpr.Args.All(value => IsContractConcreteValue(value, cancellationCheck)) && IsClosedProofExpression(options, callExpr, cancellationCheck)) {
+      if (concreteCallSession.TryEvaluate(this, callExpr, out var proof)) {
+        ProofConcreteCalls.Add(proof);
+        inlined = CloneResolvedExpression(proof.Value);
+        return true;
+      }
+      if (requiresConcreteCall) { return false; }
+    }
+
     var hasInlineableArgument = callExpr.Args.Count == 0;
     for (var i = 0; i < callExpr.Args.Count; i++) {
-      if (IsInlineableArgument(callExpr.Args[i])) {
+      CheckForCancellation();
+      if (IsInlineableArgument(callExpr.Args[i], cancellationCheck)) {
         hasInlineableArgument = true;
         break;
       }
     }
     if (!hasInlineableArgument && UsesContractConcreteProfile) {
-      hasInlineableArgument = callExpr.Args.Any(IsContractConcreteValue);
+      hasInlineableArgument = callExpr.Args.Any(value => IsContractConcreteValue(value, cancellationCheck));
     }
     if (!hasInlineableArgument && !(heapReduction != null && stateful)) {
       return false;
@@ -1221,22 +1473,22 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
-    var allInlineableArguments = AreAllInlineableArguments(callExpr.Args);
+    var allInlineableArguments = AreAllInlineableArguments(callExpr.Args, cancellationCheck);
     var allContractConcreteArguments = UsesContractConcreteProfile &&
-      callExpr.Args.All(IsContractConcreteValue);
+      callExpr.Args.All(value => IsContractConcreteValue(value, cancellationCheck));
     var allEligibleArguments = allInlineableArguments || allContractConcreteArguments;
-    var hasQuantifiedRecursiveBody = function.IsRecursive && ContainsQuantifierOrComprehension(function.Body);
+    var hasQuantifiedRecursiveBody = function.IsRecursive && ContainsQuantifierOrComprehension(function.Body, cancellationCheck);
     if (hasQuantifiedRecursiveBody && !allContractConcreteArguments) {
       return false;
     }
 
-    if (function.IsRecursive && !allEligibleArguments && !HasCollectionLiteralArgument(callExpr.Args)) {
+    if (function.IsRecursive && !allEligibleArguments && !HasCollectionLiteralArgument(callExpr.Args, cancellationCheck)) {
       return false;
     }
 
     // Composition needs the exact candidate/dependency provenance from every
     // eligible visit. A cached literal has no instantiated-body certificate.
-    if (!collectProofCompositionCandidates && TryGetCachedInlinedLiteral(callExpr, state, out inlined)) {
+    if (!proofCompositionMode && !collectProofCompositionCandidates && TryGetCachedInlinedLiteral(callExpr, state, out inlined)) {
       return true;
     }
 
@@ -1247,7 +1499,7 @@ internal sealed partial class PartialEvaluatorEngine {
     var addedFunction = state.InlineStack.Add(function);
     if (!addedFunction) {
       var canContinueRecursiveInlining = function.IsRecursive &&
-        (HasCollectionLiteralArgument(callExpr.Args) ||
+        (HasCollectionLiteralArgument(callExpr.Args, cancellationCheck) ||
          UsesContractConcreteProfile && hasQuantifiedRecursiveBody && allContractConcreteArguments);
       if (!allEligibleArguments && !canContinueRecursiveInlining) {
         state.InlineCallStack.Remove(callKey);
@@ -1256,16 +1508,17 @@ internal sealed partial class PartialEvaluatorEngine {
     }
 
     Expression proofCall = null;
-    if (collectProofCompositionCandidates && UsesContractConcreteProfile && heapReduction == null &&
+    if (collectProofCompositionCandidates && UsesContractConcreteProfile && !function.ReadsHeap &&
         !function.IsRecursive && callExpr.Type?.NormalizeExpand().IsBoolType == true &&
-        callExpr.Args.All(IsContractConcreteValue) &&
+        callExpr.Args.All(value => IsContractConcreteValue(value, cancellationCheck)) &&
         (expressionExpansionBudget == null || expressionExpansionBudget.TryReserve(callExpr))) {
-      proofCall = new Cloner(cloneResolvedFields: true).CloneExpr(callExpr);
+      proofCall = CloneResolvedExpression(callExpr);
     }
 
     try {
       var substMap = new Dictionary<IVariable, Expression>(function.Ins.Count);
       for (var i = 0; i < function.Ins.Count; i++) {
+        CheckForCancellation();
         substMap[function.Ins[i]] = callExpr.Args[i];
       }
 
@@ -1276,20 +1529,26 @@ internal sealed partial class PartialEvaluatorEngine {
         }
       }
       var typeMap = callExpr.GetTypeArgumentSubstitutions();
-      var substituter = new Substituter(receiverReplacement, substMap, typeMap, null, systemModuleManager);
+      var substituter = CreateSubstituter(receiverReplacement, substMap, typeMap);
       // Substituter may return unchanged source subtrees. Heap-aware reduction
       // must not let its mutable visitor rewrite any original definition.
-      var template = heapReduction == null ? function.Body : new Cloner(cloneResolvedFields: true).CloneExpr(function.Body);
+      var template = UsesContractConcreteProfile || heapReduction != null
+        ? CloneResolvedExpression(function.Body) : function.Body;
       var body = substituter.Substitute(template);
       Expression proofBody = null;
       if (proofCall != null &&
           (expressionExpansionBudget == null || expressionExpansionBudget.TryReserve(body))) {
-        proofBody = new Cloner(cloneResolvedFields: true).CloneExpr(body);
+        proofBody = CloneResolvedExpression(body);
       }
       if (stateful && heapReduction != null) { heapReduction.StatefulInlines++; }
+      var proofArtifacts = visitor.MarkProofArtifacts();
       inlined = visitor.SimplifyExpression(body, state.WithDepth(state.Depth - 1));
-      if (proofCall != null && proofBody != null && IsClosedProofExpression(options, proofCall) &&
-          IsClosedProofExpression(options, proofBody)) {
+      if (proofCompositionMode && !IsContractConcreteValue(inlined, cancellationCheck)) {
+        // Only a live existential may provisionally own a residual Boolean body's closed support.
+        visitor.RollbackIncompleteInline(proofArtifacts, inlined);
+      }
+      if (proofCall != null && proofBody != null && IsClosedProofExpression(options, proofCall, cancellationCheck) &&
+          IsClosedProofExpression(options, proofBody, cancellationCheck)) {
         ProofCompositionCandidates.Add(new ContractPredicateReductionCandidate(proofCall, proofBody, inlined));
       }
       if (inlined is LiteralExpr literal) {
@@ -1306,30 +1565,57 @@ internal sealed partial class PartialEvaluatorEngine {
     }
   }
 
-  /// <summary>Recognizes heap-independent expressions without escaping binder variables, as proof composition requires.</summary>
-  internal static bool IsClosedProofExpression(DafnyOptions options, Expression expression) {
+  /// <summary>Tests all heap epochs without rejecting variables bound by an enclosing expression.</summary>
+  internal static bool IsHeapIndependentProofExpression(DafnyOptions options, Expression expression) =>
+    IsHeapIndependentProofExpression(options, expression, null);
+
+  internal static bool IsHeapIndependentProofExpression(DafnyOptions options, Expression expression, Action cancellationCheck) {
+    cancellationCheck?.Invoke();
     var freeVariables = new HashSet<IVariable>();
     var usesHeap = false;
-    FreeVariablesUtil.ComputeFreeVariables(options, expression, freeVariables, ref usesHeap, includeStatements: true);
-    return !usesHeap && freeVariables.All(variable => variable is not BoundVar);
+    var usesOldHeap = false;
+    var heapLabels = new HashSet<Label>();
+    Type usesThis = null;
+    FreeVariablesUtil.ComputeFreeVariables(options, expression, freeVariables,
+      ref usesHeap, ref usesOldHeap, heapLabels, ref usesThis, includeStatements: true, cancellationCheck: cancellationCheck);
+    return !usesHeap && !usesOldHeap && heapLabels.Count == 0 && usesThis == null;
   }
+
+  /// <summary>Recognizes pure expressions whose proof can be emitted outside any enclosing binder.</summary>
+  internal static bool IsClosedProofExpression(DafnyOptions options, Expression expression) =>
+    IsClosedProofExpression(options, expression, null);
+
+  internal static bool IsClosedProofExpression(DafnyOptions options, Expression expression, Action cancellationCheck) {
+    cancellationCheck?.Invoke();
+    var freeVariables = new HashSet<IVariable>();
+    var usesHeap = false;
+    FreeVariablesUtil.ComputeFreeVariables(options, expression, freeVariables, ref usesHeap, includeStatements: true, cancellationCheck: cancellationCheck);
+    return IsHeapIndependentProofExpression(options, expression, cancellationCheck) &&
+      freeVariables.All(variable => { cancellationCheck?.Invoke(); return variable is not BoundVar; });
+  }
+
+  internal bool IsExplicitlyRevealed(Function function) =>
+    (heapReduction?.Context.IsRevealed(function) ?? false) || (isExplicitlyRevealed?.Invoke(function) ?? false);
 
   internal bool TryCreateProofCompositionCandidate(FunctionCallExpr callExpr,
     out ContractPredicateReductionCandidate candidate) {
+    CheckForCancellation();
     candidate = null;
     var function = callExpr.Function;
     if (!collectProofCompositionCandidates || function == null || function.Body == null ||
         function.IsRecursive || callExpr.Type?.NormalizeExpand().IsBoolType != true ||
-        !callExpr.Args.All(IsContractConcreteValue) || function.Reads.Expressions is { Count: > 0 } ||
-        BoogieGenerator.IsOpaque(function, options) || !function.IsRevealedInScope(effectiveScope)) {
+        !callExpr.Args.All(value => IsContractConcreteValue(value, cancellationCheck)) || function.ReadsHeap ||
+        BoogieGenerator.IsOpaque(function, options) && !IsExplicitlyRevealed(function) ||
+        !function.IsRevealedInScope(effectiveScope)) {
       return false;
     }
     if (expressionExpansionBudget != null && !expressionExpansionBudget.TryReserve(callExpr)) {
       return false;
     }
-    var proofCall = new Cloner(cloneResolvedFields: true).CloneExpr(callExpr);
+    var proofCall = CloneResolvedExpression(callExpr);
     var substitutions = new Dictionary<IVariable, Expression>(function.Ins.Count);
     for (var i = 0; i < function.Ins.Count; i++) {
+      CheckForCancellation();
       substitutions[function.Ins[i]] = callExpr.Args[i];
     }
     Expression receiver = function.IsStatic ? null : callExpr.Receiver;
@@ -1337,14 +1623,13 @@ internal sealed partial class PartialEvaluatorEngine {
         !expressionExpansionBudget.TryReserveSubstitution(function.Body, substitutions, receiver)) {
       return false;
     }
-    var substituter = new Substituter(receiver, substitutions, callExpr.GetTypeArgumentSubstitutions(),
-      null, systemModuleManager);
+    var substituter = CreateSubstituter(receiver, substitutions, callExpr.GetTypeArgumentSubstitutions());
     var body = substituter.Substitute(function.Body);
     if (expressionExpansionBudget != null && !expressionExpansionBudget.TryReserve(body)) {
       return false;
     }
-    var proofBody = new Cloner(cloneResolvedFields: true).CloneExpr(body);
-    if (!IsClosedProofExpression(options, proofCall) || !IsClosedProofExpression(options, proofBody)) {
+    var proofBody = CloneResolvedExpression(body);
+    if (!IsClosedProofExpression(options, proofCall, cancellationCheck) || !IsClosedProofExpression(options, proofBody, cancellationCheck)) {
       return false;
     }
     candidate = new ContractPredicateReductionCandidate(proofCall, proofBody, proofBody);
@@ -1361,7 +1646,7 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
-    if (!TryBuildInlineCallCacheKey(callExpr, state, out var key)) {
+    if (!TryBuildInlineCallCacheKey(callExpr, state, out var key, cancellationCheck)) {
       return false;
     }
 
@@ -1380,18 +1665,19 @@ internal sealed partial class PartialEvaluatorEngine {
       return;
     }
 
-    if (!TryBuildInlineCallCacheKey(callExpr, state, out var key)) {
+    if (!TryBuildInlineCallCacheKey(callExpr, state, out var key, cancellationCheck)) {
       return;
     }
 
-    if (CachedLiteral.TryCreate(literal, out var cached)) {
+    if (CachedLiteral.TryCreate(literal, out var cached, cancellationCheck)) {
       inlineCallCache.TryAdd(key, cached);
     }
   }
 
   // ------------------- Inlining cache keys -------------------
 
-  private static bool TryBuildInlineCallCacheKey(FunctionCallExpr callExpr, PartialEvalState state, out string key) {
+  private static bool TryBuildInlineCallCacheKey(FunctionCallExpr callExpr, PartialEvalState state, out string key, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     key = null;
 
     var function = callExpr.Function;
@@ -1400,26 +1686,45 @@ internal sealed partial class PartialEvaluatorEngine {
     }
 
     foreach (var arg in callExpr.Args) {
-      if (!Expression.IsIntLiteral(arg, out _) && !Expression.IsBoolLiteral(arg, out _) &&
+
+      cancellationCheck?.Invoke();
+      if (!TryGetReducedIntLiteral(arg, out _, cancellationCheck) && !Expression.IsBoolLiteral(arg, out _) &&
           arg is not CharLiteralExpr && arg is not StringLiteralExpr) {
         return false;
       }
     }
 
-    var stackKey = BuildInlineStackKey(state.InlineStack, function);
-    var callKey = BuildInlineCallCacheCallKey(callExpr);
+    var stackKey = BuildInlineStackKey(state.InlineStack, function, cancellationCheck);
+    var callKey = BuildInlineCallCacheCallKey(callExpr, cancellationCheck);
 
     key = $"{RuntimeHelpers.GetHashCode(function)}|d={state.Depth}|s={stackKey}|c={callKey}";
     return true;
   }
 
-  private static string BuildInlineStackKey(HashSet<Function> inlineStack, Function functionToExclude) {
+  // List.Sort wraps comparer exceptions; retain the query boundary's original cancellation exception.
+  private static void SortWithCancellation<T>(List<T> values, Comparison<T> comparison, Action cancellationCheck) {
+    cancellationCheck?.Invoke();
+    try {
+      values.Sort((left, right) => {
+        cancellationCheck?.Invoke();
+        return comparison(left, right);
+      });
+    } catch (InvalidOperationException exception) when (exception.InnerException is OperationCanceledException) {
+      System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(exception.InnerException).Throw();
+      throw;
+    }
+    cancellationCheck?.Invoke();
+  }
+
+  private static string BuildInlineStackKey(HashSet<Function> inlineStack, Function functionToExclude, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     if (inlineStack == null || inlineStack.Count == 0) {
       return "";
     }
 
     List<int> ids = null;
     foreach (var f in inlineStack) {
+      cancellationCheck?.Invoke();
       if (ReferenceEquals(f, functionToExclude)) {
         continue;
       }
@@ -1431,7 +1736,7 @@ internal sealed partial class PartialEvaluatorEngine {
       return "";
     }
 
-    ids.Sort();
+    SortWithCancellation(ids, (left, right) => left.CompareTo(right), cancellationCheck);
     return string.Join(",", ids);
   }
 
@@ -1440,14 +1745,16 @@ internal sealed partial class PartialEvaluatorEngine {
   /// avoiding the expensive callExpr.ToString() which serializes the entire AST subtree.
   /// Only called when all args are known to be int or bool literals (checked by the caller's guard).
   /// </summary>
-  private static string BuildInlineCallCacheCallKey(FunctionCallExpr callExpr) {
+  private static string BuildInlineCallCacheCallKey(FunctionCallExpr callExpr, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     var builder = new StringBuilder();
     for (var i = 0; i < callExpr.Args.Count; i++) {
+      cancellationCheck?.Invoke();
       if (i > 0) {
         builder.Append(',');
       }
       var arg = callExpr.Args[i];
-      if (Expression.IsIntLiteral(arg, out var intVal)) {
+      if (TryGetReducedIntLiteral(arg, out var intVal, cancellationCheck)) {
         builder.Append('i').Append(intVal);
       } else if (Expression.IsBoolLiteral(arg, out var boolVal)) {
         builder.Append('b').Append(boolVal ? '1' : '0');
@@ -1460,6 +1767,7 @@ internal sealed partial class PartialEvaluatorEngine {
     if (callExpr.TypeApplication_AtEnclosingClass is { Count: > 0 }) {
       builder.Append("|t=");
       for (var i = 0; i < callExpr.TypeApplication_AtEnclosingClass.Count; i++) {
+        cancellationCheck?.Invoke();
         if (i > 0) {
           builder.Append(',');
         }
@@ -1469,6 +1777,7 @@ internal sealed partial class PartialEvaluatorEngine {
     if (callExpr.TypeApplication_JustFunction is { Count: > 0 }) {
       builder.Append("|tf=");
       for (var i = 0; i < callExpr.TypeApplication_JustFunction.Count; i++) {
+        cancellationCheck?.Invoke();
         if (i > 0) {
           builder.Append(',');
         }
@@ -1527,7 +1836,8 @@ internal sealed partial class PartialEvaluatorEngine {
     return false;
   }
 
-  private static bool TryGetCharLiteral(Expression expr, out char value) {
+  private static bool TryGetCharLiteral(Expression expr, out char value, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     value = default;
     if (expr is not CharLiteralExpr charLiteral || charLiteral.Value is not string literal) {
       return false;
@@ -1553,14 +1863,14 @@ internal sealed partial class PartialEvaluatorEngine {
     }
 
     if (literal.StartsWith("\\u", StringComparison.Ordinal) && literal.Length == 6 &&
-        TryParseHex(literal.AsSpan(2), out var utf16Code)) {
+        TryParseHex(literal.AsSpan(2), out var utf16Code, cancellationCheck)) {
       value = (char)utf16Code;
       return true;
     }
 
     if (literal.StartsWith("\\U{", StringComparison.Ordinal) && literal.EndsWith("}", StringComparison.Ordinal)) {
       var hexSpan = literal.AsSpan(3, literal.Length - 4);
-      if (TryParseHex(hexSpan, out var unicodeCode) && unicodeCode <= 0xFFFF) {
+      if (TryParseHex(hexSpan, out var unicodeCode, cancellationCheck) && unicodeCode <= 0xFFFF) {
         value = (char)unicodeCode;
         return true;
       }
@@ -1569,13 +1879,16 @@ internal sealed partial class PartialEvaluatorEngine {
     return false;
   }
 
-  private static bool TryParseHex(ReadOnlySpan<char> hexSpan, out int value) {
+  private static bool TryParseHex(ReadOnlySpan<char> hexSpan, out int value, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     value = 0;
     if (hexSpan.IsEmpty) {
       return false;
     }
 
     foreach (var ch in hexSpan) {
+
+      cancellationCheck?.Invoke();
       int digit;
       if (ch is >= '0' and <= '9') {
         digit = ch - '0';
@@ -1597,7 +1910,7 @@ internal sealed partial class PartialEvaluatorEngine {
     return display != null;
   }
 
-  private static bool TryGetCharSeqDisplayLiteral(Expression expr, out List<int> codePoints) {
+  private bool TryGetCharSeqDisplayLiteral(Expression expr, out List<int> codePoints) {
     codePoints = null;
     if (!TryGetSeqDisplayLiteral(expr, out var display)) {
       return false;
@@ -1605,10 +1918,17 @@ internal sealed partial class PartialEvaluatorEngine {
 
     var result = new List<int>(display.Elements.Count);
     foreach (var element in display.Elements) {
-      if (!TryGetCharLiteral(element, out var ch)) {
+      cancellationCheck?.Invoke();
+      if (element is not CharLiteralExpr { Value: string literal }) {
         return false;
       }
-      result.Add(ch);
+      var characters = new List<int>();
+      foreach (var character in Util.UnescapedCharacters(options, literal, false)) {
+        CheckForCancellation();
+        characters.Add(character);
+      }
+      if (characters.Count != 1) { return false; }
+      result.Add(characters[0]);
     }
 
     codePoints = result;
@@ -1621,7 +1941,11 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
-    codePoints = Util.UnescapedCharacters(options, value, isVerbatim).ToList();
+    codePoints = new List<int>();
+    foreach (var codePoint in Util.UnescapedCharacters(options, value, isVerbatim)) {
+      CheckForCancellation();
+      codePoints.Add(codePoint);
+    }
     return true;
   }
 
@@ -1638,8 +1962,9 @@ internal sealed partial class PartialEvaluatorEngine {
 
   // ------------------- Literal classification helpers -------------------
 
-  private static bool AllElementsAreLiterals(SeqDisplayExpr display) {
-    return AllElementsAreLiterals(display.Elements);
+  private static bool AllElementsAreLiterals(SeqDisplayExpr display, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    return AllElementsAreLiterals(display.Elements, cancellationCheck);
   }
 
   private static bool TryGetSetDisplayLiteral(Expression expr, out SetDisplayExpr display) {
@@ -1657,49 +1982,58 @@ internal sealed partial class PartialEvaluatorEngine {
     return display != null;
   }
 
-  private static bool AllElementsAreLiterals(IEnumerable<Expression> elements) {
-    return elements.All(IsLiteralLike);
+  private static bool AllElementsAreLiterals(IEnumerable<Expression> elements, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    return elements.All(value => IsLiteralLike(value, cancellationCheck));
   }
 
-  private static bool AllElementsAreLiterals(MapDisplayExpr display) {
-    return display.Elements.All(entry => IsLiteralLike(entry.A) && IsLiteralLike(entry.B));
+  private static bool AllElementsAreLiterals(MapDisplayExpr display, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    return display.Elements.All(entry => IsLiteralLike(entry.A, cancellationCheck) && IsLiteralLike(entry.B, cancellationCheck));
   }
 
-  private static bool AllMapKeysAreLiterals(MapDisplayExpr display) {
-    return display.Elements.All(entry => IsLiteralLike(entry.A));
+  private static bool AllMapKeysAreLiterals(MapDisplayExpr display, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    return display.Elements.All(entry => IsLiteralLike(entry.A, cancellationCheck));
   }
 
-  private static bool IsLiteralLike(Expression expr) {
+  private static bool IsLiteralLike(Expression expr, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     if (expr is LiteralExpr) {
       return true;
     }
     if (expr is SeqDisplayExpr seqDisplay) {
-      return AllElementsAreLiterals(seqDisplay.Elements);
+      return AllElementsAreLiterals(seqDisplay.Elements, cancellationCheck);
     }
     if (expr is SetDisplayExpr setDisplay) {
-      return AllElementsAreLiterals(setDisplay.Elements);
+      return AllElementsAreLiterals(setDisplay.Elements, cancellationCheck);
     }
     if (expr is MultiSetDisplayExpr multiSetDisplay) {
-      return AllElementsAreLiterals(multiSetDisplay.Elements);
+      return AllElementsAreLiterals(multiSetDisplay.Elements, cancellationCheck);
     }
     if (expr is MapDisplayExpr mapDisplay) {
-      return AllElementsAreLiterals(mapDisplay);
+      return AllElementsAreLiterals(mapDisplay, cancellationCheck);
     }
     if (TryGetTupleLiteral(expr, out var tuple)) {
-      return AllElementsAreLiterals(tuple.Arguments);
+      return AllElementsAreLiterals(tuple.Arguments, cancellationCheck);
     }
     return false;
   }
 
   // ------------------- Inlineability -------------------
 
-  private static bool IsInlineableArgument(Expression expr) {
-    return IsLiteralLike(expr) || expr is LambdaExpr;
+  private static bool IsInlineableArgument(Expression expr, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    return IsLiteralLike(expr, cancellationCheck) || expr is LambdaExpr;
   }
 
-  internal static bool AreAllInlineableArguments(IEnumerable<Expression> args) {
+  internal static bool AreAllInlineableArguments(IEnumerable<Expression> args) => AreAllInlineableArguments(args, null);
+
+  internal static bool AreAllInlineableArguments(IEnumerable<Expression> args, Action cancellationCheck) {
+    cancellationCheck?.Invoke();
     foreach (var arg in args) {
-      if (!IsInlineableArgument(arg)) {
+      cancellationCheck?.Invoke();
+      if (!IsInlineableArgument(arg, cancellationCheck)) {
         return false;
       }
     }
@@ -1707,13 +2041,16 @@ internal sealed partial class PartialEvaluatorEngine {
     return true;
   }
 
-  private static bool ContainsQuantifierOrComprehension(Expression expr) {
+  private static bool ContainsQuantifierOrComprehension(Expression expr, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     if (expr is QuantifierExpr or ComprehensionExpr) {
       return true;
     }
 
     foreach (var subExpression in expr.SubExpressions) {
-      if (ContainsQuantifierOrComprehension(subExpression)) {
+
+      cancellationCheck?.Invoke();
+      if (ContainsQuantifierOrComprehension(subExpression, cancellationCheck)) {
         return true;
       }
     }
@@ -1721,9 +2058,11 @@ internal sealed partial class PartialEvaluatorEngine {
     return false;
   }
 
-  private static bool HasCollectionLiteralArgument(IEnumerable<Expression> args) {
+  private static bool HasCollectionLiteralArgument(IEnumerable<Expression> args, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     foreach (var arg in args) {
-      var normalized = QuantifierBounds.StripConcreteSyntax(arg);
+      cancellationCheck?.Invoke();
+      var normalized = QuantifierBounds.StripConcreteSyntax(arg, cancellationCheck);
       if (normalized is SeqDisplayExpr or SetDisplayExpr or MultiSetDisplayExpr or MapDisplayExpr or StringLiteralExpr) {
         return true;
       }
@@ -1734,8 +2073,9 @@ internal sealed partial class PartialEvaluatorEngine {
 
   // ------------------- Literal equality helpers -------------------
 
-  private static bool AreLiteralExpressionsEqual(Expression left, Expression right) {
-    if (TryGetCharLiteral(left, out var leftChar) && TryGetCharLiteral(right, out var rightChar)) {
+  private static bool AreLiteralExpressionsEqual(Expression left, Expression right, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    if (TryGetCharLiteral(left, out var leftChar, cancellationCheck) && TryGetCharLiteral(right, out var rightChar, cancellationCheck)) {
       return leftChar == rightChar;
     }
     if (left is StringLiteralExpr leftStringLiteral && right is StringLiteralExpr rightStringLiteral &&
@@ -1744,32 +2084,33 @@ internal sealed partial class PartialEvaluatorEngine {
         leftStringValue,
         leftStringLiteral.IsVerbatim,
         rightStringValue,
-        rightStringLiteral.IsVerbatim);
+        rightStringLiteral.IsVerbatim, cancellationCheck);
     }
     if (left is LiteralExpr leftLiteral && right is LiteralExpr rightLiteral) {
       return Equals(leftLiteral.Value, rightLiteral.Value);
     }
     if (left is SeqDisplayExpr leftSeq && right is SeqDisplayExpr rightSeq) {
-      return SeqDisplayLiteralsEqual(leftSeq, rightSeq);
+      return SeqDisplayLiteralsEqual(leftSeq, rightSeq, cancellationCheck);
     }
     if (left is SetDisplayExpr leftSet && right is SetDisplayExpr rightSet) {
-      return SetDisplayLiteralsEqual(leftSet, rightSet);
+      return SetDisplayLiteralsEqual(leftSet, rightSet, cancellationCheck);
     }
     if (left is MultiSetDisplayExpr leftMulti && right is MultiSetDisplayExpr rightMulti) {
-      return MultiSetDisplayLiteralsEqual(leftMulti, rightMulti);
+      return MultiSetDisplayLiteralsEqual(leftMulti, rightMulti, cancellationCheck);
     }
     if (left is MapDisplayExpr leftMap && right is MapDisplayExpr rightMap) {
-      return MapDisplayLiteralsEqual(leftMap, rightMap);
+      return MapDisplayLiteralsEqual(leftMap, rightMap, cancellationCheck);
     }
     if (TryGetTupleLiteral(left, out var leftTuple) && TryGetTupleLiteral(right, out var rightTuple)) {
-      return TupleLiteralsEqual(leftTuple, rightTuple);
+      return TupleLiteralsEqual(leftTuple, rightTuple, cancellationCheck);
     }
     return false;
   }
 
-  private static bool TryGetIntLiteralValue(Expression expr, out int value) {
+  private static bool TryGetIntLiteralValue(Expression expr, out int value, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     value = default;
-    if (!Expression.IsIntLiteral(expr, out var literal)) {
+    if (!TryGetReducedIntLiteral(expr, out var literal, cancellationCheck)) {
       return false;
     }
     if (literal < 0 || literal > int.MaxValue) {
@@ -1779,23 +2120,27 @@ internal sealed partial class PartialEvaluatorEngine {
     return true;
   }
 
-  private static bool SeqDisplayLiteralsEqual(SeqDisplayExpr left, SeqDisplayExpr right) {
+  private static bool SeqDisplayLiteralsEqual(SeqDisplayExpr left, SeqDisplayExpr right, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     if (left.Elements.Count != right.Elements.Count) {
       return false;
     }
     for (var i = 0; i < left.Elements.Count; i++) {
-      if (!AreLiteralExpressionsEqual(left.Elements[i], right.Elements[i])) {
+      cancellationCheck?.Invoke();
+      if (!AreLiteralExpressionsEqual(left.Elements[i], right.Elements[i], cancellationCheck)) {
         return false;
       }
     }
     return true;
   }
 
-  private static bool CodePointSequencesEqual(IReadOnlyList<int> left, IReadOnlyList<int> right) {
+  private static bool CodePointSequencesEqual(IReadOnlyList<int> left, IReadOnlyList<int> right, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     if (left.Count != right.Count) {
       return false;
     }
     for (var index = 0; index < left.Count; index++) {
+      cancellationCheck?.Invoke();
       if (left[index] != right[index]) {
         return false;
       }
@@ -1803,12 +2148,14 @@ internal sealed partial class PartialEvaluatorEngine {
     return true;
   }
 
-  private static bool CodePointSequenceHasPrefix(IReadOnlyList<int> prefix, IReadOnlyList<int> sequence, out bool isProper) {
+  private static bool CodePointSequenceHasPrefix(IReadOnlyList<int> prefix, IReadOnlyList<int> sequence, out bool isProper, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     isProper = false;
     if (prefix.Count > sequence.Count) {
       return false;
     }
     for (var index = 0; index < prefix.Count; index++) {
+      cancellationCheck?.Invoke();
       if (prefix[index] != sequence[index]) {
         return false;
       }
@@ -1817,50 +2164,63 @@ internal sealed partial class PartialEvaluatorEngine {
     return true;
   }
 
-  private static List<int> GetSemanticStringCodePoints(string value, bool isVerbatim) {
-    return Util.UnescapedCharacters(DafnyOptions.DefaultImmutableOptions, value, isVerbatim).ToList();
+  private static List<int> GetSemanticStringCodePoints(string value, bool isVerbatim, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    var result = new List<int>();
+    foreach (var codePoint in Util.UnescapedCharacters(DafnyOptions.DefaultImmutableOptions, value, isVerbatim)) {
+      cancellationCheck?.Invoke();
+      result.Add(codePoint);
+    }
+    return result;
   }
 
-  private static bool StringLiteralsSemanticallyEqual(string leftValue, bool leftVerbatim, string rightValue, bool rightVerbatim) {
-    var leftCodePoints = GetSemanticStringCodePoints(leftValue, leftVerbatim);
-    var rightCodePoints = GetSemanticStringCodePoints(rightValue, rightVerbatim);
-    return CodePointSequencesEqual(leftCodePoints, rightCodePoints);
+  private static bool StringLiteralsSemanticallyEqual(string leftValue, bool leftVerbatim, string rightValue, bool rightVerbatim, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    var leftCodePoints = GetSemanticStringCodePoints(leftValue, leftVerbatim, cancellationCheck);
+    var rightCodePoints = GetSemanticStringCodePoints(rightValue, rightVerbatim, cancellationCheck);
+    return CodePointSequencesEqual(leftCodePoints, rightCodePoints, cancellationCheck);
   }
 
-  private static int ComputeSemanticStringHash(string value, bool isVerbatim) {
+  private static int ComputeSemanticStringHash(string value, bool isVerbatim, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     var hash = new HashCode();
     hash.Add(typeof(StringLiteralExpr));
-    foreach (var codePoint in GetSemanticStringCodePoints(value, isVerbatim)) {
+    foreach (var codePoint in GetSemanticStringCodePoints(value, isVerbatim, cancellationCheck)) {
+      cancellationCheck?.Invoke();
       hash.Add(codePoint);
     }
     return hash.ToHashCode();
   }
 
-  private static bool TupleLiteralsEqual(DatatypeValue left, DatatypeValue right) {
+  private static bool TupleLiteralsEqual(DatatypeValue left, DatatypeValue right, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     if (left.Arguments.Count != right.Arguments.Count) {
       return false;
     }
     for (var i = 0; i < left.Arguments.Count; i++) {
-      if (!AreLiteralExpressionsEqual(left.Arguments[i], right.Arguments[i])) {
+      cancellationCheck?.Invoke();
+      if (!AreLiteralExpressionsEqual(left.Arguments[i], right.Arguments[i], cancellationCheck)) {
         return false;
       }
     }
     return true;
   }
 
-  private static bool SetDisplayLiteralsEqual(SetDisplayExpr left, SetDisplayExpr right) {
+  private static bool SetDisplayLiteralsEqual(SetDisplayExpr left, SetDisplayExpr right, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     if (left.Elements.Count == 0 && right.Elements.Count == 0) {
       return true;
     }
-    if (!AllElementsAreLiterals(left.Elements) || !AllElementsAreLiterals(right.Elements)) {
+    if (!AllElementsAreLiterals(left.Elements, cancellationCheck) || !AllElementsAreLiterals(right.Elements, cancellationCheck)) {
       return false;
     }
-    var leftDistinct = new LiteralSet(left.Elements);
-    var rightDistinct = new LiteralSet(right.Elements);
+    var leftDistinct = new LiteralSet(left.Elements, cancellationCheck);
+    var rightDistinct = new LiteralSet(right.Elements, cancellationCheck);
     if (leftDistinct.Count != rightDistinct.Count) {
       return false;
     }
     foreach (var element in leftDistinct.Elements) {
+      cancellationCheck?.Invoke();
       if (!rightDistinct.Contains(element)) {
         return false;
       }
@@ -1868,16 +2228,18 @@ internal sealed partial class PartialEvaluatorEngine {
     return true;
   }
 
-  private static bool MultiSetDisplayLiteralsEqual(MultiSetDisplayExpr left, MultiSetDisplayExpr right) {
-    if (!AllElementsAreLiterals(left.Elements) || !AllElementsAreLiterals(right.Elements)) {
+  private static bool MultiSetDisplayLiteralsEqual(MultiSetDisplayExpr left, MultiSetDisplayExpr right, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    if (!AllElementsAreLiterals(left.Elements, cancellationCheck) || !AllElementsAreLiterals(right.Elements, cancellationCheck)) {
       return false;
     }
-    var leftCounts = BuildMultisetCountsDict(left.Elements);
-    var rightCounts = BuildMultisetCountsDict(right.Elements);
+    var leftCounts = BuildMultisetCountsDict(left.Elements, cancellationCheck);
+    var rightCounts = BuildMultisetCountsDict(right.Elements, cancellationCheck);
     if (leftCounts.Count != rightCounts.Count) {
       return false;
     }
     foreach (var entry in leftCounts) {
+      cancellationCheck?.Invoke();
       if (!rightCounts.TryGetValue(entry.Key, out var rightCount) || rightCount != entry.Value) {
         return false;
       }
@@ -1885,23 +2247,27 @@ internal sealed partial class PartialEvaluatorEngine {
     return true;
   }
 
-  private static bool MapDisplayLiteralsEqual(MapDisplayExpr left, MapDisplayExpr right) {
-    if (!TryNormalizeLiteralMapEntries(left, out var leftEntries) ||
-        !TryNormalizeLiteralMapEntries(right, out var rightEntries)) {
+  private static bool MapDisplayLiteralsEqual(MapDisplayExpr left, MapDisplayExpr right, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    if (!TryNormalizeLiteralMapEntries(left, out var leftEntries, cancellationCheck) ||
+        !TryNormalizeLiteralMapEntries(right, out var rightEntries, cancellationCheck)) {
       return false;
     }
     if (leftEntries.Count != rightEntries.Count) {
       return false;
     }
 
-    var rightByKey = new Dictionary<Expression, Expression>(LiteralExpressionEqualityComparer.Instance);
+    var rightByKey = new Dictionary<Expression, Expression>(LiteralExpressionEqualityComparer.For(cancellationCheck));
     foreach (var entry in rightEntries) {
+      cancellationCheck?.Invoke();
       rightByKey[entry.A] = entry.B;
     }
 
     foreach (var entry in leftEntries) {
+
+      cancellationCheck?.Invoke();
       if (!rightByKey.TryGetValue(entry.A, out var rightValue) ||
-          !AreLiteralExpressionsEqual(entry.B, rightValue)) {
+          !AreLiteralExpressionsEqual(entry.B, rightValue, cancellationCheck)) {
         return false;
       }
     }
@@ -1909,15 +2275,17 @@ internal sealed partial class PartialEvaluatorEngine {
     return true;
   }
 
-  private static bool TryNormalizeLiteralMapEntries(MapDisplayExpr mapDisplay, out List<MapDisplayEntry> normalizedEntries) {
+  private static bool TryNormalizeLiteralMapEntries(MapDisplayExpr mapDisplay, out List<MapDisplayEntry> normalizedEntries, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     normalizedEntries = null;
-    if (!AllElementsAreLiterals(mapDisplay)) {
+    if (!AllElementsAreLiterals(mapDisplay, cancellationCheck)) {
       return false;
     }
 
     var entries = new List<MapDisplayEntry>(mapDisplay.Elements.Count);
-    var indexByKey = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.Instance);
+    var indexByKey = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.For(cancellationCheck));
     foreach (var entry in mapDisplay.Elements) {
+      cancellationCheck?.Invoke();
       if (indexByKey.TryGetValue(entry.A, out var existingIndex)) {
         entries[existingIndex] = new MapDisplayEntry(entry.A, entry.B);
       } else {
@@ -1930,9 +2298,11 @@ internal sealed partial class PartialEvaluatorEngine {
     return true;
   }
 
-  private static bool ContainsLiteralElement(List<Expression> elements, Expression candidate) {
+  private static bool ContainsLiteralElement(List<Expression> elements, Expression candidate, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     foreach (var existing in elements) {
-      if (AreLiteralExpressionsEqual(existing, candidate)) {
+      cancellationCheck?.Invoke();
+      if (AreLiteralExpressionsEqual(existing, candidate, cancellationCheck)) {
         return true;
       }
     }
@@ -1941,22 +2311,26 @@ internal sealed partial class PartialEvaluatorEngine {
 
   // ------------------- Multiset element counting -------------------
 
-  private static Dictionary<Expression, int> BuildMultisetCountsDict(IEnumerable<Expression> elements) {
-    var counts = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.Instance);
+  private static Dictionary<Expression, int> BuildMultisetCountsDict(IEnumerable<Expression> elements, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    var counts = new Dictionary<Expression, int>(LiteralExpressionEqualityComparer.For(cancellationCheck));
     foreach (var element in elements) {
+      cancellationCheck?.Invoke();
       counts.TryGetValue(element, out var count);
       counts[element] = count + 1;
     }
     return counts;
   }
 
-  private static bool SeqDisplayIsPrefix(SeqDisplayExpr left, SeqDisplayExpr right, out bool isProper) {
+  private static bool SeqDisplayIsPrefix(SeqDisplayExpr left, SeqDisplayExpr right, out bool isProper, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     isProper = false;
     if (left.Elements.Count > right.Elements.Count) {
       return false;
     }
     for (var i = 0; i < left.Elements.Count; i++) {
-      if (!AreLiteralExpressionsEqual(left.Elements[i], right.Elements[i])) {
+      cancellationCheck?.Invoke();
+      if (!AreLiteralExpressionsEqual(left.Elements[i], right.Elements[i], cancellationCheck)) {
         return false;
       }
     }
@@ -1975,14 +2349,15 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     builder.Append("|a=");
     for (var i = 0; i < callExpr.Args.Count; i++) {
+      cancellationCheck?.Invoke();
       var arg = callExpr.Args[i];
-      if (useContractConcreteIdentity && IsContractConcreteValue(arg)) {
+      if (useContractConcreteIdentity && IsContractConcreteValue(arg, cancellationCheck)) {
         AppendContractConcreteIdentity(builder, arg);
-      } else if (Expression.IsIntLiteral(arg, out var intValue)) {
+      } else if (TryGetReducedIntLiteral(arg, out var intValue, cancellationCheck)) {
         builder.Append("i").Append(intValue);
       } else if (Expression.IsBoolLiteral(arg, out var boolValue)) {
         builder.Append("b").Append(boolValue ? "1" : "0");
-      } else if (arg is SeqDisplayExpr seqDisplay && AllElementsAreLiterals(seqDisplay.Elements)) {
+      } else if (arg is SeqDisplayExpr seqDisplay && AllElementsAreLiterals(seqDisplay.Elements, cancellationCheck)) {
         builder.Append("q").Append(seqDisplay.Elements.Count);
       } else if (arg is StringLiteralExpr stringLiteral && stringLiteral.Value is string stringValue) {
         builder.Append("s").Append(stringValue.Length).Append(":").Append(stringValue);
@@ -1995,23 +2370,25 @@ internal sealed partial class PartialEvaluatorEngine {
     }
     builder.Append("|t=");
     if (callExpr.TypeApplication_AtEnclosingClass != null) {
-      builder.Append(string.Join(",", callExpr.TypeApplication_AtEnclosingClass.Select(t => t.ToString())));
+      builder.Append(string.Join(",", callExpr.TypeApplication_AtEnclosingClass.Select(t => { cancellationCheck?.Invoke(); var result = t.ToString(); cancellationCheck?.Invoke(); return result; })));
     }
     builder.Append("|tf=");
     if (callExpr.TypeApplication_JustFunction != null) {
-      builder.Append(string.Join(",", callExpr.TypeApplication_JustFunction.Select(t => t.ToString())));
+      builder.Append(string.Join(",", callExpr.TypeApplication_JustFunction.Select(t => { cancellationCheck?.Invoke(); var result = t.ToString(); cancellationCheck?.Invoke(); return result; })));
     }
     return builder.ToString();
   }
 
-  private static Expression NormalizeContractConcreteExpression(Expression expression) {
+  private static Expression NormalizeContractConcreteExpression(Expression expression, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     while (true) {
+      cancellationCheck?.Invoke();
       if (expression is ConcreteSyntaxExpression { ResolvedExpression: not null } concreteSyntax) {
         expression = concreteSyntax.ResolvedExpression;
         continue;
       }
       if (expression is ConversionExpr conversionExpr &&
-          TryEvaluateContractConcreteConversion(conversionExpr, out var convertedLiteral)) {
+          TryEvaluateContractConcreteConversion(conversionExpr, out var convertedLiteral, cancellationCheck)) {
         expression = convertedLiteral;
         continue;
       }
@@ -2019,8 +2396,21 @@ internal sealed partial class PartialEvaluatorEngine {
     }
   }
 
+  /// <summary>Reads an integer value without erasing an unchecked constrained conversion.</summary>
+  internal static bool TryGetReducedIntLiteral(Expression expression, out BigInteger value, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    expression = NormalizeContractConcreteExpression(expression, cancellationCheck);
+    // Expression.IsIntLiteral strips all casts, including rejected subset conversions.
+    if (expression is LiteralExpr) {
+      return Expression.IsIntLiteral(expression, out value);
+    }
+    value = default;
+    return false;
+  }
+
   private static bool TryEvaluateContractConcreteConversion(
-    ConversionExpr conversionExpr, out LiteralExpr convertedLiteral) {
+    ConversionExpr conversionExpr, out LiteralExpr convertedLiteral, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     convertedLiteral = null;
     var targetType = conversionExpr.Type;
     if (targetType == null) {
@@ -2036,7 +2426,7 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
-    var operand = NormalizeContractConcreteExpression(conversionExpr.E);
+    var operand = NormalizeContractConcreteExpression(conversionExpr.E, cancellationCheck);
     if (operand is not LiteralExpr || operand.Type == null) {
       return false;
     }
@@ -2047,10 +2437,18 @@ internal sealed partial class PartialEvaluatorEngine {
       return false;
     }
 
+    if (operand is CharLiteralExpr { Value: string encodedCharacter } &&
+        operandType.NormalizeExpandKeepConstraints() is CharType &&
+        constraintPreservingTargetType is CharType) {
+      // Subset membership substitution introduces identity casts; preserve the literal's original character encoding.
+      convertedLiteral = CreateCharLiteral(operand.Origin, encodedCharacter, targetType);
+      return true;
+    }
+
     // ConstantFolder interprets raw escaped character text as its first code unit.
     // Decode supported BMP literals explicitly; supplementary conversions remain native obligations.
     if (operandType.IsCharType) {
-      if (!TryGetCharLiteral(operand, out var character) || unconstrainedTargetType.IsCharType ||
+      if (!TryGetCharLiteral(operand, out var character, cancellationCheck) || unconstrainedTargetType.IsCharType ||
           unconstrainedTargetType.IsBitVectorType && character > ConstantFolder.MaxBv(unconstrainedTargetType)) {
         return false;
       }
@@ -2058,7 +2456,7 @@ internal sealed partial class PartialEvaluatorEngine {
       return true;
     }
     if (unconstrainedTargetType.IsCharType) {
-      if (!Expression.IsIntLiteral(operand, out var scalar) || scalar < 0 || scalar > 0xFFFF ||
+      if (!TryGetReducedIntLiteral(operand, out var scalar, cancellationCheck) || scalar < 0 || scalar > 0xFFFF ||
           scalar >= 0xD800 && scalar <= 0xDFFF) {
         return false;
       }
@@ -2079,68 +2477,76 @@ internal sealed partial class PartialEvaluatorEngine {
     return true;
   }
 
-  internal static bool IsContractConcreteValue(Expression expression) {
-    expression = NormalizeContractConcreteExpression(expression);
+  internal static bool IsContractConcreteValue(Expression expression) => IsContractConcreteValue(expression, null);
+
+  internal static bool IsContractConcreteValue(Expression expression, Action cancellationCheck) {
+    cancellationCheck?.Invoke();
+    expression = NormalizeContractConcreteExpression(expression, cancellationCheck);
     if (expression is LiteralExpr) {
       return true;
     }
     if (expression is SeqDisplayExpr sequence) {
-      return sequence.Elements.All(IsContractConcreteValue);
+      return sequence.Elements.All(value => IsContractConcreteValue(value, cancellationCheck));
     }
     if (expression is SetDisplayExpr set) {
-      return set.Elements.All(IsContractConcreteValue);
+      return set.Elements.All(value => IsContractConcreteValue(value, cancellationCheck));
     }
     if (expression is MultiSetDisplayExpr multiset) {
-      return multiset.Elements.All(IsContractConcreteValue);
+      return multiset.Elements.All(value => IsContractConcreteValue(value, cancellationCheck));
     }
     if (expression is MapDisplayExpr map) {
       return map.Finite && map.Elements.All(entry =>
-        IsContractConcreteValue(entry.A) && IsContractConcreteValue(entry.B));
+        IsContractConcreteValue(entry.A, cancellationCheck) && IsContractConcreteValue(entry.B, cancellationCheck));
     }
     return expression is DatatypeValue { Ctor: not null } datatype &&
-           datatype.Arguments.All(IsContractConcreteValue);
+           datatype.Arguments.All(value => IsContractConcreteValue(value, cancellationCheck));
   }
 
-  private static bool AreContractConcreteExpressionsEqual(Expression left, Expression right) {
-    left = NormalizeContractConcreteExpression(left);
-    right = NormalizeContractConcreteExpression(right);
+  private static bool AreContractConcreteExpressionsEqual(Expression left, Expression right, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    left = NormalizeContractConcreteExpression(left, cancellationCheck);
+    right = NormalizeContractConcreteExpression(right, cancellationCheck);
     if (left is DatatypeValue leftDatatype && right is DatatypeValue rightDatatype) {
       return ReferenceEquals(leftDatatype.Ctor, rightDatatype.Ctor) &&
              leftDatatype.Arguments.Count == rightDatatype.Arguments.Count &&
              leftDatatype.Arguments.Zip(rightDatatype.Arguments)
-               .All(arguments => AreContractConcreteExpressionsEqual(arguments.First, arguments.Second));
+               .All(arguments => AreContractConcreteExpressionsEqual(arguments.First, arguments.Second, cancellationCheck));
     }
     if (left is SeqDisplayExpr leftSequence && right is SeqDisplayExpr rightSequence) {
       return leftSequence.Elements.Count == rightSequence.Elements.Count &&
              leftSequence.Elements.Zip(rightSequence.Elements)
-               .All(elements => AreContractConcreteExpressionsEqual(elements.First, elements.Second));
+               .All(elements => AreContractConcreteExpressionsEqual(elements.First, elements.Second, cancellationCheck));
     }
     if (left is SetDisplayExpr leftSet && right is SetDisplayExpr rightSet) {
-      return ContractConcreteSetEquals(leftSet.Elements, rightSet.Elements);
+      return ContractConcreteSetEquals(leftSet.Elements, rightSet.Elements, cancellationCheck);
     }
     if (left is MultiSetDisplayExpr leftMultiset && right is MultiSetDisplayExpr rightMultiset) {
-      return ContractConcreteMultisetEquals(leftMultiset.Elements, rightMultiset.Elements);
+      return ContractConcreteMultisetEquals(leftMultiset.Elements, rightMultiset.Elements, cancellationCheck);
     }
     if (left is MapDisplayExpr leftMap && right is MapDisplayExpr rightMap) {
-      return ContractConcreteMapEquals(leftMap, rightMap);
+      return ContractConcreteMapEquals(leftMap, rightMap, cancellationCheck);
     }
-    return AreLiteralExpressionsEqual(left, right);
+    return AreLiteralExpressionsEqual(left, right, cancellationCheck);
   }
 
-  private static bool ContractConcreteSetEquals(IReadOnlyList<Expression> left, IReadOnlyList<Expression> right) {
-    var comparer = ContractConcreteExpressionEqualityComparer.Instance;
+  private static bool ContractConcreteSetEquals(IReadOnlyList<Expression> left, IReadOnlyList<Expression> right, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    var comparer = ContractConcreteExpressionEqualityComparer.For(cancellationCheck);
     return new HashSet<Expression>(left, comparer).SetEquals(new HashSet<Expression>(right, comparer));
   }
 
   private static bool ContractConcreteMultisetEquals(
-    IReadOnlyList<Expression> left, IReadOnlyList<Expression> right) {
-    var comparer = ContractConcreteExpressionEqualityComparer.Instance;
+    IReadOnlyList<Expression> left, IReadOnlyList<Expression> right, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    var comparer = ContractConcreteExpressionEqualityComparer.For(cancellationCheck);
     var counts = new Dictionary<Expression, int>(comparer);
     foreach (var expression in left) {
+      cancellationCheck?.Invoke();
       counts.TryGetValue(expression, out var count);
       counts[expression] = count + 1;
     }
     foreach (var expression in right) {
+      cancellationCheck?.Invoke();
       if (!counts.TryGetValue(expression, out var count)) {
         return false;
       }
@@ -2153,29 +2559,33 @@ internal sealed partial class PartialEvaluatorEngine {
     return counts.Count == 0;
   }
 
-  private static bool ContractConcreteMapEquals(MapDisplayExpr left, MapDisplayExpr right) {
-    if (!TryNormalizeContractConcreteMapEntries(left, out var leftEntries) ||
-        !TryNormalizeContractConcreteMapEntries(right, out var rightEntries) ||
+  private static bool ContractConcreteMapEquals(MapDisplayExpr left, MapDisplayExpr right, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
+    if (!TryNormalizeContractConcreteMapEntries(left, out var leftEntries, cancellationCheck) ||
+        !TryNormalizeContractConcreteMapEntries(right, out var rightEntries, cancellationCheck) ||
         leftEntries.Count != rightEntries.Count) {
       return false;
     }
-    var rightByKey = new Dictionary<Expression, Expression>(ContractConcreteExpressionEqualityComparer.Instance);
+    var rightByKey = new Dictionary<Expression, Expression>(ContractConcreteExpressionEqualityComparer.For(cancellationCheck));
     foreach (var entry in rightEntries) {
+      cancellationCheck?.Invoke();
       rightByKey[entry.A] = entry.B;
     }
     return leftEntries.All(entry => rightByKey.TryGetValue(entry.A, out var rightValue) &&
-                                    AreContractConcreteExpressionsEqual(entry.B, rightValue));
+                                    AreContractConcreteExpressionsEqual(entry.B, rightValue, cancellationCheck));
   }
 
   private static bool TryNormalizeContractConcreteMapEntries(
-    MapDisplayExpr map, out List<MapDisplayEntry> normalizedEntries) {
+    MapDisplayExpr map, out List<MapDisplayEntry> normalizedEntries, Action cancellationCheck = null) {
+    cancellationCheck?.Invoke();
     normalizedEntries = null;
-    if (!IsContractConcreteValue(map)) {
+    if (!IsContractConcreteValue(map, cancellationCheck)) {
       return false;
     }
     normalizedEntries = [];
-    var indexByKey = new Dictionary<Expression, int>(ContractConcreteExpressionEqualityComparer.Instance);
+    var indexByKey = new Dictionary<Expression, int>(ContractConcreteExpressionEqualityComparer.For(cancellationCheck));
     foreach (var entry in map.Elements) {
+      cancellationCheck?.Invoke();
       if (indexByKey.TryGetValue(entry.A, out var existingIndex)) {
         normalizedEntries[existingIndex] = new MapDisplayEntry(entry.A, entry.B);
       } else {
@@ -2187,7 +2597,7 @@ internal sealed partial class PartialEvaluatorEngine {
   }
 
   private void AppendContractConcreteIdentity(StringBuilder builder, Expression expression) {
-    expression = NormalizeContractConcreteExpression(expression);
+    expression = NormalizeContractConcreteExpression(expression, cancellationCheck);
     switch (expression) {
       case DatatypeValue datatype:
         builder.Append("d").Append(GetContractConcreteConstructorId(datatype.Ctor)).Append("[");
@@ -2205,14 +2615,15 @@ internal sealed partial class PartialEvaluatorEngine {
       case MultiSetDisplayExpr multiset:
         AppendOrderIndependentConcreteIdentity(builder, "u", multiset.Elements);
         return;
-      case MapDisplayExpr map when TryNormalizeContractConcreteMapEntries(map, out var entries):
+      case MapDisplayExpr map when TryNormalizeContractConcreteMapEntries(map, out var entries, cancellationCheck):
         var mapParts = entries.Select(entry => {
           var part = new StringBuilder();
           AppendContractConcreteIdentity(part, entry.A);
           part.Append("=");
           AppendContractConcreteIdentity(part, entry.B);
           return part.ToString();
-        }).OrderBy(part => part, StringComparer.Ordinal);
+        }).ToList();
+        SortWithCancellation(mapParts, StringComparer.Ordinal.Compare, cancellationCheck);
         builder.Append("m{").Append(string.Join(";", mapParts)).Append("}");
         return;
       case StringLiteralExpr stringLiteral when stringLiteral.Value is string value:
@@ -2232,6 +2643,7 @@ internal sealed partial class PartialEvaluatorEngine {
   private void AppendContractConcreteIdentities(StringBuilder builder, IEnumerable<Expression> expressions) {
     var first = true;
     foreach (var expression in expressions) {
+      cancellationCheck?.Invoke();
       if (!first) {
         builder.Append(",");
       }
@@ -2246,7 +2658,8 @@ internal sealed partial class PartialEvaluatorEngine {
       var part = new StringBuilder();
       AppendContractConcreteIdentity(part, expression);
       return part.ToString();
-    }).OrderBy(part => part, StringComparer.Ordinal);
+    }).ToList();
+    SortWithCancellation(parts, StringComparer.Ordinal.Compare, cancellationCheck);
     builder.Append(prefix).Append("{").Append(string.Join(";", parts)).Append("}");
   }
 
@@ -2269,13 +2682,13 @@ internal sealed partial class PartialEvaluatorEngine {
   }
 
   private readonly record struct CachedLiteral(CachedLiteralKind Kind, BigInteger IntValue, bool BoolValue, string StringValue, Type LiteralType) {
-    public static bool TryCreate(LiteralExpr literal, out CachedLiteral cached) {
+    public static bool TryCreate(LiteralExpr literal, out CachedLiteral cached, Action cancellationCheck = null) {
       cached = default;
       if (literal == null) {
         return false;
       }
 
-      if (Expression.IsIntLiteral(literal, out var intValue)) {
+      if (TryGetReducedIntLiteral(literal, out var intValue, cancellationCheck)) {
         cached = new CachedLiteral(CachedLiteralKind.Int, intValue, default, default, literal.Type);
         return true;
       }
@@ -2318,24 +2731,35 @@ internal sealed partial class PartialEvaluatorEngine {
 
   private sealed class ContractConcreteExpressionEqualityComparer : IEqualityComparer<Expression> {
     public static readonly ContractConcreteExpressionEqualityComparer Instance = new();
+    private readonly Action cancellationCheck;
+
+    private ContractConcreteExpressionEqualityComparer(Action cancellationCheck = null) {
+      this.cancellationCheck = cancellationCheck;
+    }
+
+    internal static ContractConcreteExpressionEqualityComparer For(Action cancellationCheck) =>
+      cancellationCheck == null ? Instance : new ContractConcreteExpressionEqualityComparer(cancellationCheck);
 
     public bool Equals(Expression x, Expression y) {
+      cancellationCheck?.Invoke();
       if (ReferenceEquals(x, y)) {
         return true;
       }
-      return x != null && y != null && AreContractConcreteExpressionsEqual(x, y);
+      return x != null && y != null && AreContractConcreteExpressionsEqual(x, y, cancellationCheck);
     }
 
     public int GetHashCode(Expression expression) {
+      cancellationCheck?.Invoke();
       if (expression == null) {
         return 0;
       }
-      expression = NormalizeContractConcreteExpression(expression);
+      expression = NormalizeContractConcreteExpression(expression, cancellationCheck);
       if (expression is DatatypeValue datatype) {
         var hash = new HashCode();
         hash.Add(typeof(DatatypeValue));
         hash.Add(datatype.Ctor);
         foreach (var argument in datatype.Arguments) {
+          cancellationCheck?.Invoke();
           hash.Add(GetHashCode(argument));
         }
         return hash.ToHashCode();
@@ -2344,6 +2768,7 @@ internal sealed partial class PartialEvaluatorEngine {
         var hash = new HashCode();
         hash.Add(typeof(SeqDisplayExpr));
         foreach (var element in sequence.Elements) {
+          cancellationCheck?.Invoke();
           hash.Add(GetHashCode(element));
         }
         return hash.ToHashCode();
@@ -2355,29 +2780,31 @@ internal sealed partial class PartialEvaluatorEngine {
       if (expression is MultiSetDisplayExpr multiset) {
         var counts = new Dictionary<Expression, int>(this);
         foreach (var element in multiset.Elements) {
+          cancellationCheck?.Invoke();
           counts.TryGetValue(element, out var count);
           counts[element] = count + 1;
         }
         return ComputeOrderIndependentHash(typeof(MultiSetDisplayExpr), counts.Select(entry =>
           HashCode.Combine(GetHashCode(entry.Key), entry.Value)));
       }
-      if (expression is MapDisplayExpr map && TryNormalizeContractConcreteMapEntries(map, out var entries)) {
+      if (expression is MapDisplayExpr map && TryNormalizeContractConcreteMapEntries(map, out var entries, cancellationCheck)) {
         return ComputeOrderIndependentHash(typeof(MapDisplayExpr), entries.Select(entry =>
           HashCode.Combine(GetHashCode(entry.A), GetHashCode(entry.B))));
       }
-      return LiteralExpressionEqualityComparer.Instance.GetHashCode(expression);
+      return LiteralExpressionEqualityComparer.For(cancellationCheck).GetHashCode(expression);
     }
 
-    private static int ComputeOrderIndependentHash(System.Type expressionType, IEnumerable<Expression> expressions) {
+    private int ComputeOrderIndependentHash(System.Type expressionType, IEnumerable<Expression> expressions) {
       return ComputeOrderIndependentHash(expressionType,
-        expressions.Select(Instance.GetHashCode));
+        expressions.Select(GetHashCode));
     }
 
-    private static int ComputeOrderIndependentHash(System.Type expressionType, IEnumerable<int> hashes) {
+    private int ComputeOrderIndependentHash(System.Type expressionType, IEnumerable<int> hashes) {
       var count = 0;
       var sum = 0;
       var xor = 0;
       foreach (var hash in hashes) {
+        cancellationCheck?.Invoke();
         count++;
         sum = unchecked(sum + hash);
         xor ^= hash;
@@ -2388,30 +2815,41 @@ internal sealed partial class PartialEvaluatorEngine {
 
   private sealed class LiteralExpressionEqualityComparer : IEqualityComparer<Expression> {
     public static readonly LiteralExpressionEqualityComparer Instance = new();
+    private readonly Action cancellationCheck;
+
+    private LiteralExpressionEqualityComparer(Action cancellationCheck = null) {
+      this.cancellationCheck = cancellationCheck;
+    }
+
+    internal static LiteralExpressionEqualityComparer For(Action cancellationCheck) =>
+      cancellationCheck == null ? Instance : new LiteralExpressionEqualityComparer(cancellationCheck);
 
     public bool Equals(Expression x, Expression y) {
+      cancellationCheck?.Invoke();
       if (ReferenceEquals(x, y)) {
         return true;
       }
       if (x == null || y == null) {
         return false;
       }
-      return AreLiteralExpressionsEqual(x, y);
+      return AreLiteralExpressionsEqual(x, y, cancellationCheck);
     }
 
     public int GetHashCode(Expression expr) {
+      cancellationCheck?.Invoke();
       if (expr == null) {
         return 0;
       }
       return ComputeHash(expr);
     }
 
-    private static int ComputeHash(Expression expr) {
-      if (expr is CharLiteralExpr && TryGetCharLiteral(expr, out var ch)) {
+    private int ComputeHash(Expression expr) {
+      cancellationCheck?.Invoke();
+      if (expr is CharLiteralExpr && TryGetCharLiteral(expr, out var ch, cancellationCheck)) {
         return HashCode.Combine(typeof(CharLiteralExpr), (int)ch);
       }
       if (expr is StringLiteralExpr stringLiteral && stringLiteral.Value is string stringValue) {
-        return ComputeSemanticStringHash(stringValue, stringLiteral.IsVerbatim);
+        return ComputeSemanticStringHash(stringValue, stringLiteral.IsVerbatim, cancellationCheck);
       }
       if (expr is LiteralExpr lit) {
         return HashCode.Combine(typeof(LiteralExpr), lit.Value);
@@ -2420,19 +2858,21 @@ internal sealed partial class PartialEvaluatorEngine {
         var hash = new HashCode();
         hash.Add(typeof(SeqDisplayExpr));
         foreach (var e in seq.Elements) {
+          cancellationCheck?.Invoke();
           hash.Add(ComputeHash(e));
         }
         return hash.ToHashCode();
       }
       if (expr is SetDisplayExpr setDisplay) {
-        if (!AllElementsAreLiterals(setDisplay.Elements)) {
+        if (!AllElementsAreLiterals(setDisplay.Elements, cancellationCheck)) {
           return typeof(SetDisplayExpr).GetHashCode();
         }
         // Order-independent hash based on distinct literal elements.
-        var distinct = new LiteralSet(setDisplay.Elements);
+        var distinct = new LiteralSet(setDisplay.Elements, cancellationCheck);
         var sum = 0;
         var xor = 0;
         foreach (var element in distinct.Elements) {
+          cancellationCheck?.Invoke();
           var elementHash = ComputeHash(element);
           sum = unchecked(sum + elementHash);
           xor ^= elementHash;
@@ -2440,15 +2880,16 @@ internal sealed partial class PartialEvaluatorEngine {
         return HashCode.Combine(typeof(SetDisplayExpr), distinct.Count, sum, xor);
       }
       if (expr is MultiSetDisplayExpr multiSetDisplay) {
-        if (!AllElementsAreLiterals(multiSetDisplay.Elements)) {
+        if (!AllElementsAreLiterals(multiSetDisplay.Elements, cancellationCheck)) {
           return typeof(MultiSetDisplayExpr).GetHashCode();
         }
         // Order-independent hash based on literal element multiplicities.
-        var counts = BuildMultisetCountsDict(multiSetDisplay.Elements);
+        var counts = BuildMultisetCountsDict(multiSetDisplay.Elements, cancellationCheck);
         var sum = 0;
         var xor = 0;
         var totalCount = 0;
         foreach (var entry in counts) {
+          cancellationCheck?.Invoke();
           var entryHash = HashCode.Combine(ComputeHash(entry.Key), entry.Value);
           sum = unchecked(sum + entryHash);
           xor ^= entryHash;
@@ -2457,12 +2898,13 @@ internal sealed partial class PartialEvaluatorEngine {
         return HashCode.Combine(typeof(MultiSetDisplayExpr), counts.Count, totalCount, sum, xor);
       }
       if (expr is MapDisplayExpr mapDisplay) {
-        if (!TryNormalizeLiteralMapEntries(mapDisplay, out var normalizedEntries)) {
+        if (!TryNormalizeLiteralMapEntries(mapDisplay, out var normalizedEntries, cancellationCheck)) {
           return typeof(MapDisplayExpr).GetHashCode();
         }
         var sum = 0;
         var xor = 0;
         foreach (var entry in normalizedEntries) {
+          cancellationCheck?.Invoke();
           var entryHash = HashCode.Combine(ComputeHash(entry.A), ComputeHash(entry.B));
           sum = unchecked(sum + entryHash);
           xor ^= entryHash;
@@ -2474,6 +2916,7 @@ internal sealed partial class PartialEvaluatorEngine {
         hash.Add(typeof(DatatypeValue));
         hash.Add(datatype.Ctor);
         foreach (var arg in datatype.Arguments) {
+          cancellationCheck?.Invoke();
           hash.Add(ComputeHash(arg));
         }
         return hash.ToHashCode();
@@ -2485,11 +2928,14 @@ internal sealed partial class PartialEvaluatorEngine {
   private struct LiteralSet {
     public readonly List<Expression> Elements;
     private readonly HashSet<Expression> set;
+    private readonly Action cancellationCheck;
 
-    public LiteralSet(IEnumerable<Expression> source) {
-      set = new HashSet<Expression>(LiteralExpressionEqualityComparer.Instance);
+    public LiteralSet(IEnumerable<Expression> source, Action cancellationCheck = null) {
+      this.cancellationCheck = cancellationCheck;
+      set = new HashSet<Expression>(LiteralExpressionEqualityComparer.For(cancellationCheck));
       Elements = new List<Expression>();
       foreach (var e in source) {
+        cancellationCheck?.Invoke();
         if (set.Add(e)) {
           Elements.Add(e);
         }

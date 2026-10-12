@@ -161,7 +161,8 @@ public static class ContractArtifacts {
 /// <summary>Runs campaigns once per distinct request and throttles concurrent compilations.</summary>
 public static class Campaign {
   private static readonly Dictionary<string, Task<CampaignRun>> Cache = new();
-  private static readonly SemaphoreSlim Throttle = new(Math.Max(2, Environment.ProcessorCount / 4));
+  // Fixture initialization can start several campaigns, so serialize them to preserve their fixed deadlines.
+  private static readonly SemaphoreSlim Throttle = new(1);
   private static readonly Dictionary<string, int> Users = new();
 
   /// <summary>A source snapshot with its content hash.</summary>

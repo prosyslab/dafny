@@ -49,7 +49,7 @@ public sealed class ContractInitialTypeProof {
   /// <summary>Collects all original type and function WD obligations for heap fields, root inputs and the receiver.</summary>
   public static ContractSpecificationScope RequiredScope(Program program, ContractRuntimeCampaignRequest campaign,
     IReadOnlyList<ContractHeapObject> heap, ContractSpecificationChecker specifications) {
-    var method = ContractCallableSelector.SelectMethod(program, campaign.Entry, requireConcreteReceiver: false);
+    var method = ContractCallableSelector.SelectMethod(program, campaign.Entry, requireConcreteReceiver: false, allowLemmaContract: true);
     return RequiredScope(program, method, heap, specifications);
   }
 
@@ -57,7 +57,9 @@ public sealed class ContractInitialTypeProof {
     IReadOnlyList<ContractHeapObject> heap, ContractSpecificationChecker specifications) {
     var types = ContractRuntimeHeapChecking.InitialTypes(program, heap).Concat(method.Ins.Select(formal => formal.Type));
     if (!method.IsStatic) { types = types.Append(UserDefinedType.FromTopLevelDecl(method.Origin, method.EnclosingClass)); }
-    return ConstructionScope(program, types, specifications);
+    var scope = ConstructionScope(program, types, specifications);
+    return method is Lemma && scope.ContainsDeclaration(method)
+      ? specifications.UnsupportedScope("target_lemma_dependency") : scope;
   }
 
   /// <summary>Binds an attested initial preparation to its exact scope without repeating source preparation.</summary>
