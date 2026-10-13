@@ -68,7 +68,16 @@ public record DefinitionAnalysisResult(
   string ContractHeaderWithAxiom,
   IReadOnlyList<DefinitionReference> References,
   IReadOnlyList<string> Dependencies
-);
+) {
+  public IReadOnlyList<DefinitionSourceSpan> Children { get; init; } = [];
+  [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  public DefinitionSourceSpan? SourceGroup { get; init; }
+  public IReadOnlyList<string> YieldRequires { get; init; } = [];
+  public IReadOnlyList<string> YieldEnsures { get; init; } = [];
+  public IReadOnlyList<string> HeaderDependencies { get; init; } = [];
+}
+
+public record DefinitionSourceSpan(int Start, int End);
 
 public record DefinitionAnalysisDocument(
   IReadOnlyList<DefinitionAnalysisResult> Definitions,
@@ -110,7 +119,10 @@ public record DefinitionAnalysisModule(
   string SourcePath,
   int BodyStart,
   int BodyEnd
-);
+) {
+  public int Start { get; init; }
+  public int End { get; init; }
+}
 
 public record DefinitionAnalysisImport(
   string ModuleName,
@@ -218,6 +230,10 @@ public record DefinitionAnalysisInclude(
 );
 
 public static partial class DefinitionAnalysis {
+  internal static int TokenEnd(IOrigin token) {
+    return token.pos + Encoding.UTF8.GetByteCount(token.val);
+  }
+
   internal static IReadOnlyList<DefinitionAttribute> AttributesFor(INode declaration) {
     if (declaration is not IAttributeBearingDeclaration attributeBearing) {
       return Array.Empty<DefinitionAttribute>();
@@ -229,7 +245,7 @@ public static partial class DefinitionAnalysis {
         attribute.Name,
         attribute.Args.Select(argument => argument.EntireRange.PrintOriginal()).ToList(),
         attribute.OpenBrace.pos,
-        attribute.CloseBrace.pos + attribute.CloseBrace.val.Length))
+        TokenEnd(attribute.CloseBrace)))
       .OrderBy(attribute => attribute.Start)
       .ToList();
   }
@@ -277,14 +293,9 @@ public static partial class DefinitionAnalysis {
         DefinitionBodyKind.FunctionByMethod or
         DefinitionBodyKind.Method)
       .ToList();
-    var callTargetIndex = CallTargetIndex.For(callableDeclarations);
-    var callableAnalysisDeclarations = declarations
-      .Where(declaration => declaration.BodyKind is
-        DefinitionBodyKind.Function or
-        DefinitionBodyKind.FunctionByMethod or
-        DefinitionBodyKind.Method)
-      .ToList();
-    var callFacts = callableAnalysisDeclarations.ToDictionary(
+    var declarationNodes = SourceDeclarationIndex(program, allDeclarations);
+    var callTargetIndex = CallTargetIndex.For(callableDeclarations, declarationNodes);
+    var callFacts = declarations.ToDictionary(
       declaration => declaration,
       declaration => CalledDefinitions(declaration, callTargetIndex));
     var graph = callFacts.ToDictionary(
@@ -293,9 +304,6 @@ public static partial class DefinitionAnalysis {
     var recursionGraph = graph.ToDictionary(
       item => item.Key,
       item => item.Value.Where(callFacts.ContainsKey).ToHashSet());
-    var declarationNodes = allDeclarations
-      .Where(declaration => declaration.BodyKind != DefinitionBodyKind.FunctionByMethod)
-      .ToDictionary(declaration => declaration.Declaration);
     var resolvedDeclarationFacts = ResolvedDeclarationFacts.For(declarations, declarationNodes);
     var recursionFacts = AnalyzeRecursion(recursionGraph);
 
@@ -317,6 +325,7 @@ public static partial class DefinitionAnalysis {
   public static IReadOnlyList<DefinitionAnalysisResult> AnalyzeSpans(
     Program program,
     IReadOnlySet<Uri> analysisSourceUris) {
+    program.DefaultModuleDef.ProcessPrefixNamedModules();
     var sourceFacts = SourceFacts.For(program, analysisSourceUris);
     var results = SourceDefinitions(program, spansOnly: true, analysisSourceUris: analysisSourceUris)
       .Where(declaration => analysisSourceUris.Contains(declaration.Declaration.StartToken.Uri))
@@ -357,7 +366,9 @@ public static partial class DefinitionAnalysis {
       declaration.CallSites,
       ContractClausesFor(declaration.Declaration),
       resolvedDeclarationFacts.ReferencesFor(declaration.Declaration),
-      DependenciesFor(declaration, graph, declarationNodes));
+      DependenciesFor(declaration, graph, declarationNodes)) with {
+      HeaderDependencies = DependenciesFor(declaration, graph, declarationNodes, includeBody: false)
+    };
   }
 
   private static DefinitionAnalysisResult ResultForSpans(
@@ -457,7 +468,20 @@ public static partial class DefinitionAnalysis {
       declaration.ContractHeaderWithoutAxiom,
       declaration.ContractHeaderWithAxiom,
       references,
-      dependencies);
+      dependencies) {
+      SourceGroup = declaration.SourceGroup,
+      YieldRequires = declaration.Declaration is IteratorDecl iterator
+        ? iterator.YieldRequires.Select(item => item.E.EntireRange.PrintOriginal()).ToList() : [],
+      YieldEnsures = declaration.Declaration is IteratorDecl iteratorWithEnsures
+        ? iteratorWithEnsures.YieldEnsures.Select(item => item.E.EntireRange.PrintOriginal()).ToList() : [],
+      Children = declaration.Declaration is TopLevelDeclWithMembers and not IteratorDecl
+        ? ((TopLevelDeclWithMembers)declaration.Declaration).PreResolveChildren.OfType<MemberDecl>()
+          .Where(member => !AutoGeneratedOrigin.Is(member.Origin) &&
+                           !member.Origin.IsInherited(((TopLevelDeclWithMembers)declaration.Declaration).EnclosingModuleDefinition))
+          .Select(member => new DefinitionSourceSpan(member.StartToken.pos, TokenEnd(member.EndToken)))
+          .ToList()
+        : []
+    };
   }
 
   private static IReadOnlyList<DefinitionContractClause> ContractClausesFor(INode declaration) {
@@ -589,7 +613,7 @@ public static partial class DefinitionAnalysis {
       .Select(call => new DefinitionPreconditionCall(
         declarationNodes[call.Function].ReportFullName,
         call.StartToken.pos,
-        call.EndToken.pos + call.EndToken.val.Length,
+        TokenEnd(call.EndToken),
         call.EntireRange.PrintOriginal(),
         call.Args.Select(argument => DirectSpecificationArgument(argument, methodOrFunction)).ToList()))
       .ToList();
@@ -600,6 +624,10 @@ public static partial class DefinitionAnalysis {
     IReadOnlyDictionary<INode, DefinitionNode> declarationNodes) {
     var references = new List<DefinitionReference>();
     ((Node)declaration.Declaration).Visit(node => {
+      if (declaration.Declaration is TopLevelDeclWithMembers and not IteratorDecl &&
+          node is MemberDecl) {
+        return false;
+      }
       if (node is not IHasReferences hasReferences) {
         return true;
       }
@@ -627,8 +655,9 @@ public static partial class DefinitionAnalysis {
     IReadOnlyDictionary<INode, DefinitionNode> declarationNodes,
     bool isPattern) {
     var start = reference.Referer.StartToken.pos;
-    var end = reference.Referer.EndToken.pos + reference.Referer.EndToken.val.Length;
-    if (declarationNodes.TryGetValue(reference.Referred, out var target)) {
+    var end = TokenEnd(reference.Referer.EndToken);
+    var referred = reference.Referred is NonNullTypeDecl nonNull ? nonNull.Class : reference.Referred;
+    if (declarationNodes.TryGetValue(referred, out var target)) {
       var suffix = $".{target.Name}";
       var targetModule = target.ReportFullName.EndsWith(suffix, StringComparison.Ordinal)
         ? target.ReportFullName[..^suffix.Length]
@@ -642,9 +671,11 @@ public static partial class DefinitionAnalysis {
         end);
     }
     if (reference.Referred is DatatypeCtor { EnclosingDatatype: { } datatype } constructor) {
+      var datatypeName = declarationNodes.TryGetValue(datatype, out var sourceDatatype)
+        ? sourceDatatype.ReportFullName : datatype.FullDafnyName;
       return new DefinitionReference(
-        $"{datatype.FullDafnyName}.{constructor.Name}",
-        datatype.EnclosingModuleDefinition.FullDafnyName,
+        $"{datatypeName}.{constructor.Name}",
+        sourceDatatype?.EnclosingName ?? datatype.EnclosingModuleDefinition.FullDafnyName,
         "constructor",
         isPattern,
         start,
@@ -664,7 +695,7 @@ public static partial class DefinitionAnalysis {
       .Select(call => new DefinitionPostconditionCall(
         declarationNodes[call.Function].ReportFullName,
         call.StartToken.pos,
-        call.EndToken.pos + call.EndToken.val.Length,
+        TokenEnd(call.EndToken),
         call.EntireRange.PrintOriginal(),
         call.Args.Select(argument => DirectSpecificationArgument(argument, methodOrFunction)).ToList()))
       .ToList();
@@ -705,12 +736,87 @@ public static partial class DefinitionAnalysis {
   private static List<string> DependenciesFor(
     DefinitionNode declaration,
     IReadOnlyDictionary<DefinitionNode, HashSet<DefinitionNode>> graph,
-    IReadOnlyDictionary<INode, DefinitionNode> declarationNodes) {
-    var dependencies = graph.TryGetValue(declaration, out var callees)
+    IReadOnlyDictionary<INode, DefinitionNode> declarationNodes,
+    bool includeBody = true) {
+    var dependencies = includeBody && graph.TryGetValue(declaration, out var callees)
       ? callees.Where(node => node.BodyKind != DefinitionBodyKind.FunctionByMethod).ToHashSet()
       : new HashSet<DefinitionNode>();
     foreach (var type in declaration.Types) {
       CollectTypeDependencies(type, declarationNodes, dependencies);
+    }
+    ((Node)declaration.Declaration).Visit(node => {
+      if (!includeBody && (ReferenceEquals(node, declaration.StatementBody) ||
+                           ReferenceEquals(node, declaration.ExpressionBody) ||
+                           declaration.Declaration is ConstantField constant && ReferenceEquals(node, constant.Rhs) ||
+                           declaration.Declaration is Function function && ReferenceEquals(node, function.ByMethodBody))) {
+        return false;
+      }
+      if (declaration.Declaration is TopLevelDeclWithMembers and not IteratorDecl && node is MemberDecl) {
+        return false;
+      }
+      if (node is Type type) {
+        CollectTypeDependencies(type, declarationNodes, dependencies);
+      }
+      if (node is IHasReferences references) {
+        foreach (var reference in references.GetReferences()) {
+          var referred = reference.Referred switch {
+            NonNullTypeDecl nonNull => nonNull.Class,
+            DatatypeCtor constructor => constructor.EnclosingDatatype,
+            SpecialField { EnclosingClass: DatatypeDecl datatype } => datatype,
+            _ => reference.Referred
+          };
+          if (referred != null && declarationNodes.TryGetValue(referred, out var dependency)) {
+            dependencies.Add(dependency);
+          }
+        }
+      }
+      return true;
+    });
+    if (declaration.Declaration is MemberDecl { EnclosingClass: not DefaultClassDecl } member &&
+        declarationNodes.TryGetValue(member.EnclosingClass, out var parent)) {
+      dependencies.Add(parent);
+    }
+    if (declaration.SourceGroup != null) {
+      foreach (var sibling in declarationNodes.Values.Where(candidate =>
+                 candidate.Declaration.StartToken.Uri == declaration.Declaration.StartToken.Uri &&
+                 candidate.SourceGroup == declaration.SourceGroup)) {
+        dependencies.Add(sibling);
+      }
+    }
+    if (declaration.Declaration is ModuleExportDecl export) {
+      foreach (var extended in export.ExtendDecls) {
+        if (declarationNodes.TryGetValue(extended, out var dependency)) {
+          dependencies.Add(dependency);
+        }
+      }
+    }
+    var module = declaration.Declaration switch {
+      TopLevelDecl topLevel => topLevel.EnclosingModuleDefinition,
+      MemberDecl memberDecl => memberDecl.EnclosingClass.EnclosingModuleDefinition,
+      _ => null
+    };
+    if (module != null) {
+      foreach (var import in module.TopLevelDecls.OfType<ModuleDecl>()) {
+        var targetModule = import switch {
+          AliasModuleDecl alias => alias.Signature?.ModuleDef,
+          AbstractModuleDecl abstractModule => abstractModule.OriginalSignature?.ModuleDef,
+          _ => null
+        };
+        var exportNames = import switch {
+          AliasModuleDecl alias => alias.Exports,
+          AbstractModuleDecl abstractModule => abstractModule.Exports,
+          _ => []
+        };
+        if (targetModule == null) {
+          continue;
+        }
+        foreach (var targetExport in targetModule.TopLevelDecls.OfType<ModuleExportDecl>()
+                   .Where(item => exportNames.Count == 0 ? item.IsDefault : exportNames.Any(name => name.val == item.Name))) {
+          if (declarationNodes.TryGetValue(targetExport, out var dependency)) {
+            dependencies.Add(dependency);
+          }
+        }
+      }
     }
     return dependencies
       .Where(node => node != declaration)
@@ -724,7 +830,8 @@ public static partial class DefinitionAnalysis {
     Type type,
     IReadOnlyDictionary<INode, DefinitionNode> declarationNodes,
     ISet<DefinitionNode> dependencies) {
-    if (type is UserDefinedType { ResolvedClass: { } resolvedClass } &&
+    if (type is UserDefinedType { ResolvedClass: { } originalClass } &&
+        (originalClass is NonNullTypeDecl nonNull ? nonNull.Class : originalClass) is { } resolvedClass &&
         declarationNodes.TryGetValue(resolvedClass, out var dependency)) {
       dependencies.Add(dependency);
     }
@@ -743,21 +850,49 @@ public static partial class DefinitionAnalysis {
     bool spansOnly,
     IReadOnlySet<Uri> analysisSourceUris) {
     var declarations = new List<DefinitionNode>();
-    var modules = spansOnly ? ParsedModules(program) : program.Modules();
+    var modules = ParsedModules(program);
     foreach (var moduleDefinition in modules) {
       foreach (var topLevelDecl in moduleDefinition.TopLevelDecls) {
+        if (topLevelDecl is LiteralModuleDecl literal && literal.ModuleDef.BodyStartTok == Token.NoToken) {
+          continue;
+        }
         var topLevelIsTarget = analysisSourceUris.Contains(topLevelDecl.StartToken.Uri);
-        if (topLevelDecl is DatatypeDecl datatypeDecl && (!spansOnly || topLevelIsTarget)) {
-          var purpose = NodePurpose(spansOnly, topLevelIsTarget);
-          declarations.Add(DefinitionNode.ForDatatype(datatypeDecl, moduleDefinition.Name, purpose));
+        if (topLevelDecl is NonNullTypeDecl or ValuetypeDecl || AutoGeneratedOrigin.Is(topLevelDecl.Origin) ||
+            topLevelDecl.Origin.IsInherited(moduleDefinition)) {
+          continue;
+        }
+        var enclosingName = moduleDefinition.FullDafnyName;
+        var purpose = NodePurpose(spansOnly, topLevelIsTarget);
+        var kind = topLevelDecl switch {
+          DatatypeDecl => "datatype",
+          SubsetTypeDecl => "subset type",
+          TypeSynonymDecl => "type synonym",
+          NewtypeDecl => "newtype",
+          AbstractTypeDecl => "abstract type",
+          IteratorDecl => "iterator",
+          TraitDecl => "trait",
+          ClassDecl => "class",
+          ModuleExportDecl => "export",
+          DefaultClassDecl or LiteralModuleDecl or AliasModuleDecl or AbstractModuleDecl => null,
+          _ => throw new InvalidOperationException($"Unsupported source declaration: {topLevelDecl.GetType().Name}")
+        };
+        if (kind != null && (!spansOnly || topLevelIsTarget)) {
+          declarations.Add(DefinitionNode.ForDeclaration(topLevelDecl, kind, enclosingName, purpose));
         }
 
         if (topLevelDecl is not TopLevelDeclWithMembers topLevelDeclWithMembers) {
           continue;
         }
 
-        foreach (var member in topLevelDeclWithMembers.Members.OrderBy(member => member.Origin.pos)) {
-          if (AutoGeneratedOrigin.Is(member.Origin)) {
+        if (topLevelDecl is IteratorDecl) {
+          continue;
+        }
+        var memberNodes = new List<DefinitionNode>();
+        var memberEnclosingName = topLevelDecl is DefaultClassDecl
+          ? enclosingName
+          : topLevelDecl.FullDafnyName;
+        foreach (var member in topLevelDeclWithMembers.PreResolveChildren.OfType<MemberDecl>().OrderBy(member => member.Origin.pos)) {
+          if (AutoGeneratedOrigin.Is(member.Origin) || member.Origin.IsInherited(moduleDefinition)) {
             continue;
           }
           var memberIsTarget = analysisSourceUris.Contains(member.StartToken.Uri);
@@ -765,22 +900,51 @@ public static partial class DefinitionAnalysis {
             continue;
           }
 
-          var purpose = NodePurpose(spansOnly, memberIsTarget);
+          var memberPurpose = NodePurpose(spansOnly, memberIsTarget);
           if (member is Function function) {
-            declarations.Add(DefinitionNode.ForFunction(function, moduleDefinition.Name, purpose));
+            declarations.Add(DefinitionNode.ForFunction(function, memberEnclosingName, memberPurpose));
             if (!spansOnly && function.ByMethodBody != null) {
-              declarations.Add(DefinitionNode.ForFunctionByMethod(function, moduleDefinition.Name, purpose));
+              declarations.Add(DefinitionNode.ForFunctionByMethod(function, memberEnclosingName, memberPurpose));
             }
           } else if (member is MethodOrConstructor method && method is not Method { IsByMethod: true }) {
-            declarations.Add(DefinitionNode.ForMethod(method, moduleDefinition.Name, purpose));
-          } else if (member is ConstantField constant && constant.EnclosingClass is DefaultClassDecl) {
-            declarations.Add(DefinitionNode.ForConstant(constant, moduleDefinition.Name, purpose));
+            declarations.Add(DefinitionNode.ForMethod(method, memberEnclosingName, memberPurpose));
+          } else if (member is ConstantField constant) {
+            declarations.Add(DefinitionNode.ForConstant(constant, memberEnclosingName, memberPurpose));
+          } else if (member is Field field) {
+            declarations.Add(DefinitionNode.ForDeclaration(field, "field", memberEnclosingName, memberPurpose));
+          } else {
+            throw new InvalidOperationException($"Unsupported source member: {member.GetType().Name}");
+          }
+          memberNodes.Add(declarations.Last());
+        }
+        var group = new List<DefinitionNode>();
+        foreach (var memberNode in memberNodes) {
+          if (memberNode.Declaration is not Field ||
+              (group.Count > 0 && memberNode.Declaration.StartToken.val != "," &&
+               memberNode.Declaration.StartToken.pos != group[0].Declaration.StartToken.pos)) {
+            SetSourceGroup(group);
+            group.Clear();
+          }
+          if (memberNode.Declaration is Field) {
+            group.Add(memberNode);
           }
         }
+        SetSourceGroup(group);
       }
     }
 
     return declarations;
+
+    static void SetSourceGroup(List<DefinitionNode> group) {
+      if (group.Count < 2) {
+        return;
+      }
+      var span = new DefinitionSourceSpan(group[0].Declaration.StartToken.pos,
+        TokenEnd(group.Last().Declaration.EndToken));
+      foreach (var node in group) {
+        node.SourceGroup = span;
+      }
+    }
 
     static DefinitionNodePurpose NodePurpose(
       bool spansOnly,
@@ -811,12 +975,61 @@ public static partial class DefinitionAnalysis {
     }
   }
 
+  private static Dictionary<INode, DefinitionNode> SourceDeclarationIndex(
+    Program program, IReadOnlyList<DefinitionNode> declarations) {
+    var authored = declarations.Where(node => node.BodyKind != DefinitionBodyKind.FunctionByMethod).ToList();
+    var index = authored.ToDictionary(node => node.Declaration);
+    var sourceNodes = authored.GroupBy(node => SourceIdentity((Declaration)node.Declaration))
+      .ToDictionary(group => group.Key, group => group.ToList());
+    // Abstract imports and refinements resolve against cloned declarations. Bind those
+    // references to their authored source declaration instead of reporting another copy.
+    foreach (var module in program.Modules()) {
+      foreach (var topLevel in module.TopLevelDecls) {
+        Add(topLevel);
+        if (topLevel is TopLevelDeclWithMembers container and not IteratorDecl) {
+          foreach (var member in container.Members) {
+            Add(member);
+          }
+        }
+      }
+    }
+    return index;
+
+    void Add(Declaration declaration) {
+      if (index.ContainsKey(declaration) || declaration is Method { IsByMethod: true } ||
+          declaration is DefaultClassDecl or LiteralModuleDecl or AliasModuleDecl or AbstractModuleDecl or NonNullTypeDecl or ValuetypeDecl ||
+          AutoGeneratedOrigin.Is(declaration.Origin)) {
+        return;
+      }
+      if (sourceNodes.TryGetValue(SourceIdentity(declaration), out var sourceCandidates)) {
+        var fullName = declaration switch {
+          TopLevelDecl topLevel => topLevel.FullDafnyName,
+          MemberDecl member => member.FullDafnyName,
+          _ => ""
+        };
+        var matches = sourceCandidates.Count == 1
+          ? sourceCandidates : sourceCandidates.Where(node => node.ReportFullName == fullName).ToList();
+        if (matches.Count != 1) {
+          throw new InvalidOperationException($"Ambiguous cloned declaration source: {fullName}; " +
+            string.Join(", ", sourceCandidates.Select(node => node.ReportFullName)));
+        }
+        index[declaration] = matches[0];
+      }
+    }
+
+    static (Uri Uri, int Start, int End, string Name) SourceIdentity(Declaration declaration) {
+      return (declaration.StartToken.Uri, declaration.StartToken.pos,
+        TokenEnd(declaration.EndToken), declaration.Name);
+    }
+  }
+
   private sealed record CallTargetIndex(
     IReadOnlyDictionary<Function, DefinitionNode> FunctionNodes,
     IReadOnlyDictionary<Function, DefinitionNode> ByMethodNodes,
     IReadOnlyDictionary<MethodOrConstructor, DefinitionNode> MethodNodes
   ) {
-    public static CallTargetIndex For(IReadOnlyList<DefinitionNode> declarations) {
+    public static CallTargetIndex For(IReadOnlyList<DefinitionNode> declarations,
+      IReadOnlyDictionary<INode, DefinitionNode> declarationNodes) {
       var functionNodes = new Dictionary<Function, DefinitionNode>();
       var byMethodNodes = new Dictionary<Function, DefinitionNode>();
       var methodNodes = new Dictionary<MethodOrConstructor, DefinitionNode>();
@@ -833,6 +1046,13 @@ public static partial class DefinitionAnalysis {
             break;
           default:
             throw new InvalidOperationException($"Unexpected callable body kind: {declaration.BodyKind}");
+        }
+      }
+      foreach (var (declaration, source) in declarationNodes) {
+        if (declaration is Function function) {
+          functionNodes[function] = source;
+        } else if (declaration is MethodOrConstructor method) {
+          methodNodes[method] = source;
         }
       }
       return new CallTargetIndex(functionNodes, byMethodNodes, methodNodes);
@@ -1168,7 +1388,8 @@ internal sealed record SourceFacts(
     IReadOnlySet<Uri> analysisSourceUris,
     DefinitionSourceFacts wiring) {
     var rootModules = parsedModules
-      .Where(module => !module.IsDefaultModule && analysisSourceUris.Contains(module.StartToken.Uri))
+      .Where(module => !module.IsDefaultModule && module.BodyStartTok != Token.NoToken &&
+                       analysisSourceUris.Contains(module.StartToken.Uri))
       .ToList();
 
     var rootIncludes = program.Compilation.Includes
@@ -1187,7 +1408,8 @@ internal sealed record SourceFacts(
         .OrderBy(name => name, StringComparer.Ordinal)
         .ToList(),
       parsedModules
-        .Where(module => analysisSourceUris.Contains(module.StartToken.Uri))
+        .Where(module => (module.IsDefaultModule || module.BodyStartTok != Token.NoToken) &&
+                         analysisSourceUris.Contains(module.StartToken.Uri))
         .SelectMany(module => ImportedModuleNames(program, module))
         .Distinct()
         .OrderBy(name => name, StringComparer.Ordinal)
@@ -1198,7 +1420,7 @@ internal sealed record SourceFacts(
           Path.GetFullPath(include.IncluderFilename.LocalPath),
           Path.GetFullPath(include.IncludedFilename.LocalPath),
           include.StartToken.pos,
-          include.EndToken.pos + include.EndToken.val.Length))
+          DefinitionAnalysis.TokenEnd(include.EndToken)))
         .OrderBy(include => include.SourcePath)
         .ThenBy(include => include.Start)
         .ToList(),
@@ -1253,14 +1475,16 @@ internal sealed record SourceFacts(
         module.FullDafnyName,
         DefinitionAnalysis.SourcePath(module),
         module.BodyStartTok.pos,
-        module.EndToken.pos))
+        module.EndToken.pos) {
+        Start = module.StartToken.pos,
+        End = DefinitionAnalysis.TokenEnd(module.EndToken)
+      })
       .Where(module => module.SourcePath.Length > 0)
       .OrderBy(module => module.SourcePath, StringComparer.Ordinal)
       .ThenBy(module => module.BodyStart)
       .ThenBy(module => module.Name, StringComparer.Ordinal)
       .ToList();
     var imports = parsedModules
-      .Where(module => !module.IsDefaultModule)
       .SelectMany(module => module.TopLevelDecls
         .OfType<ModuleDecl>()
         .Where(moduleDecl =>
@@ -1280,7 +1504,7 @@ internal sealed record SourceFacts(
         Path.GetFullPath(include.IncluderFilename.LocalPath),
         Path.GetFullPath(include.IncludedFilename.LocalPath),
         include.StartToken.pos,
-        include.EndToken.pos + include.EndToken.val.Length))
+        DefinitionAnalysis.TokenEnd(include.EndToken)))
       .Distinct()
       .OrderBy(include => include.SourcePath, StringComparer.Ordinal)
       .ThenBy(include => include.Start)
@@ -1315,7 +1539,7 @@ internal sealed record SourceFacts(
       moduleDecl.Opened,
       sourcePath,
       moduleDecl.StartToken.pos,
-      moduleDecl.EndToken.pos + moduleDecl.EndToken.val.Length);
+      DefinitionAnalysis.TokenEnd(moduleDecl.EndToken));
   }
 
   private static bool IsSameDirectoryDafnyInclude(Include include) {
@@ -1368,8 +1592,8 @@ internal enum DefinitionBodyKind {
   Function,
   FunctionByMethod,
   Method,
-  Datatype,
-  Constant
+  Constant,
+  Declaration
 }
 
 internal enum DefinitionNodePurpose {
@@ -1453,6 +1677,7 @@ internal sealed class DefinitionNode(
   public Expression? ExpressionBody { get; } = expressionBody;
   public Statement? StatementBody { get; } = statementBody;
   public DefinitionReportFacts? ReportFacts { get; } = reportFacts;
+  public DefinitionSourceSpan? SourceGroup { get; set; }
 
   public int Line => ReportFacts!.Line;
   public int Column => ReportFacts!.Column;
@@ -1688,59 +1913,84 @@ internal sealed class DefinitionNode(
       reportFacts);
   }
 
-  public static DefinitionNode ForDatatype(
-    DatatypeDecl datatype,
+  public static DefinitionNode ForDeclaration(
+    Declaration declaration,
+    string kind,
     string enclosingName,
     DefinitionNodePurpose purpose) {
+    var typeParameters = declaration is TopLevelDecl topLevel ? topLevel.TypeArgs : [];
+    var types = declaration switch {
+      DatatypeDecl datatype => datatype.Ctors.SelectMany(constructor => constructor.Formals).Select(formal => formal.Type),
+      TypeSynonymDecl synonym => [synonym.Rhs],
+      NewtypeDecl newtype => new[] { newtype.BaseType }.Concat(newtype.Traits),
+      IteratorDecl iterator => iterator.Ins.Concat(iterator.Outs).Select(formal => formal.Type),
+      TopLevelDeclWithMembers container => container.Traits,
+      Field field => [field.Type],
+      _ => Enumerable.Empty<Type>()
+    };
+    var expressions = declaration switch {
+      SubsetTypeDecl subset => new[] { subset.Constraint, subset.Witness }.OfType<Expression>(),
+      NewtypeDecl newtype => new[] { newtype.Constraint, newtype.Witness }.OfType<Expression>(),
+      IteratorDecl iterator => iterator.SubExpressions,
+      _ => Enumerable.Empty<Expression>()
+    };
+    var statementBody = (declaration as IteratorDecl)?.Body;
+    var iteratorDeclaration = declaration as IteratorDecl;
+    var bodyAnalysis = AnalyzeStatementBody(statementBody);
     DefinitionReportFacts? reportFacts = null;
     if (purpose != DefinitionNodePurpose.ResolvedInclude) {
       reportFacts = new DefinitionReportFacts(
-        datatype.Origin.line,
-        datatype.Origin.col,
-        datatype.StartToken.pos,
-        null,
-        EndOffset(datatype),
-        DefinitionAnalysis.SourcePath(datatype),
+        declaration.Origin.line,
+        declaration.Origin.col,
+        declaration.StartToken.pos,
+        declaration is IteratorDecl ? BodyStartOffset(declaration) : null,
+        EndOffset(declaration),
+        DefinitionAnalysis.SourcePath(declaration),
+        declaration is MemberDecl member && member.IsGhost,
         false,
+        bodyAnalysis.HasLoop,
         false,
-        false,
-        false,
-        "datatype",
-        datatype.HasAxiomAttribute,
-        datatype.HasExternAttribute,
-        datatype.HasVerifyFalseAttribute,
-        false,
-        false,
-        Array.Empty<DefinitionStatement>(),
-        Array.Empty<DefinitionMemberAssignment>(),
-        Array.Empty<DefinitionCallSite>(),
+        declaration is TopLevelDecl top ? top.WhatKind : ((MemberDecl)declaration).WhatKind,
+        declaration.HasAxiomAttribute,
+        declaration.HasExternAttribute,
+        declaration.HasVerifyFalseAttribute,
+        bodyAnalysis.HasAssumeStatement,
+        bodyAnalysis.HasVarDeclaration,
+        bodyAnalysis.Statements,
+        bodyAnalysis.MemberAssignments,
+        bodyAnalysis.CallSites,
         "",
         false,
-        TypeParameterTexts(datatype.TypeArgs),
-        TypeParameterNameTexts(datatype.TypeArgs),
-        Array.Empty<string>(),
-        Array.Empty<string>(),
-        Array.Empty<string>(),
-        Array.Empty<string>(),
-        Array.Empty<string>(),
-        Array.Empty<string>(),
-        Array.Empty<string>(),
-        DefinitionStructuredFacts.Empty,
-        Array.Empty<string>(),
+        TypeParameterTexts(typeParameters),
+        TypeParameterNameTexts(typeParameters),
+        iteratorDeclaration?.Ins.Select(formal => $"{formal.Name}: {formal.Type}").ToList() ?? [],
+        iteratorDeclaration?.Ins.Select(formal => formal.Name).ToList() ?? [],
+        iteratorDeclaration?.Outs.Select(formal => $"{formal.Name}: {formal.Type}").ToList() ?? [],
+        iteratorDeclaration?.Outs.Select(formal => formal.Name).ToList() ?? [],
+        iteratorDeclaration?.Requires.Select(item => item.E.EntireRange.PrintOriginal()).ToList() ?? [],
+        iteratorDeclaration?.Ensures.Select(item => item.E.EntireRange.PrintOriginal()).ToList() ?? [],
+        iteratorDeclaration?.Modifies.Expressions?.Select(item => item.EntireRange.PrintOriginal()).ToList() ?? [],
+        iteratorDeclaration == null ? DefinitionStructuredFacts.Empty : new DefinitionStructuredFacts(
+          FormalDetails(iteratorDeclaration.Ins),
+          FormalDetails(iteratorDeclaration.Outs),
+          iteratorDeclaration.Reads.Expressions?.Select(item => item.EntireRange.PrintOriginal()).ToList() ?? [],
+          iteratorDeclaration.Decreases.Expressions?.Select(item => item.EntireRange.PrintOriginal()).ToList() ?? [],
+          "", ""),
+        bodyAnalysis.CallNames,
         purpose == DefinitionNodePurpose.ResolvedRoot
-          ? [.. datatype.Ctors.SelectMany(constructor => constructor.Formals).Select(formal => formal.Type)]
+          ? types.ToList()
           : Array.Empty<Type>());
     }
     return new DefinitionNode(
-      datatype,
-      DefinitionBodyKind.Datatype,
-      datatype.Name,
-      FullName(datatype, enclosingName),
-      "datatype",
+      declaration,
+      DefinitionBodyKind.Declaration,
+      declaration.Name,
+      declaration is TopLevelDecl typeDecl ? FullName(typeDecl, enclosingName) : FullName((MemberDecl)declaration, enclosingName),
+      kind,
       enclosingName,
-      Array.Empty<Expression>(),
+      purpose == DefinitionNodePurpose.Spans ? [] : expressions.ToList(),
       null,
-      null,
+      purpose == DefinitionNodePurpose.Spans ? null : statementBody,
       reportFacts);
   }
 
@@ -1864,7 +2114,7 @@ internal sealed class DefinitionNode(
       .Where(attribute => attribute.Name == Attributes.AxiomAttributeName && attribute.StartToken.IsValid)
       .Select(attribute => (
         Start: attribute.StartToken.pos - declaration.StartToken.pos,
-        End: attribute.EndToken.pos + attribute.EndToken.val.Length - declaration.StartToken.pos))
+        End: DefinitionAnalysis.TokenEnd(attribute.EndToken) - declaration.StartToken.pos))
       .Where(range => 0 <= range.Start && range.Start < range.End)
       .OrderByDescending(range => range.Start)
       .ToList();
@@ -2238,7 +2488,7 @@ internal sealed class DefinitionNode(
   }
 
   private static int EndOffset(INode node) {
-    return node.EndToken.pos + node.EndToken.val.Length;
+    return DefinitionAnalysis.TokenEnd(node.EndToken);
   }
 
 }

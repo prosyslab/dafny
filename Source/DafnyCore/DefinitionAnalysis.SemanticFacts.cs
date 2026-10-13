@@ -69,7 +69,8 @@ public static partial class DefinitionAnalysis {
       var bodyStart = definition.BodyStart ?? definition.Start;
       definitionRegionIds.Add((
         definition,
-        AddRegion(source, includedSpan: (definition.Start, definition.End)),
+        AddRegion(source, includedSpan: (definition.Start, definition.End),
+          excludedSpans: definition.Children.Select(child => (child.Start, child.End))),
         AddRegion(source, includedSpan: (definition.Start, contractEnd), excludedSpans: removableAttributes),
         AddRegion(source, includedSpan: (bodyStart, definition.End))));
     }
