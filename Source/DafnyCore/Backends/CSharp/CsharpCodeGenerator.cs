@@ -3002,9 +3002,49 @@ namespace Microsoft.Dafny.Compilers {
       }
     }
 
+    /// <summary>
+    /// Capture constructor variables before enclosing expressions introduce target lambdas.
+    /// </summary>
+    public override void EmitExpr(Expression expr, bool inLetExprBody, ConcreteSyntaxTree wr, ConcreteSyntaxTree wStmts) {
+      var resolvedExpr = expr.Resolved;
+      if (resolvedExpr is LetExpr or MatchExpr or NestedMatchExpr &&
+          resolvedExpr.DescendantsAndSelf.Any(e => e.Resolved is SeqConstructionExpr { Initializer: LambdaExpr })) {
+        wr = CaptureSequenceConstructionVariables(resolvedExpr, out var su, inLetExprBody, wr, ref wStmts);
+        base.EmitExpr(su.Substitute(resolvedExpr), inLetExprBody, wr, wStmts);
+      } else {
+        base.EmitExpr(expr, inLetExprBody, wr, wStmts);
+      }
+    }
+
+    private ConcreteSyntaxTree CaptureSequenceConstructionVariables(Expression expr, out Substituter su,
+      bool inLetExprBody, ConcreteSyntaxTree wr, ref ConcreteSyntaxTree wStmts) {
+      CreateFreeVarSubstitution(expr, out var boundVars, out var arguments, out su);
+      if (boundVars.Count == 0) {
+        return wr;
+      }
+      if (boundVars.Count == 1) {
+        return EmitBetaRedex(boundVars.ConvertAll(IdName), arguments, boundVars.ConvertAll(bv => bv.Type),
+          expr.Type, expr.Origin, inLetExprBody, wr, ref wStmts);
+      }
+
+      // One native tuple parameter avoids the System.Func limit on individual parameters.
+      var tupleName = ProtectedFreshId("_seq_capture");
+      var tupleType = $"({boundVars.Comma(bv => TypeName(bv.Type, wr, bv.Origin))})";
+      var resultType = TypeName(expr.Type, wr, expr.Origin);
+      wr.Format($"{DafnyHelpersClass}.Id<System.Func<{tupleType}, {resultType}>>({tupleName} =>{ExprBlock(out ConcreteSyntaxTree body)})");
+      body.WriteLine($"var ({boundVars.Comma(IdName)}) = {tupleName};");
+      wr.Write("((");
+      TrExprList(arguments, wr, inLetExprBody, wStmts, parens: false);
+      wr.Write("))");
+      return EmitReturnExpr(body);
+    }
+
     protected override void EmitSeqConstructionExpr(SeqConstructionExpr expr, bool inLetExprBody, ConcreteSyntaxTree wr,
       ConcreteSyntaxTree wStmts) {
-      if (expr.Initializer is LambdaExpr lam) {
+      if (expr.Initializer is LambdaExpr) {
+        wr = CaptureSequenceConstructionVariables(expr, out var su, inLetExprBody, wr, ref wStmts);
+        expr = (SeqConstructionExpr)su.Substitute(expr);
+        var lam = (LambdaExpr)expr.Initializer;
         Contract.Assert(lam.BoundVars.Count == 1);
         EmitSeqConstructionExprFromLambda(expr.N, lam.BoundVars[0], lam.Body, inLetExprBody, wr);
       } else {

@@ -1,5 +1,7 @@
 # Implementation knowledge
 
+2026-10-12: [C# sequence construction output capture](csharp-out-capture.md) — generation3 independently accepted; expression-time unary/tuple capture fixesCS1628 without17-variable or loop/let/match regressions;27native obligations, nine independent programs and four official C# suites pass; local owning-tree compiler built.
+
 2026-10-04: [agent query-count removal](contract-testing.md#agent-query-count-removal-2026-10-04) uses request schema2 and time-only phase allocation; all verifier timeouts retained, native checks in progress.
 
 2026-10-03: [shared-campaign runtime test pattern](contract-testing.md#shared-campaign-runtime-test-pattern-2026-10-03-implementation-checks) merges DafnyDriver runtime tests onto bucketed fixture campaigns (220 -> 70 compiles, 10 min -> 84 s, coverage preserved); implementation checks only, independent verification pending.

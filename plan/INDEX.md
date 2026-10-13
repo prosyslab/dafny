@@ -1,5 +1,7 @@
 # 구현 계획
 
+- [Fix C# capture of method output parameters](2026-10-12-csharp-out-capture.md) — done; C# expression-time unary/tuple capture,27native obligations/25runtime lines, nine independent programs/four official C# suites accepted;17-variable and loop/let/match compatibility preserved, local compiler built.
+
 - [Remove the agent query-count limit](2026-10-04-remove-agent-query-count-limit.md) — done; count ceiling removed, all verifier timeouts retained; fresh native247/199 and Python/native2 passed.
 
 | 계획 | 상태 | 목표 | 갱신일 |
