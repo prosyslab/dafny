@@ -28,3 +28,5 @@
 - [Unified native Dafny runtime](unified-dafny-runtime.md) — 2026-10-19 source independently verified (90 native checks); combined metadata retains trust/proof behavior; parent pins/build metadata separate.
 - [Installed draft provenance](pbt-installed-draft-evidence.md) — actual substitutions govern runtime evidence and callee attribution; strict unused-draft validation and native proof bindings preserved, independently verified 20 memory cases.
 - [Diagnostic generator names](pbt-generator-formal-names.md) — response-authoritative public names plus canonical-snapshot two-hop runtime binding; exact formal/member/runtime identities and include-first named/default/cross-file controls independently accepted.
+
+2026-10-18: [Resolved verification target facts](verification-target-facts.md) — opt-in actual compiler target inventory and authored declaration attributes; build, seven in-memory tests, generic native proof/attribute controls and fresh independent review accepted; baseline style limitations recorded.

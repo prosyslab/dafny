@@ -1,3 +1,5 @@
+- [Resolve verification-facts rebase conflicts](2026-10-22-resolve-rebase-conflicts.md) — done; composed analyzer behavior and both documentation histories preserved; 51 focused tests/build pass, resolutions staged for rebase continuation.
+
 - [Substitute nested statement matches in proof expressions](2026-10-21-nested-match-substitution.md) — done; independent build, in-memory binding/scope regression, formatting and direct positive/strict-negative weekly-policy proofs pass; focused delivery on expecto.
 
 - [Deliver the latest compiler changes on expecto](2026-10-21-expecto-native-latest.md) — done; original five commits preserved, four focused source commits delivered, independent build/195 memory tests/format/direct positive-negative proofs pass; operational limits retained.
@@ -45,3 +47,5 @@
 - [Repair PBT worker null failures](2026-10-21-pbt-worker-failure.md) — bounded native repair independently accepted:157 affected cases pass with zero skips, full build and scoped checks pass. Retain in-progress status because the ordinary-source live worker cause remains unresolved; earlier unaccepted handoff preserved.
 - [Preserve include preambles during PBT source preparation](2026-10-21-pbt-preparation-preambles.md) — done; exact default-module EOF placement, default-scope import handling and cross-draft body/helper tie ordering accepted independently after 57 memory checks.
 - [Integrate reviewed PBT native source into live main](2026-10-21-integrate-reviewed-pbt-native.md) — done; exact live transfer, independent review, eight affected builds, 139 memory checks, scoped formatting/diff audits and canonical launcher build accepted; source/local scope only.
+
+- [Resolved verification target facts](2026-10-18-verification-target-facts.md) — done; opt-in actual native inventory and authored attributes, locally and independently accepted; parent owns commit/landing.
