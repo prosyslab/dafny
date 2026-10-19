@@ -112,6 +112,8 @@ public record DefinitionSourceFacts(
 ) {
   [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
   public DafnySemanticFacts? SemanticFacts { get; init; }
+  [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  public DafnyProofInputs? ProofInputs { get; init; }
 }
 
 public record DefinitionAnalysisModule(
@@ -262,12 +264,18 @@ public static partial class DefinitionAnalysis {
     Program program,
     IReadOnlySet<Uri> analysisSourceUris,
     bool includeStatements = false,
-    bool includeSemanticFacts = false) {
+    bool includeSemanticFacts = false,
+    bool includeProofInputs = false) {
     var (sourceFacts, programFacts) = SourceFacts.ForDocument(program, analysisSourceUris);
     var definitions = Analyze(program, sourceFacts, analysisSourceUris, includeStatements);
     if (includeSemanticFacts) {
       programFacts = programFacts with {
         SemanticFacts = SemanticFactsFor(program.Options, analysisSourceUris, definitions, programFacts)
+      };
+    }
+    if (includeProofInputs) {
+      programFacts = programFacts with {
+        ProofInputs = ProofInputsFor(program, analysisSourceUris)
       };
     }
     return new DefinitionAnalysisDocument(

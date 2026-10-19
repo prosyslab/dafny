@@ -15,9 +15,11 @@ static class DefinitionAnalysisCommand {
     SpansOnly,
     IncludeSourceFacts,
     IncludeSemanticFacts,
+    IncludeProofInputs,
     IncludeStatements
   }.Concat(DafnyCommands.ConsoleOutputOptions)
-    .Concat(DafnyCommands.ResolverOptions);
+    .Concat(DafnyCommands.ResolverOptions)
+    .Concat(DafnyCommands.VerificationOptions).Distinct();
 
   private static readonly Option<string> Format = new("--format", () => "json",
     "Output format. Only 'json' is currently supported.");
@@ -29,12 +31,15 @@ static class DefinitionAnalysisCommand {
     "Include deterministic source and definition semantic fingerprints.");
   private static readonly Option<bool> IncludeStatements = new("--include-statements",
     "Report resolved statement spans, kinds, and direct call targets.");
+  private static readonly Option<bool> IncludeProofInputs = new("--include-proof-inputs",
+    "Include conservative translated per-definition proof-input fingerprints without running a solver.");
 
   static DefinitionAnalysisCommand() {
     OptionRegistry.RegisterOption(Format, OptionScope.Cli);
     OptionRegistry.RegisterOption(SpansOnly, OptionScope.Cli);
     OptionRegistry.RegisterOption(IncludeSourceFacts, OptionScope.Cli);
     OptionRegistry.RegisterOption(IncludeSemanticFacts, OptionScope.Cli);
+    OptionRegistry.RegisterOption(IncludeProofInputs, OptionScope.Cli);
     OptionRegistry.RegisterOption(IncludeStatements, OptionScope.Cli);
   }
 
@@ -57,6 +62,11 @@ static class DefinitionAnalysisCommand {
     }
 
     if (options.Get(SpansOnly)) {
+      if (options.Get(IncludeProofInputs)) {
+        await options.ErrorWriter.WriteLineAsync(
+          "definition-analysis does not support --include-proof-inputs with --spans-only.");
+        return (int)ExitValue.PREPROCESSING_ERROR;
+      }
       if (options.Get(IncludeSourceFacts)) {
         await options.ErrorWriter.WriteLineAsync(
           "definition-analysis does not support --include-source-facts with --spans-only.");
@@ -75,7 +85,18 @@ static class DefinitionAnalysisCommand {
       return await ExecuteSpansOnly(options);
     }
 
+    var certificateOutput = options.BaseOutputWriter;
+    if (options.Get(IncludeProofInputs)) {
+      // Keep the optional certificate document independently parseable while
+      // preserving all existing qualification diagnostics for the caller.
+      ((Microsoft.Boogie.CommandLineOptions)options).OutputWriter = options.ErrorWriter;
+    }
     var compilation = CliCompilation.Create(options);
+    if (options.Get(IncludeProofInputs)) {
+      // Translation consumes declared solver settings, not the executable's
+      // discovered version. Certificate generation must not launch the solver.
+      compilation.Compilation.ShouldProcessSolverOptions = false;
+    }
     compilation.Start();
     var analysisSourceUris = AnalysisSourceUris(await compilation.Compilation.RootFiles);
     var resolution = await compilation.Resolution;
@@ -83,22 +104,33 @@ static class DefinitionAnalysisCommand {
       return await compilation.GetAndReportExitCode();
     }
 
-    var includeSourceFacts = options.Get(IncludeSourceFacts) || options.Get(IncludeSemanticFacts);
-    var results = includeSourceFacts
-      ? (object)DefinitionAnalysis.AnalyzeDocument(
+    var includeSourceFacts = options.Get(IncludeSourceFacts) || options.Get(IncludeSemanticFacts) || options.Get(IncludeProofInputs);
+    object results;
+    if (includeSourceFacts) {
+      DefinitionAnalysisDocument AnalyzeDocument() => DefinitionAnalysis.AnalyzeDocument(
         resolution.ResolvedProgram,
         analysisSourceUris,
         options.Get(IncludeStatements),
-        options.Get(IncludeSemanticFacts))
-      : DefinitionAnalysis.Analyze(
+        options.Get(IncludeSemanticFacts),
+        options.Get(IncludeProofInputs));
+      results = options.Get(IncludeProofInputs)
+        ? await DafnyMain.LargeStackFactory.StartNew(AnalyzeDocument)
+        : AnalyzeDocument();
+    } else {
+      results = DefinitionAnalysis.Analyze(
         resolution.ResolvedProgram,
         analysisSourceUris,
         options.Get(IncludeStatements));
+    }
     var json = JsonSerializer.Serialize(results, new JsonSerializerOptions {
       PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
       WriteIndented = true
     });
-    await options.OutputWriter.Code(json + "\n");
+    if (options.Get(IncludeProofInputs)) {
+      await certificateOutput.WriteLineAsync(json);
+    } else {
+      await options.OutputWriter.Code(json + "\n");
+    }
 
     return await compilation.GetAndReportExitCode();
   }
