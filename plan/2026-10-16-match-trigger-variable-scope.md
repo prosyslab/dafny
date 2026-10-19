@@ -254,3 +254,178 @@ native working trees. The private replay remains incomplete with its missing
 termination receipt; it is not a completed proof or experiment result. All
 compiler-repair criteria are met, with no remaining native repair work. This
 plan is `done`; image and experiment decisions remain parent-owned.
+
+## Separate benchmark-native propagation record
+
+The following record covers the separate benchmark-native tree and retains its
+original build and validation provenance.
+
+# Keep match-pattern variables inside automatic trigger scope
+
+Status: done
+Owner: benchmark native Dafny repository (`dafnyutils/dafny`).
+Date: 2026-10-16.
+Related native owner: [Cosyn native repair](../../../cosyn/dafny/plan/2026-10-16-match-trigger-variable-scope.md).
+
+## Objective, evidence and acceptance
+
+Apply the same minimal generic automatic-trigger scope repair to this owning
+native compiler, preserving all pre-existing work. Native base HEAD is
+`bc427b21461f258fd8de34232e01bb6be03cee39` with substantial pre-existing changes.
+Read benchmark/native AGENTS, native CLAUDE, Makefile, plan/wiki indexes and
+affected source; no nested instruction files/templates were found. Both
+`TriggersCollector` match candidate filters have the same confirmed defect as
+the Cosyn native compiler: they export terms mentioning a case-local binder if
+another binder is absent. Existing `CanCombine` scope repair remains unchanged.
+
+Acceptance: preserve only candidates with no case-local variable in both match
+AST forms, retain valid candidate identity with zero/one/multiple local binders,
+and reject a candidate mentioning one of multiple locals. The same generic
+native reproducer must reach ordinary verification results without undeclared
+Boogie identifiers. Build, focused in-memory tests and formatting must pass;
+fresh independent verification is parent-owned and required before closure.
+
+No benchmark task, specification, proof scope, oracle, evaluator, dataset,
+scoring, reporting or Python changes. No provider calls, Docker/image operations,
+new dependencies or broad test/proof suites. No restricted candidate source or
+run evidence is copied into this repository. The interrupted run remains fixed.
+
+## Change table
+
+| Exact file/symbol | What/how/why | Unmet without change and validation |
+| --- | --- | --- |
+| `Source/DafnyCore/Triggers/TriggersCollector.cs`: `AnnotateNestedMatchExpr`, `AnnotateMatchExpr` | Replace both incorrect scope predicates by rejecting any term mentioning any local pattern variable | Malformed triggers can leave undeclared Boogie identifiers; generic native probe and direct AST regressions |
+| `Source/DafnyCore/AssemblyInfo.cs` | Standard friend access for exact existing `DafnyCore.Test` assembly | Exercise internal collector directly without reflection/public API; compiled test name match |
+| `Source/DafnyCore.Test/MatchTriggerVariableScopeTests.cs` | Transfer only the inspected small generic in-memory regression file from the Cosyn native owner; add no I/O or process calls | Cover both AST forms and candidate preservation; focused no-build/no-restore test command |
+| `plan/2026-10-16-match-trigger-variable-scope.md`, `plan/INDEX.md` | Record owner evidence, commands, state and handoff | Auditable maintenance; diff/link audit |
+| `wiki/match-trigger-variable-scope.md`, `wiki/INDEX.md` | Record generic invariant and local validation without candidate content | Durable knowledge; source verification and links |
+| `/workspace/tmp/dafny-match-trigger-scope/benchmark-after.{stdout,stderr}.txt` | Bounded generic native verifier receipts using existing unchanged `generic.dfy` | Demonstrate compiler recovery separately from proof success |
+
+All changes are native compiler/test/documentation owned. User authorization for
+generic direct native bug repair includes both toolchain copies. Parent confirms
+standard friend-assembly test access is acceptable. No further approvals or
+dependencies are required for this reversible scope.
+
+## Validation and limits
+
+Working directory: `/workspace/dafnyutils/dafny`. Installed .NET SDK 8.0.131,
+`global.json` requests 8.0.111 with latestFeature roll-forward. Existing cached
+restore/binaries and solver are prerequisites; report any missing prerequisite.
+
+1. Operational deployment, separate from tests: `dotnet build Source/Dafny.sln
+   --no-restore -m:1 -p:UseSharedCompilation=false --verbosity quiet`, serially
+   after the other native owner build. This supported build may emit normal
+   build outputs; tests must never invoke it or generate compilation artifacts.
+2. `dotnet test Source/DafnyCore.Test --no-build --no-restore -m:1 --filter
+   FullyQualifiedName~MatchTriggerVariableScopeTests --verbosity quiet` and the
+   existing `TriggerBoundVariableScopeTests` filter. Test transitive paths only
+   create in-memory ASTs or parse/resolve short in-memory strings; no directories,
+   synchronization, subprocesses, solver calls, compilation or build outputs.
+   Vstest's existing runner needs an approved local communication socket.
+3. Focused `make format` equivalent: `dotnet format whitespace Source/Dafny.sln
+   --no-restore --include Source/DafnyCore/AssemblyInfo.cs
+   Source/DafnyCore/Triggers/TriggersCollector.cs
+   Source/DafnyCore.Test/MatchTriggerVariableScopeTests.cs --verify-no-changes
+   --verbosity quiet`.
+4. `dotnet Binaries/Dafny.dll verify
+   /workspace/tmp/dafny-match-trigger-scope/generic.dfy
+   --verification-time-limit 5 --cores 1 --allow-warnings`, external 30-second
+   deadline, bounded stdout/stderr only. Generic source previously produces
+   undeclared match-case variables on the other unchanged native compiler; a
+   proof error is an ordinary result and must not be relabeled proof success.
+5. `git diff --check`; compare only exact intended files, preserve existing
+   changes; recursively audit plan/wiki for non-Markdown files.
+
+No root/Python/benchmark suite is relevant to these C#-only changes. Separate
+native build, generic verifier outcome and any future experiment result. No
+private replay is required from this owner, and no evaluation claim is made.
+
+## Progress and handoff
+
+- Inspected source and owner instructions; plan ready before any owner edits.
+- At initial handoff, remaining: add identical repair and settled generic test file, build and run
+  focused checks, document durable findings, provide pins for independent review.
+
+### Build environment prerequisite
+
+The default-sandbox solution build was interrupted after 4:40 because the
+pre-existing Gradle wrapper repeatedly retried its Java-runtime target. A
+five-second bounded diagnostic found the actual prerequisite failure:
+`java.io.FileNotFoundException` opening the existing Gradle distribution lock
+under `/home/vscode/.gradle/.../gradle-8.14-bin.zip.lck` on a read-only filesystem.
+This is a sandbox write restriction, not a compiler error. Interrupted build
+returns exit 1 with cancellation warning MSB5021 and is not passing evidence.
+Rerun the same supported build through the approved escalated execution path,
+which can use the existing Gradle cache. No packages, target skips, fallback
+backends, source permissions or build scripts are changed.
+
+### Implementation handoff — 2026-10-16
+
+The approved escalated solution build completes in 45.46 seconds, zero errors
+and four unchanged-source warnings: CS0162 twice in `ContractRuntimeProfile.cs`,
+CS0618 in `PbtObservation.cs` and VSTHRD103 in `ContractPhaseTimingTests.cs`.
+The earlier interrupted attempt remains explicitly unsuccessful. No packages,
+target skips or build-script changes were used to resolve the sandbox issue.
+
+From this owner root, planned filtered tests pass with `--no-build --no-restore`:
+`MatchTriggerVariableScopeTests` 12/12 and existing `TriggerBoundVariableScopeTests`
+3/3, no skips. The approved local-socket execution path is used. Focused planned
+formatting passes. The unchanged generic probe reaches ordinary exit 4 with
+zero verified/one unproved postcondition, empty stderr and no internal binding
+error. It is compiler recovery evidence, not proof success. No full suite,
+benchmark proof run, provider call or image operation was performed.
+
+`git diff --check`, exact three-file comparison with the Cosyn native owner and
+recursive native plan/wiki non-Markdown audit pass. No non-Markdown artifacts
+were found. Pre-existing changes remain, including the earlier `CanCombine`
+repair SHA `71e87fbabc7d750b3ed28078e4cc1deafbfb3314cdc96df3962b201f6b5cdb5f`.
+Installed .NET SDK is 8.0.131; native version base is
+`bc427b21461f258fd8de34232e01bb6be03cee39`, configured Z3 default 4.16.0.
+
+| Final file | SHA256 |
+| --- | --- |
+| `Source/DafnyCore/Triggers/TriggersCollector.cs` | `a7ec105afe3bd79246089532909360c8813e46b8a615aca4e9f01ae1ebb847f5` |
+| `Source/DafnyCore/AssemblyInfo.cs` | `c6f9dab39a49550d203edebb3fe7efc4f69246a93258c020b0f0a6ff7425a0c4` |
+| `Source/DafnyCore.Test/MatchTriggerVariableScopeTests.cs` | `d1e794cbbfc66cab9ec9aec4d1cb2d8ae8f90636e5e095c83587d61aa266d28b` |
+| `Binaries/DafnyCore.dll` (also test-bin Core) | `6ffc2213cf0baff381f4855d58b7ca11bca1b3f1839d798cb6cfd2033958da8e` |
+| `Binaries/DafnyDriver.dll` | `53052e3781e7969c99ed8e93953177c29f29952494bc1c7355570b6f2a91c029` |
+| `Source/DafnyCore.Test/bin/Debug/net8.0/DafnyCore.Test.dll` | `8cb790cde4b52f77fca75227a99fa810c7a064a2d55d0a60c716a08a6df3cede` |
+
+Durable knowledge: [match trigger scope invariant](../wiki/match-trigger-variable-scope.md).
+Implementation and local checks are complete; no operational processes remain
+in this context. At this handoff, plan stayed `in-progress` for parent-owned fresh
+independent acceptance, completed below. No commits, new packages or benchmark
+layer edits.
+
+### Independent acceptance and closure — 2026-10-16
+
+Fresh independent review accepts the exact native scope repair at
+2026-10-16T10:18:52.662637Z. Workspace-only receipts:
+[acceptance JSON](/workspace/tmp/match-trigger-scope-independent-review-20261016/independent-acceptance.json)
+and [review](/workspace/tmp/match-trigger-scope-independent-review-20261016/review.md).
+All ten reviewed source hashes across the two native owners match current files,
+including repaired filters, friend access, new tests and preserved split-scope
+implementation/tests.
+
+The fresh context independently passes 12 new match-scope cases and 3 preserved
+split-scope cases per owner (30 checks total, no failures/skips), focused
+formatting, diff checks and Markdown-only plan/wiki audits. It confirms candidate
+identity retention for zero/one/multiple binders, rejection of any local pattern
+variable in both match AST forms, enclosing free-sequence/quantified-index
+controls, exact friend access and in-memory test paths. Unchanged generic stdin
+probes in both owners return ordinary exit 4, zero verified/one unproved
+postcondition and no internal binding error: compiler recovery, not proof success.
+
+The independent formatter in this owner first times out at 90 seconds (exit 124,
+no output). Approved escalated retry passes in 12.334 seconds with unspecified
+workspace-load warnings. Both attempts are retained, separate from the earlier
+interrupted Gradle build and its successful approved build retry. The reviewer
+does not perform a solution build; operational builds remain implementation-owned
+evidence. No independent provider, Docker/image, root/Python, broad proof suite,
+benchmark/private-input or scoring check is claimed.
+
+Acceptance covers only exact reviewed source paths/hashes in the existing dirty
+native trees. No benchmark/proof/experiment success is inferred, and the parent
+investigation's private replay remains incomplete. All native compiler-repair
+criteria are met; no repair work remains. This plan is `done`; subsequent image
+and experiment decisions remain parent-owned.

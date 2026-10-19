@@ -83,3 +83,21 @@ the generic compiler regression and from independent acceptance.
 The reviewer performs no independent solution build or benchmark/private-input
 check. Acceptance covers only the exact reviewed source paths/hashes in both
 dirty native owners; operational builds remain implementation-owned evidence.
+
+## Benchmark-native validation provenance
+
+The same invariant and regression coverage were accepted in the separate
+benchmark-native tree based on `bc427b21461f258fd8de34232e01bb6be03cee39`.
+Its [owner plan](../plan/2026-10-16-match-trigger-variable-scope.md) preserves
+both native-tree histories; the [Cosyn compiler record](../../../cosyn/dafny/wiki/match-trigger-variable-scope.md)
+provides the related owner context.
+
+The benchmark-native solution build's default-sandbox attempt was interrupted
+after a read-only Gradle-cache lock failure. The same supported build passed
+through approved escalated execution with four unchanged-source warnings and no
+target skips, build-script changes or new packages. Its independent formatter
+first timed out after 90 seconds (exit 124, no output), then passed through the
+approved escalated path in 12.334 seconds with unspecified workspace-load
+warnings. These are separate build and formatting attempts. Both native owners'
+generic probes reached ordinary exit 4, zero verified/one proof error and no
+internal binding error; this establishes compiler recovery, not proof success.
