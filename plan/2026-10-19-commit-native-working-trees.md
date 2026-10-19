@@ -70,6 +70,8 @@ benchmark evidence. No unchanged test or proof was rerun for these document edit
 
 The shared maintenance scope above also applies to this separate owner record.
 The following results retain its distinct starting revision and cached checks.
+Owner-specific scope statements below describe the 2026-10-19 benchmark snapshot,
+before this rebase combined the two histories.
 
 
 Started at `888f1b2b22393092e6e10937c588fbc195a65ad4`. Purpose commits: split binders `469bfe221`, match-local candidates `a77ccbb37`, internal exits `d6789ae83`, proof-input projection `5e1203010`, reporting schema `ec3319967`. This owner retains its pre-existing verification-target facts interface and distinct history; no source was synchronized from the Cosyn checkout. Source files were preserved exactly. Staging used explicit paths and purpose-specific cached patches for shared driver files, with staged whitespace/diff review before every commit. Approved elevated Git execution was necessary because shared metadata is read-only to default execution.
@@ -82,8 +84,21 @@ All staged whitespace checks passed. Owner plan/wiki recursive non-Markdown audi
 
 Parent fresh review identified a newly committed theory that creates GUID directories and runs real verification. It was not executed in this maintenance task. Remove that development workload rather than retaining it behind a filter or marker. Reinspect every remaining newly committed test/helper path for filesystem and native-tool boundaries; no replacement test or benchmark contract change is planned.
 
-Removed all8 `CandidateOutcomesKeepTheirExitCodes` cases and their directory/source/log writing body; no exclusive helper or using remains. Retained handler, malformed CLI and injected verifier controls use in-memory console/filesystem data. Trigger/match/body-visibility helpers parse in memory; trusted-source helpers use `SnapshotFileSystem` and in-memory heap preparation. Proof-input controls parse in memory, then hash a fixed set of at most six explicitly named loaded assemblies once through a lazy identity; there is no recursive runtime/toolchain traversal or output tree. No removed workload was executed.
+Removed all8 `CandidateOutcomesKeepTheirExitCodes` cases and their directory/source/log writing body; no exclusive helper or using remains. Retained handler, malformed CLI and injected verifier controls use in-memory console/filesystem data. Trigger and match helpers parse in memory. This owner does not include the other checkout's new body-visibility or trusted-source helpers. Proof-input controls parse in memory, then hash a fixed set of at most six explicitly named loaded assemblies once through a lazy identity; there is no recursive runtime/toolchain traversal or output tree. No removed workload was executed.
 
 Also removed the six command proof-input cases and their exclusive file/directory helper as authorized in the fresh-review correction scope. This leaves the owner-specific compiler API intact.
 
 Correction validation: scoped `dotnet format whitespace . --folder --verify-no-changes --include Source/DafnyDriver.Test/InternalErrorExitTests.cs` and `git diff --check` passed. Static retained-test/helper review found no temporary-directory creation, file-output, process compilation or sync boundary in the retained changed tests. No rebuild or replay of deleted cases was performed; earlier cached test results do not validate this deletion as a rebuilt source state. A separate correction commit records removal without altering runtime/compiler semantics. Parent fresh reviewer owns independent acceptance.
+
+
+## Independent closure and attribution
+
+Fresh independent review accepted the current scoped source and the removal of
+file-producing development tests. Cached-binary checks remain separate from a
+fresh source build. The coordinator corrected this record's table placement and
+owner-specific review wording after that review; these edits change no source.
+Current maintenance commit attribution was completed using the repository's
+established Codex coauthor identity, with each original commit tree preserved.
+The local before/after mapping is available under
+`/workspace/tmp/organize-current-commits/`; it is maintenance metadata, not
+benchmark evidence. No unchanged test or proof was rerun for these document edits.

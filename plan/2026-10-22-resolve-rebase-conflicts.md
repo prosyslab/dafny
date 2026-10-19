@@ -1,6 +1,6 @@
 # Resolve verification-facts rebase conflicts
 
-Status: in-progress
+Status: done
 Date: 2026-10-22
 
 ## Objective and scope
@@ -119,3 +119,45 @@ when required because the submodule's Git directory lies outside the subtree.
 
 No durable findings: this continuation reconciles duplicate implementation
 history and preserves existing provenance; no new wiki page is necessary.
+
+
+## Completed continuation and validation — 2026-10-22
+
+All nine original rebase commands completed on `expecto` over `5fa47c6e9`.
+The completed rebase had a clean native working tree, no unmerged index entries,
+and no `rebase-merge` or `rebase-apply` metadata. The branch is nine commits ahead
+of its existing `origin/expecto` tracking reference; no push was performed.
+
+Resolved duplicate split-trigger, match-trigger, internal-exit, proof-input and
+reporting patches by retaining the newer target source/tests. In particular,
+repeatable proof-input translation, integrated verification facts, later test
+removals, and accepted LIT diagnostic line positions remain intact. Historical
+Cosyn-native records and benchmark-native bases, binary hashes, validation counts
+and limitations are retained in separate sections. Index merging preserves the
+current entries and adds only missing feature destinations. The 2026-10-19
+benchmark snapshot's scope wording is explicitly historical to that owner.
+
+From `/workspace/dafnyutils/dafny`, Git 2.51.1:
+
+- `git diff --name-only 5fa47c6e9 HEAD -- Source docs` is empty. The final diff
+  contains only fourteen Markdown files under `plan/` and `wiki/`.
+- `git merge-base --is-ancestor 5fa47c6e9 HEAD` passes, and
+  `git rev-list --count 5fa47c6e9..HEAD` reports nine.
+- `git diff 5fa47c6e9 HEAD --check`, `git diff --check` and
+  `git diff --cached --check` pass. `git ls-files -u` is empty.
+- A bounded Python audit of changed Markdown finds no conflict markers. Recursive
+  inspection of all `plan/` and `wiki/` files finds no non-Markdown artifacts or
+  artifact symlinks; no existing files required cleanup.
+- A separate read-only reviewer compared the resolved commits and documentation
+  against both histories. It found no blocking issues and independently confirmed
+  source/test/fixture identity with the target and preserved provenance.
+
+No new build, C#/Dafny formatting or native tests were run for this continuation:
+all compiler code, tests and Dafny fixtures are byte-identical to the target.
+The earlier source-bound build and 51-case analyzer run above remain earlier
+validation, not new results. No new proof, benchmark or experiment result is
+claimed. No durable findings beyond the existing wiki topics; no new wiki page.
+
+This completion record and its index status are folded into the final replayed
+documentation commit. No new standalone commit, source change or parent-repository
+edit is needed. Rebase work is complete; no remaining conflict, process or blocker.

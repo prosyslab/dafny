@@ -1,4 +1,4 @@
-- [Resolve verification-facts rebase conflicts](2026-10-22-resolve-rebase-conflicts.md) — in-progress; earlier analyzer resolution accepted; user authorizes completing all remaining rebase conflicts while preserving native-tree provenance.
+- [Resolve verification-facts rebase conflicts](2026-10-22-resolve-rebase-conflicts.md) — done; all nine commits rebased, native source/tests match the target, both owner histories retained, conflict/whitespace/Markdown audits pass.
 
 - [Substitute nested statement matches in proof expressions](2026-10-21-nested-match-substitution.md) — done; independent build, in-memory binding/scope regression, formatting and direct positive/strict-negative weekly-policy proofs pass; focused delivery on expecto.
 
