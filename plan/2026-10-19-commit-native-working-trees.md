@@ -64,3 +64,15 @@ established Codex coauthor identity, with each original commit tree preserved.
 The local before/after mapping is available under
 `/workspace/tmp/organize-current-commits/`; it is maintenance metadata, not
 benchmark evidence. No unchanged test or proof was rerun for these document edits.
+
+## Separate benchmark-native maintenance results — 2026-10-19
+
+The shared maintenance scope above also applies to this separate owner record.
+The following results retain its distinct starting revision and cached checks.
+
+
+Started at `888f1b2b22393092e6e10937c588fbc195a65ad4`. Purpose commits: split binders `469bfe221`, match-local candidates `a77ccbb37`, internal exits `d6789ae83`, proof-input projection `5e1203010`, reporting schema `ec3319967`. This owner retains its pre-existing verification-target facts interface and distinct history; no source was synchronized from the Cosyn checkout. Source files were preserved exactly. Staging used explicit paths and purpose-specific cached patches for shared driver files, with staged whitespace/diff review before every commit. Approved elevated Git execution was necessary because shared metadata is read-only to default execution.
+
+.NET SDK `8.0.131`; scoped folder whitespace verification passed. Cached `--no-build --no-restore -m:1` Core filter passed36/36 and Driver filter passed7/7, no skips. These cached artifacts are smoke evidence only and are not bound to a fresh current-source build. File-producing command tests, native build, solver/LIT checks, PBT campaigns, image builds and paid runs were intentionally excluded from this commit-only maintenance. Historical compiler/proof/experiment claims are not refreshed. Parent coordinates fresh independent review.
+
+All staged whitespace checks passed. Owner plan/wiki recursive non-Markdown audit found none. Local Markdown links were checked for existence, including locally available excluded history. The unfinished `plan/2026-10-15-json-verification-resource-overflow.md` and corresponding plan/wiki index entries remain unstaged. Completed indexes and this record form a documentation commit. No durable findings beyond existing owner wiki pages. No process remains running; scratch helper is `/workspace/tmp/native-commit-cleanup/stage_group.py`. Next action is parent review and the Dafnyutils gitlink update; no push is authorized.

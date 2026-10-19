@@ -49,3 +49,5 @@
 - [Integrate reviewed PBT native source into live main](2026-10-21-integrate-reviewed-pbt-native.md) — done; exact live transfer, independent review, eight affected builds, 139 memory checks, scoped formatting/diff audits and canonical launcher build accepted; source/local scope only.
 
 - [Resolved verification target facts](2026-10-18-verification-target-facts.md) — done; opt-in actual native inventory and authored attributes, locally and independently accepted; parent owns commit/landing.
+
+- [Emit optional translated definition proof inputs](2026-10-15-definition-proof-inputs.md) — done; historical 2026-10-15 native gate accepted: Core21/21, Driver6/6, API8/8,30distinct CLI assertions and5PDB bindings pass; all16owner manifest entries match. Parent solver/benchmark/image/paid gates remain separate. Command-test receipts predate their removal.
