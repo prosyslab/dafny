@@ -178,3 +178,179 @@ Parent coordination accepts the bounded reporting-removal scope. No provider,
 benchmark, image or new paid result follows; no native implementation work
 remains. Historical RU-overflow knowledge remains marked superseded, and raw
 earlier evidence is preserved. Verifier-owned test processes have exited.
+
+## Separate benchmark-native propagation record
+
+The following record covers the separate benchmark-native tree and retains its
+original build and validation provenance.
+
+# Remove verification resource statistics from modern native reports
+
+Status: done
+Date: 2026-10-15
+Owner: dafnyutils/dafny
+Root coordination: [integration plan](../../../plan/2026-10-15-remove-verification-resource-statistics.md)
+
+## Objective and acceptance
+
+User explicitly requested removal of RU recording. Remove modern JSON scope/VC
+resourceCount, text RU totals/max/per-VC lines, TRX property, CSV column, batch
+progress suffix, hidden verify --performance-stats and complexity RU summary plus
+--worst-amount. Preserve solver counters and resource limits, OutOfResource
+outcomes, assertion selection/identities, runtimes, seeds/iterations, proof
+dependencies, warnings, cancellation and terminal internal-error exits.
+
+This is maintenance, not an evaluated experiment. No task/private run material
+is read. No dependencies, network/restore, images, providers or commits. Legacy
+optional reporting remains out of scope. Historical overflow receipts remain.
+
+## Inspected evidence, compatibility and risks
+
+Inspected root/dafnyutils/native instructions, CLAUDE.md, DAFNYSTYLE.md, native
+Makefile, Driver/IntegrationTests csproj, current writer/command source, directly
+affected public LIT fixtures, existing JSON tests and internal-error tests,
+plan/wiki indexes and logger wiki. HEAD bc427b21461f258fd8de34232e01bb6be03cee39.
+Pre-existing trigger/internal-exit/JSON operand-widening changes are preserved;
+the resource fields are now intentionally removed. External report schema and
+removed report-only options change intentionally. No specifications, proofs,
+evaluators, datasets or scoring change; only native reporting implementation and
+its test expectations. Known three ContractRuntime baseline failures are not
+part of this focused validation and must not be reported as repaired.
+
+## Change table
+
+| Exact paths/symbols (native owner) | What/how/why and unmet behavior | Validation |
+| --- | --- | --- |
+| Source/DafnyDriver/JsonVerificationLogger.cs; TextVerificationLogger.cs; VerificationResultLogger.cs; CSVTestLogger.cs | Remove emitted RU fields/property/column and report-only sums/max; remaining reporting otherwise retained | Existing synthetic JSON controls; logger LIT cases |
+| Source/DafnyDriver/Commands/MeasureComplexityCommand.cs | Remove ReportResourceSummary, subscriber/await and TopX option; preserve mutation workflow/internal exits | Complexity LIT and three-mutation toy success/failure |
+| Source/DafnyDriver/Commands/VerifyCommand.cs; Source/DafnyDriver/CliCompilation.cs | Remove hidden performance statistics feature, report-only fields/updates and progress RU suffix | InternalErrorExitTests, existing batch-progress LIT |
+| Source/DafnyCore/Options/CommonOptionBag.cs; Source/DafnyCore/Options/BoogieOptionBag.cs | Correct modern CLI help that still promises assertion/CSV resource usage; preserve resource-limit option name, parser, binding and semantics | No-restore native Core build, two-file scoped format and existing cli/help.dfy plus direct rebuilt CLI help inspection |
+| Source/DafnyDriver.Test/JsonVerificationLoggerTests.cs | Remove obsolete RU numeric feature cases; retain normal/empty/mixed outcome/schema/runtime controls | Focused Driver test filter |
+| Source/IntegrationTests/TestFiles/LitTests/LitTest/logger/TextLogger.dfy; TextLoggerBatch.dfy; CSVLogger.dfy | Update existing output expectations; preserve public Dafny programs and source line numbers | make test logger/ build=false |
+| Source/IntegrationTests/TestFiles/LitTests/LitTest/cli/measure-complexity.dfy and .dfy.expect | Remove removed-option use and resource-summary expectations; preserve source line numbering | make test name=cli/measure-complexity.dfy build=false |
+| Source/IntegrationTests/TestFiles/LitTests/LitTest/dafny1/SchorrWaite.dfy, .dfy.expect, .dfy.refresh.expect; dafny0/SubsetTypes.dfy, .dfy.expect; dafny0/CoinductiveProofs.dfy, .dfy.expect | Remove hidden option use and RU-only expected lines | Existing focused resolver integration tests |
+| plan/2026-10-15-remove-verification-resource-statistics.md; plan/INDEX.md; wiki/verification-json-logging.md; wiki/INDEX.md | Record current behavior and historical overflow fix without erasing receipts | Diff/link/Markdown-only audit |
+
+## Validation commands and scope
+
+All commands from /workspace/dafnyutils/dafny, cached .NET SDK 8.0.131/runtime 8.0.31,
+DOTNET_ROOT=/usr/lib/dotnet when required. `dotnet build Source/Dafny.sln
+--no-restore` (native Makefile exe command with explicit no-restore constraint).
+`dotnet test Source/DafnyDriver.Test --no-build --no-restore --filter
+"FullyQualifiedName~JsonVerificationLoggerTests|FullyQualifiedName~InternalErrorExitTests"`.
+`dotnet format whitespace Source/Dafny.sln --no-restore --verify-no-changes
+--include <the eight changed C# paths>` is scoped Makefile format equivalent.
+Supported `make test name=<fixture> build=false` for logger/, complexity, the three
+removed-option fixtures and verification/proofDivision/ plus
+verification/outOfResourceAndIsolateAssertions.dfy; existing normal progress case
+is also inspected. Expected: public outcome/assertion/proof/seed/exit controls
+pass with matching current output. Test phase/build logs and generic three-mutation
+success/failure source/output go in
+/workspace/tmp/remove-verification-resource-statistics/benchmark-native/.
+No full Driver contract-runtime campaign or benchmark suite rerun.
+
+## Progress and handoff
+
+Implementation in progress. Fresh verification belongs to parent-started agent
+with independent context after freeze. Remaining: implementation, local checks,
+wiki update, exact final file hashes and handoff. Plan stays in-progress until
+independent acceptance is recorded by coordination.
+
+Finding: first logger LIT run was15/16; TextLogger legacy-syntax invocation also
+uses the modern writer, so its second expectation block needs the same removal.
+The legacy class implementation remains untouched. Correcting existing checks
+within the planned fixture; source line numbers remain unchanged.
+
+## Implementation results and frozen handoff
+
+Modern RU report fields, sums/maxima, progress suffix and report-only options are
+removed; no solver or verification-policy code changed. All 8 changed C# files
+and 12 changed fixture files are frozen; exact SHA256 manifest is
+`/workspace/tmp/remove-verification-resource-statistics/benchmark-native/source-sha256.json`.
+The pre-existing trigger, internal-error exit, compilation and mutation-stop
+changes remain in the working tree. No commit or gitlink update was made.
+
+Validation from native root, SDK 8.0.131/runtime 8.0.31 and native HEAD
+bc427b21461f258fd8de34232e01bb6be03cee39 plus existing dirty state and this change:
+
+| Command/check | Result and evidence |
+| --- | --- |
+| `DOTNET_ROOT=/usr/lib/dotnet dotnet build Source/Dafny.sln --no-restore` | Default sandbox exits 1 before work (0 warnings/errors); approved escalated local IPC rerun passes,0 warnings/errors, 20.27s. `build.log`, `build-escalated.log` |
+| `DOTNET_ROOT=/usr/lib/dotnet dotnet test Source/DafnyDriver.Test --no-build --no-restore --filter 'FullyQualifiedName~JsonVerificationLoggerTests\|FullyQualifiedName~InternalErrorExitTests' --logger 'console;verbosity=normal'` | 16/16 pass, 4.3005s; `driver-focused.log` |
+| Scoped `dotnet format whitespace Source/Dafny.sln --no-restore --verify-no-changes --include` the 8 C# paths above | exit 0; generic workspace-loader warning retained in `format.log` |
+| `DOTNET_ROOT=/usr/lib/dotnet make test name=logger/ build=false` | First 15/16: second legacy-syntax TextLogger expectation block still expected RU. Corrected that existing block; `make test name=logger/TextLogger.dfy build=false` passes 1/1. `lit-logger.log`, `lit-textlogger-corrected.log` |
+| `make test name=cli/measure-complexity.dfy build=false` | 1/1 pass; old source line numbers retained |
+| `make test name=verification/proofDivision/ build=false` | 3/3 pass; existing redaction already covers time suffix |
+| `make test name=verification/outOfResourceAndIsolateAssertions.dfy build=false` | 1/1 pass; actual resource exhaustion diagnostics/outcome retained |
+| `make test name=verification/progress.dfy build=false` | 1/1 pass |
+| `make test name=dafny0/SubsetTypes.dfy build=false`; `make test name=dafny0/CoinductiveProofs.dfy build=false`; `make test name=dafny1/SchorrWaite.dfy build=false` | 1/1 each pass; removed option usages/expected RU lines only |
+| Generic `dotnet Binaries/Dafny.dll measure-complexity <scratch success/failure.dfy> --mutations=3 --random-seed=7 --standard-libraries=false --cores=1 --verification-time-limit=10 --log-format=json;LogFileName=<scratch result.json>` | Each runs 3 iterations. Success exit 0 and Correct × 3; assertion failure exit 4 and Errors × 3. Sources/stdout/stderr/exit/JSON remain separate scratch artifacts |
+| `git diff --check`; recursive native `find plan wiki -type f ! -name '*.md' -print` | pass; no non-Markdown files found |
+
+The 25 unique public LIT cases pass after the targeted expectation correction;
+no full Driver campaign rerun was performed. The historical full Driver 299/302
+and its 3 reproduced ContractRuntime failures remain explicitly unresolved; this
+change neither repairs nor reclassifies them. No providers, evaluated candidates,
+private artifacts, package restore, image rebuild, or benchmark suite execution.
+Formatting and process success do not establish benchmark or proof success.
+
+Updated [native logging knowledge](../wiki/verification-json-logging.md) and its
+index with current modern behavior, retained legacy API scope and historical
+resource-overflow receipts. Plan remains in-progress solely for fresh independent
+acceptance owned by root coordination. Implementation/source freeze handed to
+parent; next action is independent source inspection and focused checks. No
+implementation work remains after this handoff; artifacts are workspace-lifetime
+maintenance evidence at the directory above.
+
+## CLI help correction follow-up — 2026-10-15
+
+Before edits, scope expanded to the two exact option-help files above. Inspection
+of existing Source `.expect*`/`.check` fixtures found neither removed sentence;
+`cli/help.dfy` checks only --rprint and needs no expectation changes. Correct only
+the stale descriptions: assertion logs retain approximate verification times;
+--resource-limit remains a deterministic solver limit without a CSV resource-use
+claim. No option parser/binding/default/semantics change. Validation is
+`dotnet build Source/DafnyCore/DafnyCore.csproj --no-restore`, scoped two-file
+whitespace verification, and existing `make test name=cli/help.dfy build=false`
+after copying the rebuilt Core DLL into its existing test runtime output. Direct
+`dotnet Binaries/Dafny.dll verify --help` output is saved as maintenance evidence.
+
+Follow-up freeze: both help files are text-only one-line edits. Native Core
+no-restore build passes (0 warnings/errors, 1m48.21s); two-file scoped whitespace
+verification exits0 with the pre-existing generic workspace warning. Existing
+cli/help.dfy passes1/1 after refreshing only its local Core DLL. Direct CLI help
+was captured, but a literal substring control failed because help rendering wraps
+text; no further runtime-help claim is made. First approval review timed out
+without execution; a single retry ran the existing fixture. Exact new source
+hashes are appended to source-sha256.json. All source changes are frozen and
+fresh independent acceptance remains with root coordination.
+
+## Independent acceptance and closure
+
+Fresh independent source inspection and cached native builds passed. Its own
+Driver16/16, logger16/16 and complexity1/1 checks passed,33focused tests total.
+An independent public-result probe preserved Valid/Invalid/TimeOut/OutOfResource
+outcomes and runtimes. Its generic three-mutation failing control exited4 with
+all expected seeds; source checks preserved proof dependencies, resource limits,
+cancellation paths, warning handling and internal exit6. Scoped formatting passed.
+Source/binary and fixture boundaries, exact commands and limitations are recorded
+in /workspace/tmp/remove-verification-resource-statistics/benchmark-native-independent/report.md.
+
+Independent successful multi-format controls have a provenance limit: the initial
+successful assertions were followed by a timed-out rerun that reused their raw
+writer paths. A final attempt used a new good-final-20261015T081811903746Z
+directory, but its30second watchdog expired with no output/report; SIGTERM and
+SIGKILL cleanup waits also timed out. Elevated exact-path process inspection
+found no matching active command. The original PID was not persisted, so reaping
+cannot be confirmed; no unrelated process was killed and no rerun followed.
+status.json/manifest.json preserve that incomplete probe, never a passing result.
+Actual solver timeout/resource controls were not independently reached; public
+synthetic outcomes and existing focused cases provide the stated coverage.
+
+The implementation-owned full build,25unique public LIT passes and independent
+33focused passes satisfy the bounded reporting-removal acceptance. The default
+full reference rebuild's Gradle cache lock limitation and historical3ContractRuntime
+failures remain explicit. Rendered help has source and existing cli/help fixture
+coverage, not a successful direct substring assertion. No claim of full suite,
+image admission, benchmark proof or experiment success is made. Current native
+logging wiki/index is updated; no implementation work remains for this scope.
