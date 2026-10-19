@@ -20,3 +20,5 @@
 - [Resolved function body visibility](2026-10-19-function-body-visibility.md) — done; independently accepted native metadata; focused commit29da48b6c, parent delivery recorded.
 
 - [Commit existing native changes in logical units](2026-10-19-commit-native-working-trees.md) — done; local commit maintenance, no push.
+
+- [Unify native Dafny revisions](2026-10-19-unify-dafny.md) — done; combined native source independently accepted, parent plans own common-pin delivery.

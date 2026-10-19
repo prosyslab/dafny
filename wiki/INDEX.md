@@ -13,3 +13,5 @@
 - [Native internal compiler exit contract](internal-compiler-exit-contract.md) — explicit code 6, typed event priority and terminal mutation behavior; local native checks pass, independent acceptance pending.
 
 - [Resolved function body visibility](function-body-visibility.md) — effective opacity and conservative resolved dependency/reveal closure, independently22-case verified.
+
+- [Unified native Dafny runtime](unified-dafny-runtime.md) — 2026-10-19 source independently verified (90 native checks); combined metadata retains trust/proof behavior; parent pins/build metadata separate.

@@ -117,7 +117,15 @@ public record DefinitionSourceFacts(
   public DafnySemanticFacts? SemanticFacts { get; init; }
   [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
   public DafnyProofInputs? ProofInputs { get; init; }
+  [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  public IReadOnlyList<DefinitionVerificationTarget>? VerificationTargets { get; init; }
 }
+
+public record DefinitionVerificationTarget(
+  string FullName,
+  string SourcePath,
+  IReadOnlyList<DefinitionAttribute> Attributes
+);
 
 public record DefinitionAnalysisModule(
   string Name,
@@ -268,12 +276,18 @@ public static partial class DefinitionAnalysis {
     IReadOnlySet<Uri> analysisSourceUris,
     bool includeStatements = false,
     bool includeSemanticFacts = false,
-    bool includeProofInputs = false) {
+    bool includeProofInputs = false,
+    IEnumerable<ICanVerify>? verificationTargets = null) {
     var (sourceFacts, programFacts) = SourceFacts.ForDocument(program, analysisSourceUris);
     var definitions = Analyze(program, sourceFacts, analysisSourceUris, includeStatements);
     if (includeSemanticFacts) {
       programFacts = programFacts with {
         SemanticFacts = SemanticFactsFor(program.Options, analysisSourceUris, definitions, programFacts)
+      };
+    }
+    if (verificationTargets != null) {
+      programFacts = programFacts with {
+        VerificationTargets = VerificationFactsFor(verificationTargets, analysisSourceUris)
       };
     }
     if (includeProofInputs) {

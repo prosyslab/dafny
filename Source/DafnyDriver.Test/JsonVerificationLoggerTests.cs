@@ -7,6 +7,51 @@ using VC;
 namespace DafnyDriver.Test;
 
 public class JsonVerificationLoggerTests {
+  // Successful batches preserve their identity, exact duration and assertion records.
+  [Fact]
+  public async Task NormalScopePreservesVerificationData() {
+    var json = await Log(Result(1, SolverOutcome.Valid), Result(2, SolverOutcome.Valid));
+
+    Assert.Equal(["verificationResults"], json.EnumerateObject().Select(property => property.Name).ToArray());
+    var scope = Assert.Single(json.GetProperty("verificationResults").EnumerateArray());
+    Assert.Equal("Correct", scope.GetProperty("outcome").GetString());
+    Assert.Equal("00:00:03", scope.GetProperty("runTime").GetString());
+    var vcResults = scope.GetProperty("vcResults").EnumerateArray().ToArray();
+    Assert.Equal([1, 2], vcResults.Select(result => result.GetProperty("vcNum").GetInt32()).ToArray());
+    Assert.All(vcResults, result => {
+      Assert.Equal("Valid", result.GetProperty("outcome").GetString());
+      Assert.Empty(result.GetProperty("assertions").EnumerateArray());
+    });
+    Assert.Equal(["00:00:01", "00:00:02"],
+      vcResults.Select(result => result.GetProperty("runTime").GetString()).ToArray());
+  }
+
+  // An empty scope retains a successful outcome with zero elapsed time and no batches.
+  [Fact]
+  public async Task EmptyScopePreservesVerificationData() {
+    var json = await Log();
+
+    var scope = Assert.Single(json.GetProperty("verificationResults").EnumerateArray());
+    Assert.Equal("Correct", scope.GetProperty("outcome").GetString());
+    Assert.Equal("00:00:00", scope.GetProperty("runTime").GetString());
+    Assert.Empty(scope.GetProperty("vcResults").EnumerateArray());
+  }
+
+  // Unsuccessful solver outcomes survive aggregation alongside valid batches.
+  [Theory]
+  [InlineData(SolverOutcome.Invalid, "Errors")]
+  [InlineData(SolverOutcome.TimeOut, "TimedOut")]
+  [InlineData(SolverOutcome.OutOfResource, "OutOfResource")]
+  public async Task MixedScopePreservesUnsuccessfulOutcome(SolverOutcome outcome, string expectedOutcome) {
+    var json = await Log(Result(1, SolverOutcome.Valid), Result(2, outcome));
+
+    var scope = Assert.Single(json.GetProperty("verificationResults").EnumerateArray());
+    Assert.Equal(expectedOutcome, scope.GetProperty("outcome").GetString());
+    var vcResults = scope.GetProperty("vcResults").EnumerateArray().ToArray();
+    Assert.Equal("Valid", vcResults[0].GetProperty("outcome").GetString());
+    Assert.Equal(outcome.ToString(), vcResults[1].GetProperty("outcome").GetString());
+  }
+
   // Mixed results retain the modern scope schema, outcomes and exact duration strings.
   [Fact]
   public async Task MixedScopeRetainsSchemaOutcomesAndDurations() {

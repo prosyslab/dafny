@@ -15,6 +15,7 @@ static class DefinitionAnalysisCommand {
     SpansOnly,
     IncludeSourceFacts,
     IncludeSemanticFacts,
+    IncludeVerificationFacts,
     IncludeProofInputs,
     IncludeStatements
   }.Concat(DafnyCommands.ConsoleOutputOptions)
@@ -29,6 +30,8 @@ static class DefinitionAnalysisCommand {
     "Wrap definitions and resolved source structure in a JSON document.");
   private static readonly Option<bool> IncludeSemanticFacts = new("--include-semantic-facts",
     "Include deterministic source and definition semantic fingerprints.");
+  private static readonly Option<bool> IncludeVerificationFacts = new("--include-verification-facts",
+    "Include native resolved verification targets and their authored declaration attributes.");
   private static readonly Option<bool> IncludeStatements = new("--include-statements",
     "Report resolved statement spans, kinds, and direct call targets.");
   private static readonly Option<bool> IncludeProofInputs = new("--include-proof-inputs",
@@ -39,6 +42,7 @@ static class DefinitionAnalysisCommand {
     OptionRegistry.RegisterOption(SpansOnly, OptionScope.Cli);
     OptionRegistry.RegisterOption(IncludeSourceFacts, OptionScope.Cli);
     OptionRegistry.RegisterOption(IncludeSemanticFacts, OptionScope.Cli);
+    OptionRegistry.RegisterOption(IncludeVerificationFacts, OptionScope.Cli);
     OptionRegistry.RegisterOption(IncludeProofInputs, OptionScope.Cli);
     OptionRegistry.RegisterOption(IncludeStatements, OptionScope.Cli);
   }
@@ -82,6 +86,11 @@ static class DefinitionAnalysisCommand {
           "definition-analysis does not support --include-semantic-facts with --spans-only.");
         return (int)ExitValue.PREPROCESSING_ERROR;
       }
+      if (options.Get(IncludeVerificationFacts)) {
+        await options.ErrorWriter.WriteLineAsync(
+          "definition-analysis does not support --include-verification-facts with --spans-only.");
+        return (int)ExitValue.PREPROCESSING_ERROR;
+      }
       return await ExecuteSpansOnly(options);
     }
 
@@ -104,7 +113,7 @@ static class DefinitionAnalysisCommand {
       return await compilation.GetAndReportExitCode();
     }
 
-    var includeSourceFacts = options.Get(IncludeSourceFacts) || options.Get(IncludeSemanticFacts) || options.Get(IncludeProofInputs);
+    var includeSourceFacts = options.Get(IncludeSourceFacts) || options.Get(IncludeSemanticFacts) || options.Get(IncludeProofInputs) || options.Get(IncludeVerificationFacts);
     object results;
     if (includeSourceFacts) {
       DefinitionAnalysisDocument AnalyzeDocument() => DefinitionAnalysis.AnalyzeDocument(
@@ -112,7 +121,10 @@ static class DefinitionAnalysisCommand {
         analysisSourceUris,
         options.Get(IncludeStatements),
         options.Get(IncludeSemanticFacts),
-        options.Get(IncludeProofInputs));
+        options.Get(IncludeProofInputs),
+        verificationTargets: options.Get(IncludeVerificationFacts)
+          ? resolution.CanVerifies!.Values.SelectMany(tree => tree.Values)
+          : null);
       results = options.Get(IncludeProofInputs)
         ? await DafnyMain.LargeStackFactory.StartNew(AnalyzeDocument)
         : AnalyzeDocument();
