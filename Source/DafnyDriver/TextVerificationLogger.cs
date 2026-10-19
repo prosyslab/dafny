@@ -35,12 +35,9 @@ public class TextVerificationLogger : IVerificationResultFormatLogger {
     textWriter.WriteLine($"Results for {verificationScope.Name}");
     textWriter.WriteLine($"  Overall outcome: {outcome}");
     textWriter.WriteLine($"  Overall time: {runtime}");
-    textWriter.WriteLine($"  Overall resource count: {results.Sum(r => r.ResourceCount)}");
     // It doesn't seem possible to get a result with zero VCResults, but being careful with nulls just in case :)
     var maximumTime = results.MaxBy(r => r.RunTime).RunTime.ToString() ?? "N/A";
-    var maximumResourceCount = results.MaxBy(r => r.ResourceCount).ResourceCount.ToString() ?? "N/A";
     textWriter.WriteLine($"  Maximum assertion batch time: {maximumTime}");
-    textWriter.WriteLine($"  Maximum assertion batch resource count: {maximumResourceCount}");
     foreach (var taskResult in scopeResult.Results.OrderBy(r => r.Result.VcNum)) {
       var vcResult = taskResult.Result;
       textWriter.WriteLine("");
@@ -50,7 +47,6 @@ public class TextVerificationLogger : IVerificationResultFormatLogger {
         textWriter.WriteLine($"    Random seed: {taskResult.Task.Split.RandomSeed}");
       }
       textWriter.WriteLine($"    Duration: {vcResult.RunTime}");
-      textWriter.WriteLine($"    Resource count: {vcResult.ResourceCount}");
       textWriter.WriteLine("");
       textWriter.WriteLine("    Assertions:");
 

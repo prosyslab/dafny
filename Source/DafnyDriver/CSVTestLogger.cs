@@ -70,11 +70,10 @@ namespace Microsoft.Dafny {
     }
 
     private void TestRunCompleteHandler(object sender, TestRunCompleteEventArgs e) {
-      writer.WriteLine("TestResult.DisplayName,TestResult.Outcome,TestResult.Duration,TestResult.ResourceCount,RandomSeed");
+      writer.WriteLine("TestResult.DisplayName,TestResult.Outcome,TestResult.Duration,RandomSeed");
       foreach (var result in results.OrderByDescending(r => r.Duration)) {
-        var resourceCount = result.GetPropertyValue(VerificationResultLogger.ResourceCountProperty);
         var randomSeed = result.GetPropertyValue(VerificationResultLogger.RandomSeedProperty) ?? "unknown";
-        writer.WriteLine($"{result.TestCase.DisplayName},{result.Outcome},{result.Duration},{resourceCount},{randomSeed}");
+        writer.WriteLine($"{result.TestCase.DisplayName},{result.Outcome},{result.Duration},{randomSeed}");
       }
 
       writer.Flush();

@@ -1,4 +1,4 @@
-// RUN: %testDafnyForEachResolver "%s" -- --performance-stats=1 --bprint=%t.bpl
+// RUN: %testDafnyForEachResolver "%s" -- --bprint=%t.bpl
 
 
 // Rustan Leino

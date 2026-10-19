@@ -36,7 +36,6 @@ namespace Microsoft.Dafny {
   public class VerificationResultLogger {
     private readonly DafnyOptions options;
 
-    public static TestProperty ResourceCountProperty = TestProperty.Register("TestResult.ResourceCount", "TestResult.ResourceCount", typeof(int), typeof(TestResult));
     public static TestProperty RandomSeedProperty = TestProperty.Register("TestResult.RandomSeed", "TestResult.RandomSeed", typeof(int), typeof(TestResult));
 
     private readonly IList<IVerificationResultFormatLogger> formatLoggers = new List<IVerificationResultFormatLogger>();
@@ -141,7 +140,6 @@ namespace Microsoft.Dafny {
           StartTime = vcResult.StartTime,
           Duration = vcResult.RunTime
         };
-        testResult.SetPropertyValue(ResourceCountProperty, vcResult.ResourceCount);
         if (task != null && task.Split.RandomSeed != 0) {
           testResult.SetPropertyValue(RandomSeedProperty, task.Split.RandomSeed);
         }

@@ -53,7 +53,6 @@ public class JsonVerificationLogger : IVerificationResultFormatLogger {
       ["vcNum"] = vcResult.VcNum,
       ["outcome"] = SerializeOutcome(vcResult.Outcome),
       ["runTime"] = SerializeTimeSpan(vcResult.RunTime),
-      ["resourceCount"] = vcResult.ResourceCount,
       ["assertions"] = new JsonArray(vcResult.Asserts.Select(SerializeAssertion).ToArray()),
     };
     if (taskResult.Task != null && taskResult.Task.Split.RandomSeed != 0) {
@@ -89,7 +88,6 @@ public class JsonVerificationLogger : IVerificationResultFormatLogger {
       ["name"] = scope.Name,
       ["outcome"] = SerializeOutcome(results.Aggregate(VcOutcome.Correct, (o, r) => MergeOutcomes(o, r.Result.Outcome))),
       ["runTime"] = SerializeTimeSpan(TimeSpan.FromSeconds(results.Sum(r => r.Result.RunTime.Seconds))),
-      ["resourceCount"] = results.Sum(r => r.Result.ResourceCount),
       ["vcResults"] = new JsonArray(results.Select(r => SerializeVcResult(dependencyManager, potentialDependencies, r)).ToArray())
     };
     if (potentialDependencies is not null) {

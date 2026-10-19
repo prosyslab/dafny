@@ -116,7 +116,6 @@ Statistics are also available using command-line options, in formats optimized f
   Assertion batch 4:
     Outcome: Valid
     Duration: 00:00:00.1344230
-    Resource count: 63182
 
     Assertions:
       ProveSomeArithmetic.dfy(6,22): result of operation never violates newtype constraints for 'uint32'
@@ -124,7 +123,6 @@ Statistics are also available using command-line options, in formats optimized f
   Assertion batch 5:
     Outcome: Valid
     Duration: 00:00:00.1359990
-    Resource count: 169237
 
     Assertions:
       ProveSomeArithmetic.dfy(6,32): assertion always holds
@@ -132,7 +130,6 @@ Statistics are also available using command-line options, in formats optimized f
   Assertion batch 6:
     Outcome: Valid
     Duration: 00:00:00.0844010
-    Resource count: 63494
 
     Assertions:
       ProveSomeArithmetic.dfy(7,14): result of operation never violates newtype constraints for 'uint32'
@@ -143,20 +140,22 @@ The `--log-format csv` option to `dafny verify`, or the `/verificationLogger:csv
 
 <!-- %no-check -->
 ```text
-TestResult.DisplayName,TestResult.Outcome,TestResult.Duration,TestResult.ResourceCount
-ProveSomeArithmetic (correctness) (assertion batch 1),Passed,00:00:00.1880600,50027
-ProveSomeArithmetic (correctness) (assertion batch 2),Passed,00:00:00.1640300,127152
-ProveSomeArithmetic (correctness) (assertion batch 3),Passed,00:00:00.1389720,59361
-ProveSomeArithmetic (correctness) (assertion batch 4),Passed,00:00:00.1296620,63182
-ProveSomeArithmetic (correctness) (assertion batch 5),Passed,00:00:00.1232840,169237
-ProveSomeArithmetic (correctness) (assertion batch 6),Passed,00:00:00.0937380,63494
-ProveSomeArithmetic (correctness) (assertion batch 10),Passed,00:00:00.0774500,66869
-ProveSomeArithmetic (correctness) (assertion batch 9),Passed,00:00:00.0708400,67341
-ProveSomeArithmetic (correctness) (assertion batch 8),Passed,00:00:00.0644100,64792
-ProveSomeArithmetic (correctness) (assertion batch 7),Passed,00:00:00.0622940,65952
+TestResult.DisplayName,TestResult.Outcome,TestResult.Duration,RandomSeed
+ProveSomeArithmetic (correctness) (assertion batch 1),Passed,00:00:00.1880600,unknown
+ProveSomeArithmetic (correctness) (assertion batch 2),Passed,00:00:00.1640300,unknown
+ProveSomeArithmetic (correctness) (assertion batch 3),Passed,00:00:00.1389720,unknown
+ProveSomeArithmetic (correctness) (assertion batch 4),Passed,00:00:00.1296620,unknown
+ProveSomeArithmetic (correctness) (assertion batch 5),Passed,00:00:00.1232840,unknown
+ProveSomeArithmetic (correctness) (assertion batch 6),Passed,00:00:00.0937380,unknown
+ProveSomeArithmetic (correctness) (assertion batch 10),Passed,00:00:00.0774500,unknown
+ProveSomeArithmetic (correctness) (assertion batch 9),Passed,00:00:00.0708400,unknown
+ProveSomeArithmetic (correctness) (assertion batch 8),Passed,00:00:00.0644100,unknown
+ProveSomeArithmetic (correctness) (assertion batch 7),Passed,00:00:00.0622940,unknown
 ```
 
-In all of these output formats, you can see that batch 5, corresponding to the assertion about conversion to and from bit vectors, is the most expensive to prove. Later sections will go into why this is the case, and how to make verification involving bit vectors more straightforward.
+These output formats retain each batch's outcome and elapsed duration, which can
+help identify assertions that are slow in the current environment. Later
+sections describe operations that commonly make verification difficult.
 
 # Identifying highly variable assertions
 
@@ -166,35 +165,20 @@ Fundamentally, one key source of this variability comes from the fact that SMT s
 
 Dafny can help you identify when the verification of a particular assertion may begin to fail after small modifications if you use the `measure-complexity` command. When using this command, Dafny attempts to verify each definition in your program multiple times, each time with a different random seed. This seed is used to permute the names and ordering used in formulas sent to the solver, and then is given to the solver to use in making its own random decisions internally.
 
-If the time or resource count taken to verify a given assertion batch is higher than most, this is frequently predictive of later failure after small modifications. Similarly, if this cost varies widely depending on the random seed, it can also point to high underlying complexity.
+If a given assertion batch fails for some random seeds, or takes much longer than
+other batches in repeated runs, the proof may be sensitive to small changes.
 
-To measure the variation in resource use for the method from the previous section, on 10 different random seeds, we could use the following command.
-
-```sh
-$ dafny measure-complexity ProveSomeArithmetic.dfy --log-format csv --iterations 10
-```
-
-This will produce a CSV file and print out its name, as in the previous `dafny verify` case. With the `measure-complexity` command, however, each assertion batch will appear multiple times in the file. Given a CSV report containing the results of multiple iterations of verification, the [`dafny-reportgenerator`](https://github.com/dafny-lang/dafny-reportgenerator) tool can perform statistical analysis on this data, and can even be used to fail a build if the statistics exceed specified bounds.
-
-We generally recommend keeping the coefficient of variation (a.k.a. normalized standard deviation) of the resource count under 20%, and setting some (generally project-dependent) limit on total resource count. This can be enforced with the following command.
+To exercise the method from the previous section with 10 different random seeds,
+use the following command.
 
 ```sh
-$ dafny-reportgenerator summarize-csv-results --max-resource-cv-pct 20 --max-resource-count 200000 some-file.csv
+$ dafny measure-complexity ProveSomeArithmetic.dfy --log-format csv --mutations 10
 ```
 
-On CSV file generated from the above example, you might get output like the following.
-
-<!-- %no-check -->
-```text
-...
-Some results have a resource coefficient of variance over the configured limit of 0.20:
-
-ProveSomeArithmetic (correctness) (assertion batch 5): resource coefficient of variance = 0.47275460664050895
-
-Errors occurred: see above for details.
-```
-
-Here we can see that the assertion identified as the most expensive in the previous section also has the highest variability. The exit code from `dafny-reportgenerator` will be `1` in this case, since `0.47` is higher than `0.20`, so it can be used to fail a build or CI job.
+This produces a CSV file and prints its name, as in the previous `dafny verify`
+case. Each assertion batch appears once per mutation. The outcome and random-seed
+columns identify proofs that change behavior across mutations; duration remains
+available as environment-dependent diagnostic information.
 
 # Types of assertion that can be difficult to verify
 

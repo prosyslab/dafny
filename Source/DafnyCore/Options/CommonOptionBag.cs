@@ -152,7 +152,7 @@ Logs verification results using the given test result format. The currently supp
 
 The `trx` and `csv` formats automatically choose an output file name by default, and print the name of this file to the console. The `text` format prints its output to the console by default, but can send output to a file given the `LogFileName` option.
 
-The `text` format also includes a more detailed breakdown of what assertions appear in each assertion batch. When combined with the {BoogieOptionBag.IsolateAssertions.Name} option, it will provide approximate time and resource use costs for each assertion, allowing identification of especially expensive assertions.".TrimStart()) {
+The `text` format also includes a more detailed breakdown of what assertions appear in each assertion batch. When combined with the {BoogieOptionBag.IsolateAssertions.Name} option, it reports the outcome and approximate verification time for each assertion, allowing identification of especially slow assertions.".TrimStart()) {
     ArgumentHelpName = "configuration"
   };
 

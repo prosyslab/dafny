@@ -21,14 +21,8 @@ public static class VerifyCommand {
     // they can't be specified when building a doo file.
     OptionRegistry.RegisterOption(FilterSymbol, OptionScope.Cli);
     OptionRegistry.RegisterOption(FilterPosition, OptionScope.Cli);
-    OptionRegistry.RegisterOption(PerformanceStatisticsOption, OptionScope.Cli);
   }
 
-  public static readonly Option<int> PerformanceStatisticsOption = new("--performance-stats",
-    "Report a summary of the verification performance. " +
-    "The given argument is used to divide all the output with, which can help ignore small differences.") {
-    IsHidden = true
-  };
   public static readonly Option<string> FilterSymbol = new("--filter-symbol",
     @"Filter what gets verified by selecting only symbols whose fully qualified name contains the given argument, for example: ""--filter-symbol=MyNestedModule.MyFooFunction"". Place a dot at the end of the argument to indicate the symbol name must end like this, which can be useful if one symbol name is a prefix of another.");
 
@@ -47,7 +41,6 @@ public static class VerifyCommand {
 
   private static IReadOnlyList<Option> VerifyOptions =>
     new Option[] {
-        PerformanceStatisticsOption,
         FilterSymbol,
         FilterPosition,
         DafnyFile.DoNotVerifyDependencies
@@ -89,11 +82,6 @@ public static class VerifyCommand {
     verificationResults.Subscribe(result => {
       foreach (var taskResult in result.Results) {
         var runResult = taskResult.Result;
-        Interlocked.Add(ref statistics.TotalResourcesUsed, runResult.ResourceCount);
-        lock (statistics) {
-          statistics.MaxVcResourcesUsed = Math.Max(statistics.MaxVcResourcesUsed, runResult.ResourceCount);
-        }
-
         switch (runResult.Outcome) {
           case SolverOutcome.Valid:
           case SolverOutcome.Bounded:
@@ -127,16 +115,6 @@ public static class VerifyCommand {
     });
     await verificationResults.WaitForComplete();
     await WriteTrailer(cliCompilation, statistics);
-    var performanceStatisticsDivisor = cliCompilation.Options.Get(PerformanceStatisticsOption);
-    if (performanceStatisticsDivisor != 0) {
-      int Round(int number) {
-        var numberForUpRounding = number + performanceStatisticsDivisor / 2;
-        return (numberForUpRounding / performanceStatisticsDivisor) * performanceStatisticsDivisor;
-      }
-      var output = cliCompilation.Options.OutputWriter;
-      await output.Status($"Total resources used is {Round(statistics.TotalResourcesUsed)}");
-      await output.Status($"Max resources used by VC is {Round(statistics.MaxVcResourcesUsed)}");
-    }
   }
 
   private static async Task WriteTrailer(CliCompilation cliCompilation,

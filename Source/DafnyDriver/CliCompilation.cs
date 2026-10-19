@@ -226,7 +226,7 @@ public class CliCompilation {
             $"Verified {completedPartsCount}/{canVerifyResult.TaskCount} of {boogieUpdate.CanVerify.FullDafnyName}: " +
             $"{OriginDescription(partOrigin, true)} - " +
             $"{DescribeOutcome(Compilation.GetOutcome(runResult.Outcome))}" +
-            $" (time: {timeString}, resource count: {runResult.ResourceCount})");
+            $" (time: {timeString})");
         }
         if (completedPartsCount == canVerifyResult.TaskCount) {
           canVerifyResult.Finished.TrySetResult();
@@ -393,6 +393,4 @@ record VerificationStatistics {
   public int OutOfResourceCount;
   public int OutOfMemoryCount;
   public int SolverExceptionCount;
-  public int TotalResourcesUsed;
-  public int MaxVcResourcesUsed;
 }
