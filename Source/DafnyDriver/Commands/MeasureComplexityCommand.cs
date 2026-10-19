@@ -118,7 +118,7 @@ static class MeasureComplexityCommand {
     }
   }
 
-  private static async Task RunVerificationIterations(DafnyOptions options, CliCompilation compilation,
+  internal static async Task RunVerificationIterations(DafnyOptions options, CliCompilation compilation,
     IObserver<CanVerifyResult> verificationResultsObserver) {
     int iterationSeed = (int)options.Get(RandomSeed);
     var random = new Random(iterationSeed);
@@ -132,6 +132,7 @@ static class MeasureComplexityCommand {
         }
       } catch (Exception e) {
         verificationResultsObserver.OnError(e);
+        return;
       }
       iterationSeed = random.Next();
     }

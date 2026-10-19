@@ -10,6 +10,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using DafnyCore;
@@ -17,6 +18,8 @@ using DafnyDriver.Commands;
 using Microsoft.Boogie;
 using Microsoft.Dafny.Compilers;
 using Microsoft.Dafny.LanguageServer;
+
+[assembly: InternalsVisibleTo("DafnyDriver.Test")]
 
 namespace Microsoft.Dafny;
 
@@ -66,9 +69,14 @@ public static class DafnyNewCli {
     }
     Debug.Assert(GetValueForOptionMethod != null);
 
-    var builder = new CommandLineBuilder(RootCommand).UseDefaults();
-    builder = AddDeveloperHelp(RootCommand, builder);
-    Parser = builder.Build();
+    Parser = CreateParser(RootCommand);
+  }
+
+  internal static System.CommandLine.Parsing.Parser CreateParser(RootCommand rootCommand) {
+    var builder = new CommandLineBuilder(rootCommand).UseDefaults()
+      .UseExceptionHandler(errorExitCode: (int)ExitValue.INTERNAL_ERROR);
+    builder = AddDeveloperHelp(rootCommand, builder);
+    return builder.Build();
   }
 
   public delegate Task<int> ContinueWithOptions(DafnyOptions dafnyOptions, InvocationContext context);

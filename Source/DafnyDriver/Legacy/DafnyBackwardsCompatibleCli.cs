@@ -13,7 +13,7 @@ namespace Microsoft.Dafny;
 public interface ILegacyParseArguments { }
 
 // TODO: Refactor so that non-errors (NOT_VERIFIED, DONT_PROCESS_FILES) don't result in non-zero exit codes
-public enum ExitValue { SUCCESS = 0, PREPROCESSING_ERROR = 1, DAFNY_ERROR = 2, COMPILE_ERROR = 3, VERIFICATION_ERROR = 4, FORMAT_ERROR = 5 }
+public enum ExitValue { SUCCESS = 0, PREPROCESSING_ERROR = 1, DAFNY_ERROR = 2, COMPILE_ERROR = 3, VERIFICATION_ERROR = 4, FORMAT_ERROR = 5, INTERNAL_ERROR = 6 }
 
 public record ParsedOptions(DafnyOptions DafnyOptions) : ILegacyParseArguments;
 record ExitImmediately(ExitValue ExitValue) : ILegacyParseArguments;

@@ -29,9 +29,10 @@ public class CliCompilation {
   private readonly ConcurrentDictionary<MessageSource, int> errorsPerSource = new();
   private int errorCount;
   private int warningCount;
+  private int internalExceptionsFound;
   public bool DidVerification { get; private set; }
 
-  private CliCompilation(
+  internal CliCompilation(
     CreateCompilation createCompilation,
     DafnyOptions options) {
     Options = options;
@@ -58,6 +59,10 @@ public class CliCompilation {
   }
 
   public async Task<ExitValue> GetAndReportExitValue() {
+    if (Volatile.Read(ref internalExceptionsFound) > 0) {
+      return ExitValue.INTERNAL_ERROR;
+    }
+
     if (errorCount > 0) {
       if (HasErrorsFromSource(MessageSource.Project)) {
         return ExitValue.PREPROCESSING_ERROR;
@@ -111,7 +116,6 @@ public class CliCompilation {
       _ => throw new ArgumentOutOfRangeException()
     };
 
-    var internalExceptionsFound = 0;
     Compilation.Updates.Subscribe(ev => {
       if (ev is NewDiagnostic newDiagnostic) {
         if (newDiagnostic.Diagnostic.Level == ErrorLevel.Error) {
