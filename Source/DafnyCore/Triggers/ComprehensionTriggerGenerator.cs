@@ -160,7 +160,7 @@ namespace Microsoft.Dafny.Triggers {
         for (int i = 1; i < partWriters.Count; i++) {
           bool found = false;
           for (int j = 0; j < groups.Count; j++) {
-            if (HasSameTriggers(partWriters[i], groups[j].Quantifier)) {
+            if (CanCombine(partWriters[i], groups[j].Quantifier)) {
               // belong to the same group
               groups[j].Expressions.Add(partWriters[i].Comprehension);
               found = true;
@@ -200,8 +200,16 @@ namespace Microsoft.Dafny.Triggers {
       }
     }
 
-    private bool HasSameTriggers(SplitPartTriggerWriter one, SplitPartTriggerWriter other) {
-      return one.Candidates.SequenceEqual(other.Candidates, new PredicateEqualityComparer<TriggerCandidate>(SameTriggerCandidate));
+    private bool CanCombine(SplitPartTriggerWriter one, SplitPartTriggerWriter other) {
+      // Matching-loop rewriting can introduce distinct bound variables and ranges in each split.
+      // Equal (in particular, empty) trigger lists do not make those binders interchangeable:
+      // combining only the terms would leave variables from the other split unbound.
+      var oneExpr = one.Comprehension;
+      var otherExpr = other.Comprehension;
+      return oneExpr.BoundVars.SequenceEqual(otherExpr.BoundVars) &&
+             (oneExpr.Range == otherExpr.Range ||
+              (oneExpr.Range != null && otherExpr.Range != null && oneExpr.Range.ExpressionEq(otherExpr.Range))) &&
+             one.Candidates.SequenceEqual(other.Candidates, new PredicateEqualityComparer<TriggerCandidate>(SameTriggerCandidate));
     }
 
     private static bool SameTriggerCandidate(TriggerCandidate arg1, TriggerCandidate arg2) {
