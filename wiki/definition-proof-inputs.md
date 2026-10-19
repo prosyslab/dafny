@@ -110,3 +110,89 @@ maintenance evidence available in this workspace, not a benchmark input. Immedia
 call-closure-only filtering was not selected. Follow-up requires an owning native
 plan, an explicit dependency guarantee and independent validation; the historical
 build/test receipts above do not validate that proposed optimization.
+
+## Historical benchmark-native producer record — 2026-10-15
+
+The following original producer record covers the separate benchmark-native
+source/binary freeze. Its command-test availability and validation counts are
+historical: the command-test class was removed on 2026-10-16 as recorded above.
+The current projection limits and later repeatability repairs still apply.
+
+# Optional translated definition proof inputs
+
+Status: frozen native source/binary gate independently accepted
+Verified: 2026-10-15, native base `bc427b21461f258fd8de34232e01bb6be03cee39` plus dirty source
+Origin: [owner plan](../plan/2026-10-15-definition-proof-inputs.md)
+
+`definition-analysis --include-proof-inputs` optionally adds
+`sourceFacts.proofInputs` with `schemaVersion: 1`, `toolchainSha256`,
+`optionsSha256`, and `definitions` entries containing `sourcePath`, `fullName`
+and `sha256`. The ordinary definition-analysis result remains unchanged by
+default. Certificate stdout is one JSON document; existing qualification
+diagnostics are preserved on stderr for this opt-in mode. `--spans-only` rejects
+proof inputs because they require resolution and translation.
+
+The producer translates every verifiable module using `BoogieGenerator.Translate`
+without constructing verification conditions or launching a solver. The CLI skips
+the otherwise automatic solver-version subprocess and uses the existing large
+stack translation scheduler. It accepts the usual verification options alongside
+resolver options. Callers must pass the same input roots, libraries and relevant
+verification options as their actual proof command, then separately enforce parse,
+type, warning, full-implementation and exact proof-policy admission.
+
+Each fingerprint includes all translated non-Implementation declarations across
+all modules, every non-excludable implementation, and every implementation owned
+by the target. An ordinary method or exact standard lemma implementation is excludable only when its
+`CanVerifyOrigin` maps unambiguously to a source definition and neither it nor its
+unique matching procedure carries `inline`. Function implementations, unknown
+mappings, generated obligations and nonstandard lemma implementations remain in
+the conservative shared context. Extreme, prefix and two-state lemma
+implementations remain shared. Visible function bodies, contracts, prelude and recursive-call translation
+are therefore retained. This deliberately invalidates more proofs than a minimal
+dependency graph would.
+
+Boogie's own lexer removes comments/whitespace from complete canonical emission.
+Only complete `id` and `captureState` attributes are discarded: the former labels
+diagnostic/unsat-core dependencies, and the latter labels model-view snapshots.
+All other semantic attributes and literals remain in the input. Paths identify
+entries but do not enter hashes; diagnostic locations and unrelated global
+dependency counters cannot invalidate an otherwise identical translated input.
+
+The producer hashes the loaded DafnyCore and relevant Boogie assemblies, plus
+declared verifier/resolver settings and relevant supported Boogie settings. Library/prelude
+paths are represented by their translated contents. Solver executable discovery
+is deliberately absent; callers retain their exact solver/toolchain execution
+policy and immutable runtime provenance with the proof evidence.
+
+No certificate is issued for by-method identities, extreme lemmas, bodyless or
+verification-disabled definitions, or definitions with no translated owned
+implementation. Arbitrary Boogie arguments, external plugins (including both
+programmatic configuration lists and the active cached plugin set), nondefault
+inlining, inferred modifies, and nondefault loop unrolling/soundness settings omit
+the entire optional document because their transformations are outside the
+supported projection mode. Missing entries always require fresh verification.
+With `--verify-included-files`, verifiable included definitions can receive entries
+even though the ordinary analysis envelope lists only the requested root files.
+
+Source: `Source/DafnyCore/DefinitionAnalysis.ProofInputs.cs`,
+`Source/DafnyCore/DefinitionAnalysis.cs`,
+`Source/DafnyDriver/Commands/DefinitionAnalysisCommand.cs`.
+Public controls: `Source/DafnyCore.Test/DefinitionProofInputsTests.cs` and
+`Source/DafnyDriver.Test/DefinitionProofInputsCommandTests.cs`.
+The final bounded in-memory Core controls pass21/21 and native CLI controls6/6,
+with no skips. Serial no-restore builds and exact five-file format verification
+pass. Fresh independent review also passes Core21/21, Driver6/6 and its own API8/8
+controls. Its41CLI invocations yield30distinct final assertions after3documented
+fixture corrections, with initial receipts preserved. All5source/PDB bindings
+pass, all32independently captured files remain unchanged and all16owner-manifest
+entries match. The
+[independent report](/workspace/tmp/definition-proof-reuse-20261015/independent-native/REVIEW.md)
+and [accepted freeze](/workspace/tmp/definition-proof-reuse-20261015/independent-native/accepted-freeze.json)
+pin the final result; the owner closure reread those hashes and reconciled the
+current source/binaries without editing or rebuilding them. The local source/binary/PDB freeze manifest and logs are available under
+`/workspace/tmp/definition-proof-reuse-20261015/native-benchmark/` (maintenance
+scratch, not checked into Git); exact receipts belong in the linked plan. No paid
+experiments, benchmark grading or solver proof outcomes are established by these
+analysis tests. Solver/benchmark validation, consumer/replica integration, image
+admission and the paid ten-case run remain parent-owned gates under the
+[integration plan](../../../plan/2026-10-15-definition-proof-reuse-and-ten-case-rerun.md).
