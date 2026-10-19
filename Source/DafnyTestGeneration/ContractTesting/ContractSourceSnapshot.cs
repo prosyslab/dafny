@@ -18,6 +18,18 @@ public static class ContractSourceSnapshot {
   public static ContractSource Find(IReadOnlyList<ContractSource> sources, Uri uri) =>
     sources.Single(source => UriFor(source.Path) == uri);
 
+  /// <summary>Requires every trusted identity to name one unique exact immutable source snapshot.</summary>
+  public static void ValidateTrustedSources(IReadOnlyList<ContractSource> sources,
+    IReadOnlyList<ContractDependency>? trustedSources) {
+    Validate(sources);
+    if (trustedSources == null) { return; }
+    if (trustedSources.Any(source => source == null || string.IsNullOrWhiteSpace(source.Path) ||
+          string.IsNullOrWhiteSpace(source.Sha256)) || trustedSources.Distinct().Count() != trustedSources.Count ||
+        trustedSources.Any(trusted => !sources.Any(source => source.Path == trusted.Path && source.Sha256 == trusted.Sha256))) {
+      throw new ArgumentException("Trusted sources must uniquely identify exact supplied path and digest snapshots.");
+    }
+  }
+
   public static IReadOnlyList<ContractSource> ApplyEdits(IReadOnlyList<ContractSource> sources,
     IReadOnlyList<ContractSourceEdit> edits) {
     Validate(sources);

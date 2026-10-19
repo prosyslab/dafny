@@ -8,11 +8,13 @@ public enum ContractRuntimeDecisionMethod { Runtime, ClosedSmt, Unchecked }
 public enum ContractRuntimeDraftKind { Method, Function, ExternMethod }
 
 public sealed record ContractRuntimeDraft(string Symbol, string Path, string Content, string Sha256);
+/// <summary>Defines the immutable source set and policy for one runtime campaign.</summary>
 public sealed record ContractRuntimeCampaignRequest(int SchemaVersion, IReadOnlyList<ContractSource> Sources,
   ContractEntry Entry, string Seed, IReadOnlyList<ContractDependency>? Dependencies = null,
   IReadOnlyList<ContractRuntimeDraft>? Drafts = null, ContractSource? Generator = null, int SampleCount = 64,
   int SampleTimeoutMilliseconds = 5000, int TimeoutMilliseconds = 240000,
-  int ClosedQueryTimeoutMilliseconds = 10000, int MaxViolationsPerObligation = 3, int? ReplayOrdinal = null);
+  int ClosedQueryTimeoutMilliseconds = 10000, int MaxViolationsPerObligation = 3, int? ReplayOrdinal = null,
+  IReadOnlyList<ContractDependency>? TrustedSources = null);
 public sealed record ContractRuntimePopulation(int Generated = 0, int PreconditionRejected = 0,
   int PreconditionUnchecked = 0, int Executed = 0, int Valid = 0, int CalleeContractViolations = 0,
   int CalleeContractUnchecked = 0, int RuntimeErrors = 0, int Timeouts = 0, int ViolatingSamples = 0);

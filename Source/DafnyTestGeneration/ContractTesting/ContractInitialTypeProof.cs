@@ -22,7 +22,7 @@ public sealed class ContractInitialTypePreparation {
 
   internal bool Matches(ContractSpecificationChecker specifications) =>
     ReferenceEquals(Specifications, specifications) && Initial.IsOriginalInitial &&
-    specifications.IsBoundTo(Initial.Prepared.Program, Initial.Request.Sources);
+    specifications.IsBoundTo(Initial.Prepared.Program, Initial.Request.Sources, Initial.TrustedSources);
 }
 
 /// <summary>A source-bound plan for proving exact heap carriers by native construction or compiled membership.</summary>
@@ -64,7 +64,8 @@ public sealed class ContractInitialTypeProof {
 
   /// <summary>Binds an attested initial preparation to its exact scope without repeating source preparation.</summary>
   public static ContractInitialTypePreparation Prepare(ContractRuntimeHeapCheck initial, ContractSpecificationChecker specifications) {
-    if (!initial.IsOriginalInitial || !specifications.IsBoundTo(initial.Prepared.Program, initial.Request.Sources)) {
+    if (!initial.IsOriginalInitial || !specifications.IsBoundTo(initial.Prepared.Program, initial.Request.Sources,
+          initial.TrustedSources)) {
       throw new System.ArgumentException("Initial preparation is not bound to this original request and specification checker.", nameof(initial));
     }
     return new(initial, RequiredScope(initial.Prepared.Program, initial.Prepared.Method, initial.Request.Heap ?? [], specifications), specifications);
@@ -102,7 +103,8 @@ public sealed class ContractInitialTypeProof {
   /// <summary>Plans final carriers; the caller must also establish a constructive initial state and original P.</summary>
   public static ContractInitialTypeProof? TryPrepareObserved(Program program, ContractRuntimeHeapCheck check,
     ContractSpecificationChecker specifications, ContractRuntimeTypeEvidence? runtimeEvidence = null) {
-    if (!specifications.IsBoundTo(program, check.Request.Sources) || check.FinalHeap == null || check.FrameViolation != null ||
+    if (!specifications.IsBoundTo(program, check.Request.Sources, check.TrustedSources) ||
+        check.FinalHeap == null || check.FrameViolation != null ||
         !specifications.Accept(RequiredObservedScope(program, check, specifications)) ||
         HasUnsupportedCarrierShape(check.Prepared)) { return null; }
     var outputs = check.Prepared.Method.Outs.Select(formal => (check.Outputs[formal.Name], formal.Type)).ToList();
@@ -113,7 +115,7 @@ public sealed class ContractInitialTypeProof {
   public static ContractInitialTypeProof? TryPrepare(Program program, ContractRuntimeCampaignRequest campaign,
     IReadOnlyDictionary<string, ContractValue> inputs, IReadOnlyList<ContractHeapObject> heap,
     ContractSpecificationChecker specifications, ContractRuntimeTypeEvidence? runtimeEvidence = null) {
-    if (!specifications.IsBoundTo(program, campaign.Sources) ||
+    if (!specifications.IsBoundTo(program, campaign.Sources, campaign.TrustedSources) ||
         !specifications.Accept(RequiredScope(program, campaign, heap, specifications))) { return null; }
     var initial = ContractRuntimeHeapChecking.PrepareInitial(program, campaign, inputs, heap, specifications);
     return Plan(initial, specifications, runtimeEvidence);

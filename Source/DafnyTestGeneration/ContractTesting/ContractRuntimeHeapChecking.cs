@@ -17,7 +17,8 @@ public sealed record ContractRuntimeHeapCheck(ContractPreparedProgram Prepared, 
   IReadOnlyList<string>? InitialTypeConstraints = null, IReadOnlyList<ContractHeapObject>? FinalHeap = null) {
   internal ContractPreparedProgram? OriginalInitialPreparation { get; init; }
   internal string? OriginalInitialRequestHash { get; init; }
-  internal string RequestHash() => ContractHarnessBuilder.Hash(JsonSerializer.Serialize(Request, ContractJson.Options));
+  internal IReadOnlyList<ContractDependency>? TrustedSources { get; init; }
+  internal string RequestHash() => ContractHarnessBuilder.Hash(JsonSerializer.Serialize(new { Request, TrustedSources }, ContractJson.Options));
   internal bool IsOriginalInitial => ReferenceEquals(Prepared, OriginalInitialPreparation) && OriginalInitialRequestHash == RequestHash();
 }
 
@@ -406,6 +407,9 @@ public static class ContractRuntimeHeapChecking {
   public static ContractRuntimeHeapCheck PrepareInitial(Program originalProgram, ContractRuntimeCampaignRequest campaign,
     IReadOnlyDictionary<string, ContractValue> inputs, IReadOnlyList<ContractHeapObject> initial,
     ContractSpecificationChecker? specifications = null) {
+    if (specifications != null && !specifications.IsBoundTo(originalProgram, campaign.Sources, campaign.TrustedSources)) {
+      throw new ArgumentException("Campaign trust context is not bound to the supplied specification checker.", nameof(specifications));
+    }
     var method = ContractCallableSelector.SelectMethod(originalProgram, campaign.Entry, requireConcreteReceiver: false, allowLemmaContract: true);
     var entry = CapturedEntry(method, campaign, inputs);
     var request = new ContractTestRequest(ContractJson.SchemaVersion, campaign.Sources, entry,
@@ -431,7 +435,11 @@ public static class ContractRuntimeHeapChecking {
     if (prepared.Heap != null) { prepared = prepared with { Heap = prepared.Heap.WithAdditionalSourceEdits(edits) }; }
     var result = new ContractRuntimeHeapCheck(prepared, request, new Dictionary<string, ContractValue>(), new Dictionary<string, ContractValue>(),
       new Dictionary<string, ContractValue>(), null, constraints);
-    return result with { OriginalInitialPreparation = prepared, OriginalInitialRequestHash = result.RequestHash() };
+    var bound = result with {
+      OriginalInitialPreparation = prepared,
+      TrustedSources = CopyTrustedSources(campaign.TrustedSources)
+    };
+    return bound with { OriginalInitialRequestHash = bound.RequestHash() };
   }
 
   /// <summary>Prepares an original-contract query without assuming any tested postcondition.</summary>
@@ -473,8 +481,11 @@ public static class ContractRuntimeHeapChecking {
       evidence.Add(output.Key, output.Value);
     }
     return new ContractRuntimeHeapCheck(prepared, request, actualOutputs, observations, evidence, frameViolation,
-      FinalHeap: final);
+      FinalHeap: final) { TrustedSources = CopyTrustedSources(campaign.TrustedSources) };
   }
+
+  private static IReadOnlyList<ContractDependency>? CopyTrustedSources(IReadOnlyList<ContractDependency>? sources) =>
+    sources?.ToArray();
 
   private static ContractEntry CapturedEntry(Method method, ContractRuntimeCampaignRequest campaign,
     IReadOnlyDictionary<string, ContractValue> inputs) => method.IsStatic ? campaign.Entry : campaign.Entry with {

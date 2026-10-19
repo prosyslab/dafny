@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Boogie;
@@ -60,15 +61,18 @@ public sealed record ContractSpecificationResult(bool Verified, string Diagnosti
   IReadOnlyList<string> Implementations, IReadOnlyList<string> AssertionFreeDeclarations,
   int VerifiedCount = 0, int ErrorCount = 0) {
   public string? SourceSetHash { get; init; }
+  public string? TrustSetHash { get; init; }
   public ContractSequenceRefinementResult? SequenceRefinement { get; init; }
   public ContractSpecificationRole? Role { get; init; }
 }
 
-/// <summary>Source-bound independent global inhabitance evidence, separate from any captured state.</summary>
+/// <summary>Source- and trust-bound independent global inhabitance evidence, separate from any captured state.</summary>
 public sealed record ContractGlobalInhabitationCertificate(string SourceSetHash,
-  IReadOnlyList<string> Symbols, string ProofContext);
+  IReadOnlyList<string> Symbols, string ProofContext) {
+  public string? TrustSetHash { get; init; }
+}
 
-/// <summary>Certifies complete original specification closures, with separately budgeted native module checks.</summary>
+/// <summary>Validates original specification closures under exact source trust, with separately budgeted native checks.</summary>
 public sealed class ContractSpecificationChecker {
   private readonly Program original;
   private readonly IReadOnlyList<ContractSource> sources;
@@ -76,20 +80,27 @@ public sealed class ContractSpecificationChecker {
   private readonly HashSet<ContractSpecificationCheck> checkedChecks = [];
   private readonly HashSet<Declaration> acceptedDeclarations = [];
   private readonly HashSet<ModuleDefinition> originalModules;
+  private readonly HashSet<Uri> trustedSourceUris;
   private Program? verificationProgram;
   private BatchErrorReporter? reporter;
   private readonly string sourceSetHash;
+  private readonly string trustSetHash;
   private ContractGlobalInhabitationCertificate? independentGlobals;
 
   // Every scope is certified against the original sources with abstract-global axioms removed.
-  private string ScopeContext => sourceSetHash + "/original-native-with-abstract-global-axioms-removed";
+  private string ScopeContext => sourceSetHash + "/trusted-sources:" + trustSetHash +
+    "/original-native-with-abstract-global-axioms-removed";
 
   /// <summary>Creates a campaign-local checker bound to one immutable original source program.</summary>
-  public ContractSpecificationChecker(Program original, IReadOnlyList<ContractSource> sources, DafnyOptions options) {
+  public ContractSpecificationChecker(Program original, IReadOnlyList<ContractSource> sources, DafnyOptions options,
+    IReadOnlyList<ContractDependency>? trustedSources = null) {
+    ContractSourceSnapshot.ValidateTrustedSources(sources, trustedSources);
     this.original = original;
     originalModules = original.RawModules().ToHashSet();
     this.sources = sources;
     sourceSetHash = ContractRuntimeTypeEvidence.SourceSetHash(sources);
+    trustSetHash = TrustSetHash(trustedSources);
+    trustedSourceUris = (trustedSources ?? []).Select(source => ContractSourceSnapshot.UriFor(source.Path)).ToHashSet();
     this.options = new DafnyOptions(options, useNullWriters: true) {
       Compile = false,
       RunningBoogieFromCommandLine = true,
@@ -122,14 +133,15 @@ public sealed class ContractSpecificationChecker {
     declarations.RemoveWhere(declaration => Module(declaration) == original.SystemModuleManager.SystemModule ||
       declaration is not (MethodOrFunction or ConstantField or SubsetTypeDecl or NewtypeDecl) || declaration is NonNullTypeDecl ||
       declaration is ConstantField { Rhs: null, IsStatic: false });
-    // A source skip is not a certificate. Re-enable it in the detached proof program below;
-    // every actual trust dependency and every emitted native obligation still applies.
-    var trust = TrustDependencies(declarations.OfType<MethodOrFunction>()
+    // Re-enable source-level verification skips in the detached proof program;
+    // only the exact host trust set may omit original declaration audits and obligations.
+    var trust = TrustDependencies(declarations.OfType<MethodOrFunction>().Where(callable => !IsTrusted(callable))
         .Where(callable => role != ContractSpecificationRole.Logical || callable is not Function))
       .Where(dependency => dependency.Kind != "verify_false").ToList();
     var failure = trust.Count == 0 ? null : string.Join(", ", trust.Select(item => item.Symbol + ":" + item.Kind));
     foreach (var declaration in declarations) {
       if (!Owns(declaration)) { failure ??= "Declaration is not from the original resolved program: " + Name(declaration); }
+      if (IsTrusted(declaration)) { continue; }
       if (role == ContractSpecificationRole.Logical && declaration is Function function) {
         if (function.Body == null) { failure ??= "bodyless logical function: " + Name(function); }
         if (Attributes.Contains(function.Attributes, "only")) { failure ??= "verify_only: " + Name(function); }
@@ -158,9 +170,15 @@ public sealed class ContractSpecificationChecker {
       }
       if (declaration is ConstantField { Rhs: null }) { failure ??= "bodyless constant: " + Name(declaration); }
     }
-    return new(this, ScopeContext, role,
-      declarations, declarations.SelectMany(NativeChecks).ToHashSet(), failure);
+    return new(this, ScopeContext, role, declarations,
+      declarations.Where(declaration => !IsTrusted(declaration)).SelectMany(NativeChecks).ToHashSet(), failure);
   }
+
+  private bool IsTrusted(Declaration declaration) => trustedSourceUris.Contains(declaration.Origin.Uri);
+
+  private static string TrustSetHash(IReadOnlyList<ContractDependency>? trustedSources) => ContractHarnessBuilder.Hash(
+    JsonSerializer.Serialize((trustedSources ?? []).OrderBy(source => source.Path, StringComparer.Ordinal)
+      .ThenBy(source => source.Sha256, StringComparer.Ordinal).Select(source => new { source.Path, source.Sha256 })));
 
   private sealed record TrustDependency(string Symbol, string Kind, string Reason);
 
@@ -250,18 +268,22 @@ public sealed class ContractSpecificationChecker {
     .Where(check => !checkedChecks.Contains(check)).Select(check => Module(check.Declaration).FullDafnyName)
     .Distinct().OrderBy(name => name, StringComparer.Ordinal).ToList();
 
-  /// <summary>Publishes a certificate only after every declaration in the dependency closure has been checked.</summary>
+  /// <summary>Accepts a closure after every untrusted declaration was checked and every trusted source was bound.</summary>
   public bool Accept(ContractSpecificationScope scope) {
     if (!BoundScope(scope) || scope.Failure != null || !scope.Checks.IsSubsetOf(checkedChecks)) { return false; }
     if (scope.Role == ContractSpecificationRole.Execution) { acceptedDeclarations.UnionWith(scope.Declarations); }
     return true;
   }
 
-  /// <summary>Checks certificate identity against the original resolved declaration, not its spelling alone.</summary>
+  /// <summary>Checks accepted or trusted status by original declaration identity, not spelling alone.</summary>
   public bool IsValidated(Declaration declaration) => acceptedDeclarations.Contains(declaration);
 
-  internal bool IsBoundTo(Program program, IReadOnlyList<ContractSource> snapshots) =>
-    ReferenceEquals(original, program) && sourceSetHash == ContractRuntimeTypeEvidence.SourceSetHash(snapshots);
+  internal bool IsBoundTo(Program program, IReadOnlyList<ContractSource> snapshots) => ReferenceEquals(original, program) &&
+    sourceSetHash == ContractRuntimeTypeEvidence.SourceSetHash(snapshots);
+
+  internal bool IsBoundTo(Program program, IReadOnlyList<ContractSource> snapshots,
+    IReadOnlyList<ContractDependency>? trustedSources) => IsBoundTo(program, snapshots) &&
+    trustSetHash == TrustSetHash(trustedSources);
 
   internal ContractGlobalInhabitationCertificate? IndependentGlobals(Program program,
     IReadOnlyList<ContractSource> snapshots) {
@@ -270,7 +292,9 @@ public sealed class ContractSpecificationChecker {
     var scope = ContractInitialTypeProof.RequiredGlobalScope(program, this);
     if (!Accept(scope) || !ContractRuntimeHeapChecking.IndependentCertifiedGlobalsInhabited(program, this)) { return null; }
     return independentGlobals = new(sourceSetHash, scope.Symbols,
-      "original-native-wd-with-abstract-global-axioms-removed; independent-finite-inhabitants");
+      "original-native-wd-with-abstract-global-axioms-removed; independent-finite-inhabitants") {
+      TrustSetHash = trustSetHash
+    };
   }
 
   /// <summary>Verifies every emitted native obligation for the selected declarations in one owner module.</summary>
@@ -354,6 +378,7 @@ public sealed class ContractSpecificationChecker {
 
     ContractSpecificationResult Evidence(ContractSpecificationResult result) => result with {
       SourceSetHash = sourceSetHash,
+      TrustSetHash = trustSetHash,
       SequenceRefinement = sequenceProof,
       Role = scope.Role
     };

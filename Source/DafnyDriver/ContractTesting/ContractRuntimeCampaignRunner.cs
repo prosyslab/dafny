@@ -232,7 +232,8 @@ public static class ContractRuntimeCampaignRunner {
     var membershipReuseReceipts = 0;
     var callObservedCertificates = 0;
     var closedQueries = 0;
-    var specifications = new ContractSpecificationChecker(originalProgram, request.Sources, ClosedQueryOptions());
+    var specifications = new ContractSpecificationChecker(originalProgram, request.Sources, ClosedQueryOptions(),
+      request.TrustedSources);
     var specificationAttempts = new Dictionary<string, bool>();
     var scalarDependencyScopes = new Dictionary<string, ContractSpecificationScope?>();
     var draftedSymbols = (request.Drafts ?? []).Select(draft => draft.Symbol).ToHashSet(StringComparer.Ordinal);
@@ -1111,5 +1112,6 @@ public static class ContractRuntimeCampaignRunner {
         files.Select(f => ContractSourceSnapshot.UriFor(f.Path)).Distinct().Count() != files.Count) {
       throw new ArgumentException("Runtime source, draft, and generator paths must be distinct and hashes must match.");
     }
+    ContractSourceSnapshot.ValidateTrustedSources(request.Sources, request.TrustedSources);
   }
 }
