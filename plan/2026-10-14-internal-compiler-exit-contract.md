@@ -154,3 +154,87 @@ Generic evidence: /workspace/tmp/native-internal-exit-independent/. No paid call
 All owner acceptance requirements pass. Benchmark-native propagation, Python
 consumer acceptance, final image admission and paid restart remain separately
 tracked; this completion does not assert benchmark success.
+
+## Separate benchmark-native propagation record
+
+The following record covers the separate benchmark-native tree and retains its
+original build and validation provenance.
+
+# Propagate the explicit native internal-error exit contract
+
+Status: done
+Date: 2026-10-14
+Owner: benchmark-owned embedded native Dafny driver
+Related: [producer implementation](../../../cosyn/dafny/plan/2026-10-14-internal-compiler-exit-contract.md)
+Parent: [integration stop/debug/resume](../../../plan/2026-10-13-shared-ownership-repair-and-rerun.md)
+
+## Objective, evidence and acceptance
+
+The user authorizes direct-source compiler fixes and stop/debug/resume when
+infrastructure errors dominate. Root builds an independent benchmark-native
+compiler as well as Cosyn's compiler. Both must preserve internal failures as
+exit6 before a repaired experiment image is admitted. Existing codes0–5,
+candidate specifications, verification coverage, evaluator policy and raw old
+results stay unchanged. The accepted trigger-scope correction already lives in
+this main tree at HEADbc427b21461f258fd8de34232e01bb6be03cee39 plus dirty changes.
+
+The existing typed native event and middleware contract are implemented in the
+other native tree. Its exact four-driver-file plus generic-test patch passes
+git apply --check here, without touching the earlier trigger correction. Source
+identity and native behavior must be checked independently; a copied patch or
+successful process alone is insufficient. No provider calls or task inputs.
+
+Acceptance: same minimal source/test hashes in both native trees; solution
+rebuild, focused driver/internal-error and retained trigger checks, formatting
+and diff pass. Fresh independent verification starts from requirements/current
+source. Internal errors terminate mutation scheduling and retain native
+diagnostics; generic successful/syntax/type/assertion controls preserve ordinary
+outcomes. Root owns eventual frozen images and paid restart population.
+
+## Change table
+
+| File/symbol | What/how/necessity and unmet behavior | Validation |
+| --- | --- | --- |
+| Source/DafnyDriver/Legacy/DafnyBackwardsCompatibleCli.cs, ExitValue | Same explicit INTERNAL_ERROR=6, preserving all prior codes | Numeric contract controls |
+| Source/DafnyDriver/DafnyNewCli.cs, production parser | Same existing exception-handler configuration and testable parser factory | Unexpected exception6 versus candidate preprocessing1 |
+| Source/DafnyDriver/CliCompilation.cs, typed event counter/exit | Same retained internal-event state and exit priority | Injected verifier event and ordinary diagnostics |
+| Source/DafnyDriver/Commands/MeasureComplexityCommand.cs, RunVerificationIterations | Stop after terminal OnError, no completion or next seed | Controlled failing native verifier |
+| Source/DafnyDriver.Test/InternalErrorExitTests.cs | Same task-free generic native regression set; preserve native driver test framework | Focused dotnet test and code equality |
+| This plan/index | Record source/binary provenance, checks and independent acceptance without replacing history | Diff and Markdown-only hygiene |
+
+## Validation and boundaries
+
+Read local AGENTS.md/CLAUDE.md; use Dafny-local commands from this root:
+
+- dotnet build Source/Dafny.sln --no-restore -m:1 -p:UseSharedCompilation=false
+- dotnet test Source/DafnyDriver.Test --no-build --no-restore --filter FullyQualifiedName~InternalErrorExitTests
+- dotnet test Source/DafnyCore.Test --no-build --no-restore --filter FullyQualifiedName~TriggerBoundVariableScopeTests
+- dotnet format whitespace --folder --verify-no-changes --include <five changed C# files>
+- git diff --check; exact source SHA-256 comparison and native runtime hashes.
+
+Use existing cached Gradle prerequisites and approved local IPC/cache access if
+required. Native tests use small generic sources, never benchmark fixtures or
+recursive pytest source copies. No dependencies, commits, new inference, raw
+result modification or task/reference retrieval. Scratch belongs under
+/workspace/tmp/benchmark-native-internal-exit/. No durable new findings beyond
+the linked producer contract; record tree-specific acceptance in this plan.
+
+### Validation and independent acceptance
+
+All five planned files match the agent-native tree byte for byte. Full solution
+build exited0with0warnings/0errors in2:21.82; focused driver11/11 and retained
+trigger3/3, scoped format and diff pass. Logs and propagation hashes are under
+/workspace/tmp/benchmark-native-internal-exit/.
+
+A fresh independent native verification context separately traced this tree's
+production parser/event/mutation behavior, ran its own no-build driver11/11 and
+trigger3/3, and exercised built CLI exit0–5plus valid/failed three-mutation0/4.
+Its test-bin driver equals Binaries/DafnyDriver.dll at SHA256
+51a855cded1b3f2a10cc9d70df1cd20a12b15bcc8d9fee7c7f2dcd8691bc09e6.
+Five source/test hashes equal the current other tree. Formatting, diff and
+Markdown-only scan pass. Generic independent evidence belongs in
+/workspace/tmp/benchmark-native-internal-exit-independent/. No provider/task reads.
+All native owner acceptance checks pass. Root-supported deterministic image
+rebuild may yield later binary identities; those require separate image admission
+and do not relabel old interrupted results. No durable new finding beyond the
+linked native producer contract; no separate duplicate wiki page added.
