@@ -77,34 +77,6 @@ public class InternalErrorExitTests {
     Assert.Equal(ExitValue.INTERNAL_ERROR, await compilation.GetAndReportExitValue());
   }
 
-  // Successful verification and ordinary candidate failures keep their public codes in both command modes.
-  [Theory]
-  [InlineData("verify", "method Check() { assert true; }", ExitValue.SUCCESS)]
-  [InlineData("verify", "method Check( {", ExitValue.DAFNY_ERROR)]
-  [InlineData("verify", "method Check() { var value: int := true; }", ExitValue.DAFNY_ERROR)]
-  [InlineData("verify", "method Check() { assert false; }", ExitValue.VERIFICATION_ERROR)]
-  [InlineData("measure-complexity", "method Check() { assert true; }", ExitValue.SUCCESS)]
-  [InlineData("measure-complexity", "method Check( {", ExitValue.DAFNY_ERROR)]
-  [InlineData("measure-complexity", "method Check() { var value: int := true; }", ExitValue.DAFNY_ERROR)]
-  [InlineData("measure-complexity", "method Check() { assert false; }", ExitValue.VERIFICATION_ERROR)]
-  public async Task CandidateOutcomesKeepTheirExitCodes(string mode, string source, ExitValue expected) {
-    var directory = Path.Combine("/workspace/tmp/dafny-internal-exit-contract/tests", Guid.NewGuid().ToString("N"));
-    Directory.CreateDirectory(directory);
-    var sourcePath = Path.Combine(directory, "Candidate.dfy");
-    await File.WriteAllTextAsync(sourcePath, source);
-    using var output = new StringWriter();
-    using var error = new StringWriter();
-
-    var exitCode = await DafnyBackwardsCompatibleCli.MainWithWriters(output, error, TextReader.Null,
-      [mode, sourcePath, "--standard-libraries=false", "--cores=1", "--verification-time-limit=10"])
-      .WaitAsync(TimeSpan.FromSeconds(30));
-
-    await File.WriteAllTextAsync(Path.Combine(directory, "stdout.txt"), output.ToString());
-    await File.WriteAllTextAsync(Path.Combine(directory, "stderr.txt"), error.ToString());
-    await File.WriteAllTextAsync(Path.Combine(directory, "exit.txt"), exitCode.ToString());
-    Assert.Equal((int)expected, exitCode);
-  }
-
   private sealed class FailingVerifier : IProgramVerifier {
     public int Calls { get; private set; }
     public InvalidOperationException Failure { get; } = new("injected verifier failure");

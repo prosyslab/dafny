@@ -54,3 +54,5 @@ Fresh independent review confirmed production middleware/typed-event/mutation
 behavior, driver11/11 and trigger3/3, all existing exit0–5controls, current built
 driver identity and clean formatting/hygiene. Benchmark-native propagation and
 Cosyn consumer/image acceptance are separate; old-image receipts stay immutable.
+
+2026-10-19 maintenance correction: the eight `CandidateOutcomesKeepTheirExitCodes` native CLI theory cases were removed because they created GUID scratch directories and wrote source/log files. Their earlier receipts are historical; current retained development controls use in-memory boundaries. See the [commit maintenance plan](../plan/2026-10-19-commit-native-working-trees.md).
