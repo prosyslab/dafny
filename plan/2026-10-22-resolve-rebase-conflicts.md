@@ -1,6 +1,6 @@
 # Resolve verification-facts rebase conflicts
 
-Status: done
+Status: in-progress
 Date: 2026-10-22
 
 ## Objective and scope
@@ -90,3 +90,32 @@ diff contains only the two incoming feature documents, their index links, and
 this maintenance plan/index entry. HEAD remains `5fa47c6e9`; no commit was created.
 No process or blocker remains. Next action for the user: `git rebase --continue`
 to resume the existing nine-commit sequence (eight later commits remain pending).
+
+
+## Authorized continuation — 2026-10-22
+
+The user now requests completing the existing rebase through all conflicts.
+Resume this maintenance plan for the remaining eight commits, beginning at
+`583e2afd6`, onto `5fa47c6e9`. Preserve compatible source behavior, distinct
+native-tree documentation provenance, existing commit messages, and unrelated
+parent-repository work. No new functionality, dependencies or benchmark changes.
+
+Additional change scope: the conflicted historical plan/wiki files and indexes
+introduced by the remaining commits, plus this maintenance plan/index entry.
+Inspect each conflict's base/current/incoming versions before resolving. The
+first add/add plan contains independent Cosyn-native and benchmark-native
+validation records; retain both in explicitly separated sections. Source and
+regression files of the first replayed trigger commit already match HEAD.
+
+Acceptance: all remaining rebase commands complete on `expecto`, no unmerged
+paths or rebase metadata remain, both documentation histories survive, and the
+native working tree is clean. Run working/staged whitespace and marker checks,
+compare source changes against the target and original branch, recursively audit
+Markdown-only plan/wiki trees, and obtain independent review. If any source
+resolution changes behavior, run the affected native build, tests and formatting;
+if only historical documentation differs, report that scope without claiming a
+new proof or test result. Git metadata writes use the approved escalation path
+when required because the submodule's Git directory lies outside the subtree.
+
+No durable findings: this continuation reconciles duplicate implementation
+history and preserves existing provenance; no new wiki page is necessary.

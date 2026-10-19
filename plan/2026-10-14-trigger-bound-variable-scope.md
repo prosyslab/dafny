@@ -200,3 +200,111 @@ fix; no commits, new dependencies, hidden data, task changes, paid calls or live
 image changes. The parent experiment plan remains open for terminal results.
 The separate benchmark-native tree receives the same generic repair under
 [its own plan](../../../dafnyutils/dafny/plan/2026-10-14-trigger-bound-variable-scope.md).
+
+## Separate benchmark-native propagation record
+
+The following record covers the separate benchmark-native tree and retains its
+original build and validation provenance.
+
+# Apply the verified trigger-binding repair to the benchmark's native compiler
+
+Status: done
+Date: 2026-10-14
+Authorization: user requests direct-source repair of the identified Dafny/Boogie
+bug. No paid experiment, candidate/specification/evaluator/scoring change or commit.
+Related: [Cosyn native implementation](../../../cosyn/dafny/plan/2026-10-14-trigger-bound-variable-scope.md)
+and [integration investigation](../../../plan/2026-10-13-shared-ownership-repair-and-rerun.md).
+
+## Objective and evidence
+
+The root builds two independent native Dafny trees: the agent image overrides its
+runtime from `cosyn/dafny/Binaries`, while benchmark task/evaluation images use
+`dafnyutils/dafny/Binaries`. Repairing only the former leaves the benchmark-owned
+compiler with the same upstream defect. The native repository is based on
+`bc427b21461f258fd8de34232e01bb6be03cee39`; the affected compiler file was
+unmodified at entry with SHA-256
+`4af4cd1550f9f5822e302736613f6cc4bc7d5f52a2280c8851ce715130046343`, matching the
+original Cosyn native source. Propagate only the minimal generic compiler
+repair and task-free regression tests to this main tree. Preserve unrelated work.
+
+The issue is unsafe recombination of independently rewritten quantifier splits
+under the first split's binder/range when trigger lists compare equal. Acceptance:
+generic universal/existential closure controls, original compatible recombination,
+native integration proof and source formatting pass, native runtime rebuild succeeds,
+and a fresh independent verifier checks this tree. Keep automatic triggers and proof
+coverage. Existing active experiment images remain unchanged and retain actual results.
+
+## Change table
+
+| File / symbol | Change / necessity | Validation |
+| --- | --- | --- |
+| `Source/DafnyCore/Triggers/ComprehensionTriggerGenerator.cs`, split grouping | Apply the same minimal binder/range compatibility repair; no heuristic fallback or global trigger disable | Inspect diff and generic regression |
+| `Source/DafnyCore.Test/TriggerBoundVariableScopeTests.cs` | Same task-free forall/exists/compatible-split tests, preventing free generated identifiers | Focused three native unit cases |
+| `Source/IntegrationTests/TestFiles/LitTests/LitTest/triggers/split-matchingloop-bound-variable-scope.dfy` and `.dfy.expect` | Generic native automatic-trigger regression, no copied task contract/solution | Supported focused native integration command |
+| `plan/2026-10-14-trigger-bound-variable-scope.md`, `plan/INDEX.md` | Record exact source/build/test state and acceptance | Markdown-only hygiene and diff check |
+
+## Validation and boundaries
+
+Inspect local Makefile/instructions and use native commands from this repository:
+`dotnet build Source/Dafny.sln --no-restore -m:1 -p:UseSharedCompilation=false`,
+`dotnet test Source/DafnyCore.Test --no-restore --filter FullyQualifiedName~TriggerBoundVariableScopeTests`,
+`make test name=triggers/split-matchingloop-bound-variable-scope.dfy build=false`,
+scoped `dotnet format whitespace ... --verify-no-changes --include ...`
+and native Dafny formatting of the new generic fixture. Record prerequisites and
+actual results; no full benchmark/pytest tree-copy/delete suite, new dependencies,
+benchmark inputs, hidden oracles, score logic or live model feedback. Generic
+scratch outputs stay under `/workspace/tmp/dafny-trigger-scope-benchmark/`; no generated
+artifacts in plan/wiki. Native binary identity differs from the old immutable run.
+
+## Progress
+
+Applied only the compiler source, generic unit test and generic integration
+fixture/expect listed above. Their SHA-256 values match the approved Cosyn source:
+`71e87fbabc7d750b3ed28078e4cc1deafbfb3314cdc96df3962b201f6b5cdb5f`,
+`4eece685aa69f61445b826083f0a9e19604949bedb5fb07d107434c354b23251`,
+`a4390b4ef148f9f5311869cd1c37052b31def34dae3dcf308452f6c9349fe82f`, and
+`8057ae540b5046dac3b40ae3b777565ca2ffb5b291e738b346e7b087eb8a589b` respectively.
+
+Native revision remains `bc427b21461f258fd8de34232e01bb6be03cee39` with only the
+planned source, fixture and plan changes. At subtask start, `plan/INDEX.md` already
+contained a historical-entry replacement; that pre-existing content was preserved,
+and only this task's status text was updated. Tool versions were .NET SDK 8.0.131,
+MSBuild 17.8.49 and Gradle 8.14. The supported solution build passed using the
+cached Gradle distribution staged at `/workspace/tmp/dafny-trigger-scope-benchmark/gradle-user-home`:
+`GRADLE_USER_HOME=/workspace/tmp/dafny-trigger-scope-benchmark/gradle-user-home dotnet build Source/Dafny.sln --no-restore -m:1 -p:UseSharedCompilation=false`
+(exit 0, zero warnings/errors, 22.98 s). The normal sandbox denied Gradle's local
+wildcard-interface/lock IPC and VSTest's localhost socket; the same authorized
+build and focused tests passed through the approved execution path. A project-mode
+C# format invocation produced no output for over 90 seconds and was terminated;
+the supported folder-mode scoped check above passed. No external provider or
+service calls were made.
+
+Focused checks passed against the rebuilt native binary:
+
+- `GRADLE_USER_HOME=/workspace/tmp/dafny-trigger-scope-benchmark/gradle-user-home dotnet test Source/DafnyCore.Test --no-restore --filter FullyQualifiedName~TriggerBoundVariableScopeTests -m:1 -p:UseSharedCompilation=false` — 3 passed, 0 failed/skipped.
+- `make test name=triggers/split-matchingloop-bound-variable-scope.dfy build=false` — 1 integration test passed; its Dafny output reports 2 verified, 0 errors.
+- `dotnet format whitespace --folder --verify-no-changes --include Source/DafnyCore/Triggers/ComprehensionTriggerGenerator.cs Source/DafnyCore.Test/TriggerBoundVariableScopeTests.cs` — passed.
+- `dotnet Binaries/Dafny.dll format --check Source/IntegrationTests/TestFiles/LitTests/LitTest/triggers/split-matchingloop-bound-variable-scope.dfy` — all files correctly formatted.
+- `dotnet Binaries/Dafny.dll --version` — `4.11.1+bc427b21461f258fd8de34232e01bb6be03cee39`; built runtime SHA-256: `Binaries/Dafny.dll` `85d15a20194300c3137eab2af536e734c0dcd7c10b361cdc213420b5d7866628`, `Binaries/net8.0/DafnyCore.dll` `49bc8e72cb036af011d2992b366dd3a19ea2ba712c20e7fd4bfbe7596d1d2586`.
+
+No durable findings: this propagates the already documented compiler fix and generic
+regressions to the separate native tree. `plan/` and `wiki/` contain no non-Markdown
+files. The fresh independent verification of this native clone is pending with the
+root agent, so this plan remains in progress until that review is accepted.
+
+### Fresh independent acceptance — 2026-10-14
+
+A separate verification context inspected this native source and independently
+ran unit3/3, new integration1/1, existing expressivity1/1, full native build with
+zero warnings/errors, scoped C#/Dafny formatting and direct CLI2verified/0errors.
+Its separate AST probe confirmed closed rewritten universal/existential binders
+and compatible recombination for both kinds; generated Boogie binds every _t#
+identifier locally. Source/test hashes match the accepted agent-native patch.
+Evidence: /workspace/tmp/dafny-trigger-scope-benchmark-independent/.
+
+The reviewer detected Root's accidental historical plan-index replacement. Root
+restored the original HEAD bytes and retained only this new entry. A separate
+read-only follow-up confirmed exactly2added/0deleted, all historical entries intact
+and a valid link. No unrelated work was reset. All acceptance checks for this
+compiler fix pass; explicit internal-failure exit classification and new image
+admission remain separate follow-up work before paid restart.
