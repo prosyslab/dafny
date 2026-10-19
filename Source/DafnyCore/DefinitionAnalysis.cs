@@ -75,6 +75,9 @@ public record DefinitionAnalysisResult(
   public IReadOnlyList<string> YieldRequires { get; init; } = [];
   public IReadOnlyList<string> YieldEnsures { get; init; } = [];
   public IReadOnlyList<string> HeaderDependencies { get; init; } = [];
+  /// <summary>Resolved body opacity and conservative reveal exposure, when available.</summary>
+  [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  public DefinitionBodyVisibility? BodyVisibility { get; init; }
 }
 
 public record DefinitionSourceSpan(int Start, int End);
@@ -315,6 +318,7 @@ public static partial class DefinitionAnalysis {
     var resolvedDeclarationFacts = ResolvedDeclarationFacts.For(declarations, declarationNodes);
     var recursionFacts = AnalyzeRecursion(recursionGraph);
 
+    var bodyVisibility = new BodyVisibilityAnalysis(program.Options);
     var results = declarations
       .OrderBy(declaration => declaration.Start)
       .Select(declaration => ResultFor(
@@ -325,7 +329,9 @@ public static partial class DefinitionAnalysis {
         callFacts,
         declarationNodes,
         resolvedDeclarationFacts,
-        includeStatements))
+        includeStatements) with {
+        BodyVisibility = bodyVisibility.For(declaration.Declaration)
+      })
       .ToList();
     return results;
   }
