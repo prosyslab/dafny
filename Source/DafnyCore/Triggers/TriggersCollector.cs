@@ -269,7 +269,7 @@ internal class TriggersCollector {
     var variables = expr.Cases.SelectMany(e => e.Pat.DescendantsAndSelf).
       OfType<IdPattern>().Select(id => id.BoundVar).Where(b => b != null).ToList();
     // remove terms that mentions argument boundvar of matchcaseexpr
-    var terms = candidateTerms.Where(term => variables.Any(x => !term.Variables.Contains(x))).ToList();
+    var terms = candidateTerms.Where(term => !variables.Any(term.Variables.Contains)).ToList();
     return new TriggerAnnotation(true, CollectVariables(expr), terms);
   }
 
@@ -281,7 +281,7 @@ internal class TriggersCollector {
     // remove terms that mentions argument boundvar of matchcaseexpr
     var terms = new List<TriggerTerm>();
     foreach (var term in pts) {
-      if (!(variables.All(x => term.Variables.Contains(x)))) {
+      if (!variables.Any(term.Variables.Contains)) {
         terms.Add(term);
       }
     }
