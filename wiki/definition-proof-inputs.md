@@ -196,3 +196,5 @@ experiments, benchmark grading or solver proof outcomes are established by these
 analysis tests. Solver/benchmark validation, consumer/replica integration, image
 admission and the paid ten-case run remain parent-owned gates under the
 [integration plan](../../../plan/2026-10-15-definition-proof-reuse-and-ten-case-rerun.md).
+
+2026-10-19 maintenance correction: `Source/DafnyDriver.Test/DefinitionProofInputsCommandTests.cs` and its six command cases were removed because the shared helper created and deleted GUID scratch directories and source files. Previous command-test receipts are historical; the in-memory `DefinitionProofInputsTests` remain. See the [commit maintenance plan](../plan/2026-10-19-commit-native-working-trees.md).
