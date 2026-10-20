@@ -699,6 +699,124 @@ public sealed class ContractGeneratorProofTests {
     Assert.Equal(2, proofMethods.Admission.Descendants().OfType<AssertStmt>().Count());
   }
 
+  // A goal input named r keeps its original requires identity while the proof calls a generator with fresh r0 positionally.
+  [Fact]
+  public async Task PreparedSourcesPreserveCollidingRandomInputBinding() {
+    const string source = """
+      module M {
+        import PbtRandom
+        method Goal(r: int) requires r >= 0 {}
+        method {:pbt_generator "M.Goal"} Generate(r0: PbtRandom.Source) returns (r: int) { r := 1; }
+      }
+      """;
+    var parsed = await Parse(source, resolve: true);
+    var methods = parsed.Program.Descendants().OfType<Method>().ToList();
+    var goal = Assert.Single(methods.Where(method => method.Name == "Goal"));
+    var generator = Assert.Single(methods.Where(method => method.Name == "Generate"));
+
+    var build = ContractGeneratorProof.PrepareProofSources(parsed.Program, parsed.Sources, goal, generator,
+      PbtRandomSource, out var failure);
+    Assert.Null(failure);
+    Assert.NotNull(build);
+    var proof = await ParseSnapshots(build!.Sources);
+    var proofMethods = ProofMethods(proof.Program, build, goal, generator);
+    Assert.Null(await ContractGeneratorProof.ValidateProofSourceBindingsAsync(proof.Program,
+      proofMethods.Goal, proofMethods.Generator, proofMethods.Admission, build, proof.Options));
+
+    var goalInput = Assert.IsType<IdentifierExpr>(Assert.IsType<BinaryExpr>(proofMethods.Goal.Req.Single().E.Resolved).E0.Resolved);
+    Assert.Same(proofMethods.Goal.Ins.Single(), goalInput.Var);
+    var generatedEnsure = Assert.Single(proofMethods.Generator.Ens);
+    var helperCall = Assert.Single(generatedEnsure.E.DescendantsAndSelf.OfType<FunctionCallExpr>());
+    var generatedOutput = Assert.IsType<IdentifierExpr>(Assert.Single(helperCall.Args).Resolved);
+    Assert.Same(proofMethods.Generator.Outs.Single(), generatedOutput.Var);
+    Assert.Equal("r0", proofMethods.Generator.Ins.Single().Name);
+    Assert.Equal("r", proofMethods.Generator.Outs.Single().Name);
+  }
+
+  // A colliding module member freshens the selected generator while admission still binds its exact declaration.
+  [Fact]
+  public async Task PreparedSourcesInvokeFreshGeneratorMember() {
+    const string source = """
+      module M {
+        import PbtRandom
+        method Generate() {}
+        method Goal(x: int) requires x >= 0 {}
+        method {:pbt_generator "M.Goal"} Generate0(r: PbtRandom.Source) returns (x: int) { x := 1; }
+      }
+      """;
+    var parsed = await Parse(source, resolve: true);
+    var methods = parsed.Program.Descendants().OfType<Method>().ToList();
+    var goal = Assert.Single(methods.Where(method => method.Name == "Goal"));
+    var generator = Assert.Single(methods.Where(method => method.Name == "Generate0"));
+    Assert.True(ContractGeneratorProof.SupportedSelectedGoal(parsed.Program, goal, generator, out var capabilityFailure),
+      capabilityFailure);
+
+    var build = ContractGeneratorProof.PrepareProofSources(parsed.Program, parsed.Sources, goal, generator,
+      PbtRandomSource, out var failure);
+    Assert.Null(failure);
+    Assert.NotNull(build);
+    Assert.Contains(" := Generate0(", build!.Sources.Single(source => source.Path == UserPath).Content,
+      StringComparison.Ordinal);
+    var proof = await ParseSnapshots(build.Sources);
+    var proofMethods = ProofMethods(proof.Program, build, goal, generator);
+    Assert.Null(await ContractGeneratorProof.ValidateProofSourceBindingsAsync(proof.Program,
+      proofMethods.Goal, proofMethods.Generator, proofMethods.Admission, build, proof.Options));
+    Assert.Contains(proofMethods.Admission.Descendants().OfType<CallStmt>(),
+      call => ReferenceEquals(call.Method, proofMethods.Generator));
+  }
+
+  // Proof admission binds a selected goal named Generate or PbtMain and projects its original requires clause.
+  [Theory]
+  [InlineData("Generate", "Generate0")]
+  [InlineData("PbtMain", "Generate")]
+  public async Task PreparedSourcesBindRuntimeNamedSelectedTarget(string goalName, string generatorName) {
+    var source = "module M { import PbtRandom method " + goalName + "(x: int) requires x >= 0 {} " +
+      "method {:pbt_generator \"M." + goalName + "\"} " + generatorName +
+      "(r: PbtRandom.Source) returns (x: int) { x := 1; } }";
+    var parsed = await Parse(source, resolve: true);
+    var goal = Assert.Single(parsed.Program.Descendants().OfType<Method>()
+      .Where(method => method.Name == goalName));
+    var generator = Assert.Single(parsed.Program.Descendants().OfType<Method>()
+      .Where(method => method.Name == generatorName));
+    Assert.True(ContractGeneratorProof.SupportedSelectedGoal(parsed.Program, goal, generator,
+      out var capabilityFailure), capabilityFailure);
+
+    var build = ContractGeneratorProof.PrepareProofSources(parsed.Program, parsed.Sources, goal, generator,
+      PbtRandomSource, out var failure);
+    Assert.Null(failure);
+    Assert.NotNull(build);
+    var proof = await ParseSnapshots(build!.Sources);
+    var methods = ProofMethods(proof.Program, build, goal, generator);
+
+    Assert.Null(await ContractGeneratorProof.ValidateProofSourceBindingsAsync(proof.Program,
+      methods.Goal, methods.Generator, methods.Admission, build, proof.Options));
+    Assert.Equal("M." + goalName, methods.Goal.FullDafnyName);
+    Assert.Equal(generatorName, methods.Generator.Name);
+    Assert.Single(build.RequirementHelperNames);
+    Assert.Contains(methods.Generator.Ens.Single().E.DescendantsAndSelf.OfType<FunctionCallExpr>(),
+      call => call.Function.Name == build.RequirementHelperNames.Single());
+    Assert.Contains(methods.Admission.Descendants().OfType<CallStmt>(),
+      call => ReferenceEquals(call.Method, methods.Generator));
+    Assert.Single(methods.Admission.Descendants().OfType<AssertStmt>());
+  }
+
+  // Proof capability rejects an otherwise shaped method unless its canonical name and marker both identify the goal.
+  [Theory]
+  [InlineData("Other", "M.Goal")]
+  [InlineData("Generate", "M.Other")]
+  public async Task SupportedGoalRejectsWrongGeneratorIdentity(string generatorName, string marker) {
+    var source = "module M { import PbtRandom method Goal(x: int) requires x >= 0 {} " +
+      "method {:pbt_generator \"" + marker + "\"} " + generatorName +
+      "(r: PbtRandom.Source) returns (x: int) { x := 1; } }";
+    var parsed = await Parse(source, resolve: true);
+    var goal = Assert.Single(parsed.Program.Descendants().OfType<Method>().Where(method => method.Name == "Goal"));
+    var generator = Assert.Single(parsed.Program.Descendants().OfType<Method>()
+      .Where(method => method.Name == generatorName));
+
+    Assert.False(ContractGeneratorProof.SupportedSelectedGoal(parsed.Program, goal, generator, out var failure));
+    Assert.Contains("canonical generator", failure, StringComparison.Ordinal);
+  }
+
   // Reordered generated postconditions cannot bind to the original ordered requirements.
   [Fact]
   public async Task PreparedSourcesRejectReorderedRequirementPostconditions() {

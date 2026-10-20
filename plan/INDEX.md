@@ -28,3 +28,7 @@
 - [Commit existing native changes in logical units](2026-10-19-commit-native-working-trees.md) — done; local commit maintenance, no push.
 
 - [Unify native Dafny revisions](2026-10-19-unify-dafny.md) — done; combined native source independently accepted, parent plans own common-pin delivery.
+- [Attribute runtime evidence to installed draft bodies](2026-10-20-pbt-installed-draft-evidence.md) — done; canonical actual substitutions drive evidence/callee attribution, strict unused-draft validation retained, independent build and 20 memory cases accepted.
+- [Avoid diagnostic generator name capture](2026-10-20-pbt-generator-formal-collisions.md) — done; exact formal/local names, capture/lookup and unchanged proof bindings independently accepted; module-member naming remains separate.
+- [Avoid runtime-class capture in instrumentation](2026-10-20-pbt-runtime-alias-capture.md) — done; canonical top-level bridge, declaration-reference binding and documentation independently accepted with 153 memory cases and a clean build; frozen trials unchanged.
+- [Preserve generator identity with fresh member names](2026-10-20-pbt-generator-member-collisions.md) — done; source, four direct selected-target cases, 146 full memory cases and exact-name wiki/guide closeout independently accepted; no solver or live-effect claim.

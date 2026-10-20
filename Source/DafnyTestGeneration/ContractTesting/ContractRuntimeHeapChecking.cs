@@ -489,7 +489,7 @@ public static class ContractRuntimeHeapChecking {
 
   private static ContractEntry CapturedEntry(Method method, ContractRuntimeCampaignRequest campaign,
     IReadOnlyDictionary<string, ContractValue> inputs) => method.IsStatic ? campaign.Entry : campaign.Entry with {
-      Receiver = inputs.TryGetValue("receiver", out var receiver) ? receiver :
+      Receiver = inputs.TryGetValue(ContractRuntimeGeneratorSignature.Names(method).Receiver!, out var receiver) ? receiver :
         throw new ArgumentException("Missing captured entry receiver.", nameof(inputs))
     };
 

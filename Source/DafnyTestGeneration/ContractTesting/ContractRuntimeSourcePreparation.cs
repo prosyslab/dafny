@@ -11,7 +11,82 @@ namespace DafnyTestGeneration.ContractTesting;
 
 /// <summary>Detached source snapshots with a mapping back to their supplied source locations.</summary>
 public sealed record ContractRuntimePreparedSources(IReadOnlyList<ContractSource> Sources,
-  ContractRuntimeSourceMap SourceMap, IReadOnlySet<string>? DiagnosticConstructors = null);
+  ContractRuntimeSourceMap SourceMap, IReadOnlySet<string>? DiagnosticConstructors = null) {
+  /// <summary>Canonical symbols whose source bodies were replaced with validated drafts.</summary>
+  public IReadOnlySet<string> InstalledDraftSymbols { get; init; } = new HashSet<string>();
+  /// <summary>Exact prepared module-level generator method name.</summary>
+  public string GeneratorMethodName { get; init; } = "Generate";
+}
+
+/// <summary>Capture-free diagnostic formal names for one runtime goal.</summary>
+public sealed record ContractRuntimeGeneratorNames(string Random, string? Receiver) {
+  /// <summary>Canonical module-level generator method name.</summary>
+  public string MethodName { get; init; } = "Generate";
+}
+
+/// <summary>Defines the exact generator signature expected for a runtime goal.</summary>
+public static class ContractRuntimeGeneratorSignature {
+  /// <summary>Chooses deterministic diagnostic names outside the goal's explicit input names.</summary>
+  public static ContractRuntimeGeneratorNames Names(Method goal) => Names(goal,
+    ContractRuntimeSourcePreparation.ModuleNames(goal.EnclosingClass.EnclosingModuleDefinition));
+
+  internal static ContractRuntimeGeneratorNames Names(Method goal, Method? excludedGenerator) => Names(goal,
+    ContractRuntimeSourcePreparation.ModuleNames(goal.EnclosingClass.EnclosingModuleDefinition, excludedGenerator));
+
+  internal static ContractRuntimeGeneratorNames Names(Method goal, IEnumerable<string> moduleNames) {
+    var reserved = goal.Ins.Select(formal => formal.Name).ToHashSet(StringComparer.Ordinal);
+    var random = Fresh("r");
+    var receiver = goal.IsStatic ? null : Fresh("receiver");
+    return new(random, receiver) { MethodName = FreshMember(moduleNames, "Generate") };
+
+    string Fresh(string preferred) {
+      while (!reserved.Add(preferred)) { preferred += "0"; }
+      return preferred;
+    }
+  }
+
+  internal static string MemberName(Method goal, string preferred, Method? excluded = null) {
+    var names = ContractRuntimeSourcePreparation.ModuleNames(
+      goal.EnclosingClass.EnclosingModuleDefinition, excluded);
+    return FreshMember(names, preferred);
+  }
+
+  private static string FreshMember(IEnumerable<string> reservedNames, string preferred) {
+    var names = reservedNames.ToHashSet(StringComparer.Ordinal);
+    while (!names.Add(preferred)) { preferred += "0"; }
+    return preferred;
+  }
+
+  /// <summary>Selects the exact prepared generator identified by its target marker, module, source and canonical name.</summary>
+  public static Method Select(Program program, Method goal, string expectedMethodName) {
+    if (!program.Descendants().OfType<Method>().Any(method => ReferenceEquals(method, goal))) {
+      throw new ArgumentException("The selected goal must belong to the supplied program.", nameof(goal));
+    }
+    var candidates = goal.EnclosingClass.EnclosingModuleDefinition.TopLevelDecls.OfType<DefaultClassDecl>()
+      .SelectMany(declaration => declaration.Members).OfType<Method>()
+      .Where(method => method.Name == expectedMethodName && method.Origin.Uri == goal.Origin.Uri &&
+        HasExactMarker(method, goal.FullDafnyName)).ToList();
+    if (candidates.Count != 1 || Names(goal, candidates.SingleOrDefault()).MethodName != expectedMethodName) {
+      throw new NotSupportedException("The prepared generator does not match its exact target, module, source and canonical name.");
+    }
+    return candidates[0];
+  }
+
+  internal static bool HasExactMarker(Method generator, string goalFullName) {
+    var matches = generator.Attributes.AsEnumerable().Where(attribute => attribute.Name == "pbt_generator").ToList();
+    return matches is [{ Args: [LiteralExpr { Value: string symbol }] }] && symbol == goalFullName;
+  }
+
+  /// <summary>Formats the generator declaration required for a runtime goal.</summary>
+  public static string Format(Method goal) {
+    var names = Names(goal);
+    var outputs = (goal.IsStatic ? Enumerable.Empty<string>() :
+        [names.Receiver + ": " + goal.EnclosingClass.Name])
+      .Concat(goal.Ins.Select(formal => formal.Name + ": " + formal.Type));
+    return "method {:pbt_generator \"" + goal.FullDafnyName + "\"} " + names.MethodName + "(" + names.Random +
+      ": PbtRandom.Source) returns (" + string.Join(", ", outputs) + ")";
+  }
+}
 
 /// <summary>Tracks UTF-8 token positions through draft replacements and generator insertions.</summary>
 public sealed class ContractRuntimeSourceMap {
@@ -51,7 +126,12 @@ public static class ContractRuntimeSourcePreparation {
     edits.Add(new(goal.Origin.Uri, modulePosition, 0, "\nimport PbtRandom\n", source, modulePosition, true));
     var moduleNames = new Dictionary<ModuleDefinition, HashSet<string>> { [module] = ModuleNames(module) };
     var names = moduleNames[module];
+    var generatorNames = ContractRuntimeGeneratorSignature.Names(goal);
+    if (!names.Add(generatorNames.MethodName)) {
+      throw new InvalidOperationException("The canonical generator name was not fresh in the original module.");
+    }
     var supplied = new HashSet<string>(StringComparer.Ordinal);
+    var installedDraftSymbols = new HashSet<string>(StringComparer.Ordinal);
     foreach (var draft in drafts) {
       cancellationToken.ThrowIfCancellationRequested();
       if (!supplied.Add(draft.Symbol)) {
@@ -87,6 +167,7 @@ public static class ContractRuntimeSourcePreparation {
       }
       ReplaceBody(target, candidate, snapshot, targetSource, edits);
       RemoveAttributes(target.Attributes, targetSource, edits);
+      installedDraftSymbols.Add(target.FullDafnyName);
     }
     var parsedGenerator = await ParseDeclarations(generator, options, cancellationToken);
     var generatorDeclarations = Declarations(parsedGenerator).ToList();
@@ -95,17 +176,22 @@ public static class ContractRuntimeSourcePreparation {
     if (generators.Count != 1) {
       throw new NotSupportedException("A generator must contain exactly one matching pbt_generator method.");
     }
-    ValidateGenerator(goal, generators[0]);
+    ValidateGenerator(goal, generators[0], generatorNames);
     var constructors = ContractDiagnosticConstruction.Parse(program, goal, generators[0]);
     foreach (var constructor in constructors) {
       edits.Add(new(constructor.Class.Origin.Uri, constructor.Class.EndToken.pos, 0, constructor.Declaration,
         generator, constructor.Origin.pos, true));
     }
+    if (!names.Remove(generatorNames.MethodName)) {
+      throw new InvalidOperationException("The reserved generator name was lost during source preparation.");
+    }
     foreach (var declaration in generatorDeclarations) {
       AddHelper(declaration, generator, module, program, source, names, edits);
     }
     return Apply(sources, edits) with {
-      DiagnosticConstructors = constructors.Select(constructor => constructor.Class.FullDafnyName + "." + constructor.Name).ToHashSet()
+      DiagnosticConstructors = constructors.Select(constructor => constructor.Class.FullDafnyName + "." + constructor.Name).ToHashSet(),
+      InstalledDraftSymbols = installedDraftSymbols.ToHashSet(StringComparer.Ordinal),
+      GeneratorMethodName = generatorNames.MethodName
     };
   }
 
@@ -135,10 +221,10 @@ public static class ContractRuntimeSourcePreparation {
     .SelectMany(module => module.TopLevelDecls).OfType<TopLevelDeclWithMembers>()
     .SelectMany(declaration => declaration.Members);
 
-  private static HashSet<string> ModuleNames(ModuleDefinition module) => module.TopLevelDecls
+  internal static HashSet<string> ModuleNames(ModuleDefinition module, Method? excluded = null) => module.TopLevelDecls
     .Where(declaration => declaration is not DefaultClassDecl).Select(declaration => declaration.Name)
     .Concat(module.TopLevelDecls.OfType<DefaultClassDecl>().SelectMany(declaration => declaration.Members)
-      .Select(member => member.Name)).ToHashSet(StringComparer.Ordinal);
+      .Where(member => !ReferenceEquals(member, excluded)).Select(member => member.Name)).ToHashSet(StringComparer.Ordinal);
 
   private static string? AttributeSymbol(Attributes? attributes, string name) {
     var matches = attributes.AsEnumerable().Where(attribute => attribute.Name == name).ToList();
@@ -178,15 +264,15 @@ public static class ContractRuntimeSourcePreparation {
     _ => false
   };
 
-  private static void ValidateGenerator(Method goal, Method generator) {
+  private static void ValidateGenerator(Method goal, Method generator, ContractRuntimeGeneratorNames names) {
     var receiverCount = goal.IsStatic ? 0 : 1;
-    if (generator.Name != "Generate" || generator.IsGhost || generator.Body == null ||
-        generator.TypeArgs.Count != 0 || generator.Ins.Count != 1 || generator.Ins[0].Name != "r" ||
+    if (generator.Name != names.MethodName || generator.IsGhost || generator.Body == null ||
+        generator.TypeArgs.Count != 0 || generator.Ins.Count != 1 || generator.Ins[0].Name != names.Random ||
         generator.Ins[0].SafeSyntacticType.ToString() != "PbtRandom.Source" ||
         generator.Outs.Count != goal.Ins.Count + receiverCount) {
       throw new NotSupportedException("Generator signature does not match the current goal inputs.");
     }
-    if (receiverCount != 0 && (generator.Outs[0].Name != "receiver" ||
+    if (receiverCount != 0 && (generator.Outs[0].Name != names.Receiver ||
         generator.Outs[0].SafeSyntacticType.ToString() != goal.EnclosingClass.Name)) {
       throw new NotSupportedException("Instance generators require a receiver of the original class type.");
     }

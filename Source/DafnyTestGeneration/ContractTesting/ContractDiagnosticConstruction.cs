@@ -59,11 +59,29 @@ public static class ContractDiagnosticConstruction {
 
   /// <summary>Rejects omitted ghost state used by the resolved goal, generator, or installed drafts.</summary>
   public static void AuditResolved(Program program, Method goal, IReadOnlySet<string> constructorNames) {
+    AuditResolved(program, ContractRuntimeObligationTransformer.DiagnosticReachable(program, goal), constructorNames);
+  }
+
+  /// <summary>Rejects omitted ghost state used by the resolved goal and one exact generator.</summary>
+  public static void AuditResolved(Program program, Method goal, Method generator,
+    IReadOnlySet<string> constructorNames) {
+    if (!ContractRuntimeObligationTransformer.Members(program).OfType<Method>()
+          .Any(method => ReferenceEquals(method, generator)) ||
+        generator.EnclosingClass.EnclosingModuleDefinition != goal.EnclosingClass.EnclosingModuleDefinition) {
+      throw new ArgumentException("The exact generator must belong to the goal module in the supplied program.",
+        nameof(generator));
+    }
+    AuditResolved(program, ContractRuntimeObligationTransformer.DiagnosticReachable(program, goal, generator),
+      constructorNames);
+  }
+
+  private static void AuditResolved(Program program, IEnumerable<MethodOrFunction> roots,
+    IReadOnlySet<string> constructorNames) {
     var generated = ContractRuntimeObligationTransformer.Members(program).OfType<Constructor>()
       .Where(constructor => constructorNames.Contains(constructor.FullDafnyName)).ToList();
     var omitted = generated.SelectMany(constructor => ((TopLevelDeclWithMembers)constructor.EnclosingClass).Members.OfType<Field>()
       .Where(field => field.IsGhost && !field.IsStatic && !SuppliedFieldNames(constructor).Contains(field.Name))).ToHashSet();
-    foreach (var root in ContractRuntimeObligationTransformer.DiagnosticReachable(program, goal)) {
+    foreach (var root in roots) {
       ContractHeapFactory.AuditOmittedFields(program, root, omitted, generated.Cast<ICallable>().ToHashSet());
     }
   }

@@ -97,8 +97,7 @@ public static class ContractRuntimeCampaignRunner {
       OriginalCallable: goal.FunctionFromWhichThisIsByMethodDecl ?? (MethodOrFunction)goal, Sources: request.Sources);
     var missing = MissingDrafts(program, request.Sources, goal, request.Drafts ?? []);
     var generator = request.Generator == null ? new ContractRuntimeMissingGenerator(goal.FullDafnyName,
-      "method {:pbt_generator \"" + goal.FullDafnyName + "\"} Generate(r: PbtRandom.Source) returns (" +
-      string.Join(", ", (goal.IsStatic ? Enumerable.Empty<string>() : ["receiver: " + goal.EnclosingClass.Name]).Concat(goal.Ins.Select(f => f.Name + ": " + f.Type))) + ")") : null;
+      ContractRuntimeGeneratorSignature.Format(goal)) : null;
     if (missing.Count > 0 || generator != null) {
       return CampaignFailure(missing.Count > 0 ? ContractRuntimeStatus.DraftsRequired : ContractRuntimeStatus.GeneratorRequired,
         missing.Count > 0 ? "Reachable implementations require drafts." : "The goal requires a generator.") with {
@@ -136,9 +135,10 @@ public static class ContractRuntimeCampaignRunner {
         Diagnostics(reporter, sourcePreparation.SourceMap));
     }
     goal = ContractCallableSelector.SelectMethod(program, request.Entry, requireConcreteReceiver: false, allowLemmaContract: true);
-    ContractDiagnosticConstruction.AuditResolved(program, goal, sourcePreparation.DiagnosticConstructors ?? new HashSet<string>());
-    var generatedMethod = ContractRuntimeObligationTransformer.Members(program).OfType<Method>()
-      .Single(m => m.Name == "Generate" && m.EnclosingClass.EnclosingModuleDefinition == goal.EnclosingClass.EnclosingModuleDefinition);
+    var generatedMethod = ContractRuntimeGeneratorSignature.Select(
+      program, goal, sourcePreparation.GeneratorMethodName);
+    ContractDiagnosticConstruction.AuditResolved(program, goal, generatedMethod,
+      sourcePreparation.DiagnosticConstructors ?? new HashSet<string>());
     var unresolved = MissingDrafts(program, snapshots, goal, [], sourcePreparation.SourceMap)
       .Concat(MissingDrafts(program, snapshots, generatedMethod, [], sourcePreparation.SourceMap)).DistinctBy(d => d.Symbol).ToList();
     if (unresolved.Count > 0) {
@@ -162,9 +162,10 @@ public static class ContractRuntimeCampaignRunner {
     const int maximumAttempts = 8;
     for (var attempt = 0; ; attempt++) {
       phases.Record("transformation:" + attempt, "started");
-      transformation = new ContractRuntimeObligationTransformer(program, snapshots, goal, sourcePreparation.SourceMap, rejectedDeclarations, decisionCaps,
+      transformation = new ContractRuntimeObligationTransformer(program, snapshots, goal,
+        sourcePreparation.SourceMap, rejectedDeclarations, decisionCaps,
         sourcePreparation.DiagnosticConstructors, ContractRuntimeTypeEvidence.SourceSetHash(request.Sources),
-        generatorProof: generatorProofReport).Transform();
+        generatorProof: generatorProofReport, selectedGenerator: generatedMethod).Transform();
       if (request.ProveGeneratorPreconditions) {
         generatorProofResult = GeneratorProofResult(generatorProofReport, transformation.EntryRequiresOmitted,
           generatorProofElapsedMilliseconds);
@@ -299,7 +300,7 @@ public static class ContractRuntimeCampaignRunner {
       request.TrustedSources);
     var specificationAttempts = new Dictionary<string, bool>();
     var scalarDependencyScopes = new Dictionary<string, ContractSpecificationScope?>();
-    var draftedSymbols = (request.Drafts ?? []).Select(draft => draft.Symbol).ToHashSet(StringComparer.Ordinal);
+    var draftedSymbols = sourcePreparation.InstalledDraftSymbols;
     var decidedGoalEvaluations = 0;
     void RequireCampaignTime() {
       cancellationToken.ThrowIfCancellationRequested();
@@ -469,7 +470,7 @@ public static class ContractRuntimeCampaignRunner {
           if (passed != null && GoalKind(obligation.Kind)) { decided++; }
           if (obligation.Kind == ContractRuntimeObligationKind.EntryPrecondition) { rejected |= passed == false; uncheckedPrecondition |= passed == null; } else if (obligation.Kind == ContractRuntimeObligationKind.CalleePostcondition) {
             badCallee |= passed == false; uncheckedCallee |= passed == null;
-            if (passed == false) { calleeViolations.Add(new(id, obligation.Callee!, request.Drafts?.Any(d => d.Symbol == obligation.Callee) == true, sample.Ordinal, sample.Inputs, Values())); }
+            if (passed == false) { calleeViolations.Add(new(id, obligation.Callee!, draftedSymbols.Contains(obligation.Callee!), sample.Ordinal, sample.Inputs, Values())); }
           } else if (passed == false) {
             var iteration = record.GetProperty("iteration").GetInt32();
             pending.Add(new(id, obligation.Kind, sample.Ordinal, iteration < 0 ? null : iteration,
@@ -481,7 +482,8 @@ public static class ContractRuntimeCampaignRunner {
           violation.ObligationId == sample.Records[^1].GetProperty("id").GetString()) &&
           kinds.Contains("generated") && kinds.Contains("executed") && !kinds.Contains("runtime_error") &&
           originalPrepared.Method.Ins.All(formal => sample.Inputs.ContainsKey(formal.Name)) &&
-          (originalPrepared.Method.IsStatic || sample.Inputs.ContainsKey("receiver"));
+          (originalPrepared.Method.IsStatic || sample.Inputs.ContainsKey(
+            ContractRuntimeGeneratorSignature.Names(originalPrepared.Method).Receiver!));
         // Obligation violation counts include only failures that decide this sample's classification.
         Func<ContractRuntimeObligationKind, bool> counted = _ => false;
         if (rejected) {

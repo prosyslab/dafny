@@ -21,3 +21,5 @@
 - [Resolved function body visibility](function-body-visibility.md) — effective opacity and conservative resolved dependency/reveal closure, independently22-case verified.
 
 - [Unified native Dafny runtime](unified-dafny-runtime.md) — 2026-10-19 source independently verified (90 native checks); combined metadata retains trust/proof behavior; parent pins/build metadata separate.
+- [Installed draft provenance](pbt-installed-draft-evidence.md) — actual substitutions govern runtime evidence and callee attribution; strict unused-draft validation and native proof bindings preserved, independently verified 20 memory cases.
+- [Diagnostic generator names](pbt-generator-formal-names.md) — response-authoritative public names plus capture-free private runtime alias/bridge binding; exact formal, member, wrapper and canonical runtime declaration scopes independently accepted, documentation review pending.

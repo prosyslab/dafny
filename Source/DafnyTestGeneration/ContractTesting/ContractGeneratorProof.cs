@@ -1920,12 +1920,19 @@ public static class ContractGeneratorProof {
       failure = "A goal input is ghost or outside the supported scalar, sequence and inductive datatype value domain.";
       return false;
     }
-    if (generator.Name != "Generate" || generator.IsGhost || !generator.IsStatic || generator.Body == null ||
+    var canonicalGeneratorName = ContractRuntimeGeneratorSignature.Names(goal, generator).MethodName;
+    var exactGeneratorIdentity = program.Descendants().OfType<Method>()
+      .Any(method => ReferenceEquals(method, generator)) &&
+      generator.EnclosingClass is DefaultClassDecl &&
+      generator.EnclosingClass.EnclosingModuleDefinition == goal.EnclosingClass.EnclosingModuleDefinition &&
+      generator.Origin.Uri == goal.Origin.Uri && generator.Name == canonicalGeneratorName &&
+      ContractRuntimeGeneratorSignature.HasExactMarker(generator, goal.FullDafnyName);
+    if (!exactGeneratorIdentity || generator.IsGhost || !generator.IsStatic || generator.Body == null ||
         generator.TypeArgs.Count != 0 || generator.AllowsNontermination || generator.Ins.Count != 1 ||
         generator.Ins[0].SafeSyntacticType.ToString() != "PbtRandom.Source" ||
         generator.Outs.Count != goal.Ins.Count || generator.Outs.Any(formal => formal.IsGhost) ||
         generator.Req.Count > 0) {
-      failure = "The exact Generate method must be a terminating, non-ghost static method with no authored requires and outputs matching the goal inputs.";
+      failure = "The exact canonical generator method must carry the target marker in the goal module and source, be terminating and non-ghost, have no authored requires, and match the goal inputs.";
       return false;
     }
     foreach (var pair in goal.Ins.Zip(generator.Outs)) {

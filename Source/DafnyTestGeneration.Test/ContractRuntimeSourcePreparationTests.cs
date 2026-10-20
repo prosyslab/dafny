@@ -23,6 +23,7 @@ public class ContractRuntimeSourcePreparationTests {
     Assert.Contains("ensures y == x + 1", content);
     Assert.DoesNotContain("ensures y == -9", content);
     Assert.DoesNotContain("assert false", content);
+    Assert.Equal(new[] { "M.Helper" }, prepared.InstalledDraftSymbols);
     await Resolve(prepared);
   }
 
@@ -48,7 +49,17 @@ public class ContractRuntimeSourcePreparationTests {
     const string draft = "method {:pbt_draft \"M.Helper\"} Helper(x: int) returns (y: int) { y := -100; }";
     var prepared = await Prepare(Source.Replace("assert false;", "y := x + 1;"), draft);
     Assert.DoesNotContain("-100", prepared.Sources[0].Content);
+    Assert.Empty(prepared.InstalledDraftSymbols);
     await Resolve(prepared);
+  }
+
+  // An unused draft still has to match the concrete target's signature.
+  [Fact]
+  public async Task RejectsSignatureMismatchForImplementedHelper() {
+    const string draft = "method {:pbt_draft \"M.Helper\"} Helper(x: int) returns (other: int) { other := x; }";
+    var source = Source.Replace("assert false;", "y := x + 1;");
+    var exception = await Assert.ThrowsAsync<NotSupportedException>(() => Prepare(source, draft));
+    Assert.Contains("signature", exception.Message);
   }
 
   // Generator outputs must preserve the goal input names and types.
