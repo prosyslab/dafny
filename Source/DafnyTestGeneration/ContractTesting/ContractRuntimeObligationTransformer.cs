@@ -504,19 +504,17 @@ public sealed class ContractRuntimeObligationTransformer {
       }
     }
     foreach (var type in reachable.OfType<Constructor>().Select(c => c.EnclosingClass).Distinct()) { RemoveAttribute(type.Attributes, "extern"); }
-    Insert(sources[0], 0, "module " + runtimeBridge + " {\nimport Runtime = PbtRuntime\nexport provides Runtime\n}\n");
-    foreach (var module in program.RawModules().Where(m => m.Name is not ("PbtRuntime" or "PbtRandom") && sources.Any(s => ContractSourceSnapshot.UriFor(s.Path) == m.Origin.Uri))) {
+    var runtimeModule = program.RawModules().Single(module => module.FullDafnyName == "PbtRuntime");
+    var runtimeSource = ContractSourceSnapshot.Find(sources, runtimeModule.Origin.Uri);
+    Insert(runtimeSource, 0, "module " + runtimeBridge +
+      " {\nimport Runtime = PbtRuntime\nexport provides Runtime\n}\nmodule " + runtimeAlias +
+      " {\nimport Runtime = " + runtimeBridge + ".Runtime\nexport provides Runtime\n}\n");
+    foreach (var module in program.RawModules().Where(m => m != program.DefaultModuleDef &&
+               m.Name is not ("PbtRuntime" or "PbtRandom") &&
+               sources.Any(s => ContractSourceSnapshot.UriFor(s.Path) == m.Origin.Uri))) {
       foreach (var export in module.TopLevelDecls.OfType<ModuleExportDecl>()) { Replace(export, "export " + (export.IsDefault ? "" : export.Name + " ") + "reveals *"); }
-      var token = module.StartToken;
-      if (module == program.DefaultModuleDef) {
-        Insert(sources[0], 0, "import " + runtimeAlias + " = " + runtimeBridge + ".Runtime\n");
-      } else {
-        while (token != null && token.val != "{") { token = token.Next; }
-        if (token != null) {
-          Insert(token.Uri, token.pos + 1,
-            "\nimport " + runtimeAlias + " = " + runtimeBridge + ".Runtime\n");
-        }
-      }
+      Insert(module.BodyStartTok.Uri, module.BodyStartTok.pos + 1,
+        "\nimport " + runtimeAlias + " = " + runtimeBridge + "\n");
     }
     var goalWrapper = Wrapper(goal, goal.Name + "__pbt_goal", true, null);
     Insert(goal.Origin.Uri, goal.StartToken.pos, goalWrapper);
@@ -1323,7 +1321,7 @@ public sealed class ContractRuntimeObligationTransformer {
   }
 
   private static string Quote(string text) => JsonSerializer.Serialize(text, new JsonSerializerOptions { Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping });
-  private string RuntimeChecks => runtimeAlias + ".PbtChecks";
+  private string RuntimeChecks => runtimeAlias + ".Runtime.PbtChecks";
   private string Location(IOrigin origin) {
     var location = sourceMap?.ResolveLocation(origin.Uri, origin.pos);
     return "var pbtLocation" + nextName++ + " := " + RuntimeChecks + ".Location(" +

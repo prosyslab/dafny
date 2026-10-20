@@ -6,6 +6,8 @@
 
 # Native Dafny plans
 
+- [Preserve parseable PBT diagnostic source preambles](2026-10-20-pbt-diagnostic-parsing.md) — done; canonical runtime-snapshot bridge/façade placement and parser-owned named-module anchors independently accepted across four public memory regressions; no receipt-cause or live-effect claim.
+
 - [PBT random API bounds and Unicode scalar draws](2026-10-20-pbt-random-api.md) — done; corrected normalized resource hash, native API/runtime fix and 23 independently checked pure-memory cases; parent owns requested commit/integration.
 
 - [Clarify native proof-input projection limits](2026-10-16-proof-input-scope-limits.md) — done; source/documentation boundary independently accepted after a pruning-scope wording correction. No producer change, native execution or claim of false-proof acceptance.

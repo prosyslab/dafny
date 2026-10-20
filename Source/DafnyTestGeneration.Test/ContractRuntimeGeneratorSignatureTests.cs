@@ -158,12 +158,13 @@ public class ContractRuntimeGeneratorSignatureTests {
     var transformed = new ContractRuntimeObligationTransformer(program, preparedSources, goal, prepared.SourceMap,
       selectedGenerator: selectedGenerator).Transform();
     var content = ContractSourceSnapshot.Find(transformed.Sources, goal.Origin.Uri).Content;
+    var runtimeContent = transformed.Sources.Single(source => source.Path == "PbtRuntime.dfy").Content;
 
-    Assert.Contains("import " + expectedAlias + " = " + expectedBridge + ".Runtime", content,
+    Assert.Contains("import " + expectedAlias + " = " + expectedBridge + "\n", content,
       StringComparison.Ordinal);
     Assert.Contains("module " + expectedBridge + " {\nimport Runtime = PbtRuntime\nexport provides Runtime",
-      content, StringComparison.Ordinal);
-    Assert.Contains(expectedAlias + ".PbtChecks.InstantiateShape", content, StringComparison.Ordinal);
+      runtimeContent, StringComparison.Ordinal);
+    Assert.Contains(expectedAlias + ".Runtime.PbtChecks.InstantiateShape", content, StringComparison.Ordinal);
     var resolved = await Resolve(transformed.Sources, options);
     var canonicalModule = resolved.RawModules().Single(module => module.FullDafnyName == "PbtRuntime");
     var canonicalClass = canonicalModule.TopLevelDecls.OfType<TopLevelDeclWithMembers>()
@@ -178,6 +179,125 @@ public class ContractRuntimeGeneratorSignatureTests {
     Assert.NotEmpty(runtimeMethods);
     Assert.All(runtimeFunctions, call => Assert.Same(canonicalClass, call.Function.EnclosingClass));
     Assert.All(runtimeMethods, call => Assert.Same(canonicalClass, call.Method.EnclosingClass));
+  }
+
+  // An include-first named source retains its preamble while aliases use the parsed attributed-module body boundary.
+  [Fact]
+  public async Task TransformsIncludeFirstNamedModuleAtParsedBodyBoundary() {
+    const string main = "include \"Helper.dfy\"\n" +
+      "module {:pbt_probe {0}} M { import PbtRandom method Goal(x: int) {} " +
+      "method {:pbt_generator \"M.Goal\"} Generate(r: PbtRandom.Source) returns (x: int) { x := 0; } }";
+    IReadOnlyList<ContractSource> supplied = [
+      Source("Main.dfy", main),
+      Source("Helper.dfy", "module Helper {}")
+    ];
+    var sources = WithRuntime(supplied);
+    var (program, options, _) = await Parse(sources);
+    var goal = ContractCallableSelector.SelectMethod(program, new("M.Goal"), requireConcreteReceiver: false);
+    var generator = ContractRuntimeGeneratorSignature.Select(program, goal, "Generate");
+
+    var transformed = new ContractRuntimeObligationTransformer(program, sources, goal,
+      selectedGenerator: generator).Transform();
+
+    var transformedMain = transformed.Sources.Single(source => source.Path == "Main.dfy").Content;
+    Assert.StartsWith("include \"Helper.dfy\"\n", transformedMain);
+    Assert.Contains("module {:pbt_probe {0}} M {\nimport PbtRuntimeAlias = PbtRuntimeBridge\n",
+      transformedMain, StringComparison.Ordinal);
+    Assert.DoesNotContain("module PbtRuntimeBridge", transformedMain, StringComparison.Ordinal);
+    Assert.Same(sources, transformed.Prepared.Sources);
+    var resolved = await Resolve(transformed.Sources, options);
+    AssertCanonicalRuntimeBindings(resolved, "M");
+  }
+
+  // An include-first default-module source resolves the global runtime facade without changing its preamble.
+  [Fact]
+  public async Task TransformsIncludeFirstDefaultModuleAfterPreamble() {
+    const string main = "include \"Helper.dfy\"\n" +
+      "method Goal(x: int) {} " +
+      "method {:pbt_generator \"Goal\"} Generate(r: PbtRandom.Source) returns (x: int) { x := 0; }";
+    IReadOnlyList<ContractSource> supplied = [
+      Source("Main.dfy", main),
+      Source("Helper.dfy", "module Helper {}")
+    ];
+    var sources = WithRuntime(supplied);
+    var (program, options, _) = await Parse(sources);
+    var goal = ContractCallableSelector.SelectMethod(program, new("Goal"), requireConcreteReceiver: false);
+    var generator = ContractRuntimeGeneratorSignature.Select(program, goal, "Generate");
+
+    var transformed = new ContractRuntimeObligationTransformer(program, sources, goal,
+      selectedGenerator: generator).Transform();
+
+    var transformedMain = transformed.Sources.Single(source => source.Path == "Main.dfy").Content;
+    var transformedRuntime = transformed.Sources.Single(source => source.Path == "PbtRuntime.dfy").Content;
+    Assert.StartsWith("include \"Helper.dfy\"\n", transformedMain);
+    Assert.DoesNotContain("import PbtRuntimeAlias", transformedMain, StringComparison.Ordinal);
+    Assert.DoesNotContain("module PbtRuntimeBridge", transformedMain, StringComparison.Ordinal);
+    Assert.Contains("module PbtRuntimeBridge {\nimport Runtime = PbtRuntime", transformedRuntime,
+      StringComparison.Ordinal);
+    Assert.Contains("module PbtRuntimeAlias {\nimport Runtime = PbtRuntimeBridge.Runtime\n" +
+      "export provides Runtime", transformedRuntime, StringComparison.Ordinal);
+    Assert.Contains("PbtRuntimeAlias.Runtime.PbtChecks", transformedMain, StringComparison.Ordinal);
+    Assert.Same(sources, transformed.Prepared.Sources);
+    var resolved = await Resolve(transformed.Sources, options);
+    AssertCanonicalRuntimeBindings(resolved, null);
+  }
+
+  // Include-linked default-module files share the global facade when both emit runtime calls.
+  [Fact]
+  public async Task TransformsRuntimeCallsAcrossDefaultModuleFiles() {
+    const string main = "include \"Helper.dfy\"\n" +
+      "method Goal(x: int) returns (y: int) { y := Assist(x); } " +
+      "method {:pbt_generator \"Goal\"} Generate(r: PbtRandom.Source) returns (x: int) { x := 0; }";
+    const string helper = "method Assist(x: int) returns (y: int) { y := x; }";
+    IReadOnlyList<ContractSource> supplied = [
+      Source("Main.dfy", main),
+      Source("Helper.dfy", helper)
+    ];
+    var sources = WithRuntime(supplied);
+    var (program, options, _) = await Parse(sources);
+    var goal = ContractCallableSelector.SelectMethod(program, new("Goal"), requireConcreteReceiver: false);
+    var generator = ContractRuntimeGeneratorSignature.Select(program, goal, "Generate");
+
+    var transformed = new ContractRuntimeObligationTransformer(program, sources, goal,
+      selectedGenerator: generator).Transform();
+
+    var transformedMain = transformed.Sources.Single(source => source.Path == "Main.dfy").Content;
+    var transformedHelper = transformed.Sources.Single(source => source.Path == "Helper.dfy").Content;
+    Assert.StartsWith("include \"Helper.dfy\"\n", transformedMain);
+    Assert.DoesNotContain("import PbtRuntimeAlias", transformedMain, StringComparison.Ordinal);
+    Assert.DoesNotContain("import PbtRuntimeAlias", transformedHelper, StringComparison.Ordinal);
+    Assert.Contains("PbtRuntimeAlias.Runtime.PbtChecks.Location", transformedMain, StringComparison.Ordinal);
+    Assert.Contains("PbtRuntimeAlias.Runtime.PbtChecks.Location", transformedHelper, StringComparison.Ordinal);
+    Assert.Same(sources, transformed.Prepared.Sources);
+    var resolved = await Resolve(transformed.Sources, options);
+    AssertCanonicalRuntimeBindings(resolved, null);
+  }
+
+  // An unrelated include-first root does not make runtime bridge placement depend on supplied source order.
+  [Fact]
+  public async Task TransformsLaterNamedGoalIndependentlyOfSourceOrder() {
+    const string goalSource = "module M { import PbtRandom method Goal(x: int) {} " +
+      "method {:pbt_generator \"M.Goal\"} Generate(r: PbtRandom.Source) returns (x: int) { x := 0; } }";
+    IReadOnlyList<ContractSource> supplied = [
+      Source("Dependency.dfy", "include \"Helper.dfy\"\nmodule Dependency {}"),
+      Source("Helper.dfy", "module Helper {}"),
+      Source("Goal.dfy", goalSource)
+    ];
+    var sources = WithRuntime(supplied);
+    var (program, options, _) = await Parse(sources);
+    var goal = ContractCallableSelector.SelectMethod(program, new("M.Goal"), requireConcreteReceiver: false);
+    var generator = ContractRuntimeGeneratorSignature.Select(program, goal, "Generate");
+
+    var transformed = new ContractRuntimeObligationTransformer(program, sources, goal,
+      selectedGenerator: generator).Transform();
+    var resolved = await Resolve(transformed.Sources, options);
+
+    var dependency = transformed.Sources[0];
+    Assert.Equal("Dependency.dfy", dependency.Path);
+    Assert.StartsWith("include \"Helper.dfy\"\n", dependency.Content);
+    Assert.DoesNotContain("module PbtRuntimeBridge", dependency.Content, StringComparison.Ordinal);
+    Assert.Same(sources, transformed.Prepared.Sources);
+    AssertCanonicalRuntimeBindings(resolved, "M");
   }
 
   // A different fresh-looking RNG formal is rejected instead of weakening exact generator validation.
@@ -410,11 +530,40 @@ public class ContractRuntimeGeneratorSignatureTests {
   private static Task<Program> ResolveWithRuntime(IReadOnlyList<ContractSource> sources, DafnyOptions options) =>
     Resolve(WithRuntime(sources), options);
 
+  private static void AssertCanonicalRuntimeBindings(Program program, string? goalModuleName) {
+    var canonicalModule = program.RawModules().Single(module => module.FullDafnyName == "PbtRuntime");
+    var bridge = program.RawModules().Single(module => module.FullDafnyName == "PbtRuntimeBridge");
+    var bridgeImport = bridge.TopLevelDecls.OfType<AliasModuleDecl>()
+      .Single(import => import.Name == "Runtime");
+    var alias = program.RawModules().Single(module => module.FullDafnyName == "PbtRuntimeAlias");
+    var aliasImport = alias.TopLevelDecls.OfType<AliasModuleDecl>()
+      .Single(import => import.Name == "Runtime");
+    var canonicalClass = canonicalModule.TopLevelDecls.OfType<TopLevelDeclWithMembers>()
+      .Single(declaration => declaration.Name == "PbtChecks");
+    var runtimeFunctions = program.Descendants().OfType<FunctionCallExpr>()
+      .Where(call => call.Function.EnclosingClass.Name == "PbtChecks").ToList();
+    var runtimeMethods = program.Descendants().OfType<CallStmt>()
+      .Where(call => call.Method.EnclosingClass.Name == "PbtChecks").ToList();
+
+    Assert.Same(canonicalModule, bridgeImport.Signature.ModuleDef);
+    Assert.Same(canonicalModule, aliasImport.Signature.ModuleDef);
+    if (goalModuleName != null) {
+      var goalModule = program.RawModules().Single(module => module.FullDafnyName == goalModuleName);
+      var goalImport = goalModule.TopLevelDecls.OfType<AliasModuleDecl>()
+        .Single(import => import.Name == "PbtRuntimeAlias");
+      Assert.Same(bridge, goalImport.Signature.ModuleDef);
+    }
+    Assert.NotEmpty(runtimeFunctions);
+    Assert.NotEmpty(runtimeMethods);
+    Assert.All(runtimeFunctions, call => Assert.Same(canonicalClass, call.Function.EnclosingClass));
+    Assert.All(runtimeMethods, call => Assert.Same(canonicalClass, call.Method.EnclosingClass));
+  }
+
   private static async Task<Program> Resolve(IReadOnlyList<ContractSource> sources, DafnyOptions options) {
     var reporter = new BatchErrorReporter(options);
     var program = await ContractSourceSnapshot.ParseAsync(reporter, sources, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0,
-      string.Join("\n", reporter.AllMessages.Take(16).Select(message => message.Message)));
+      string.Join("\n", reporter.AllMessages.Take(16).Select(message => message.ErrorId + ": " + message.Message)));
     return program;
   }
 }
