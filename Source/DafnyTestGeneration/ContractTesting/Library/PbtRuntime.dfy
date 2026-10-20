@@ -66,12 +66,12 @@ module {:extern "DafnyPbtRandom"} PbtRandom {
     method {:extern} {:axiom} Nat(bound: nat) returns (v: nat) ensures v <= bound
     // Returns true or false drawn from the stream.
     method {:extern} Bool() returns (b: bool)
-    // Returns a character whose code point is drawn from the stream in lo..hi inclusive.
+    // Returns a Unicode scalar character drawn from the stream in lo..hi inclusive, excluding surrogate code points.
     method {:extern} {:axiom} Char(lo: char, hi: char) returns (c: char) requires lo <= hi ensures lo <= c <= hi
     // Returns an index drawn from the stream in 0..n-1; requires n > 0.
     method {:extern} {:axiom} Index(n: nat) returns (i: nat) requires n > 0 ensures i < n
     // Returns a suggested collection size: 2 + ordinal / 4 (rounded down) capped at 32, so later samples get larger sizes; it does not advance the stream.
-    method {:extern} {:axiom} Size() returns (s: nat)
+    method {:extern} {:axiom} Size() returns (s: nat) ensures 2 <= s <= 32
   }
   // Creates the random source; reads --pbt-seed and --pbt-ordinal from the process command line.
   method {:extern "DafnyPbtRandom.Source", "New"} {:axiom} New() returns (r: Source)

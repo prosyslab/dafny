@@ -2,6 +2,8 @@
 
 # Native Dafny knowledge
 
+- [PBT random source bounds and Unicode scalar intervals](pbt-random-api.md) — size contract, deterministic constructor seam and scalar-gap mapping; 23 selected pure-memory cases and fresh independent review pass on 2026-10-20; exact normalized resource pin updated.
+
 - [Match-pattern variables and automatic trigger scope](match-trigger-variable-scope.md) — exact sources independently accepted; both AST forms preserve valid candidate identity and reject local binders, 12 new plus 3 preserved cases per owner and generic compiler recovery confirmed; formatter timeout/retry warnings retained.
 
 - [Native proof-input projection integration](definition-proof-inputs.md) — historical 2026-10-15 five-file source match, local build/format, and independent Core21/Driver6/interface acceptance; on 2026-10-16 the command-test path was removed, leaving four of five manifest paths. Prior Driver6/6 is not current validation; see the [cleanup plan](../plan/2026-10-16-remove-proof-input-tempdir-tests.md). The [scope-limits review](../plan/2026-10-16-proof-input-scope-limits.md) distinguishes raw translation from later preprocessing; unused-procedure filtering is not selected. Historical binary freeze and four build warnings retained; image/paid gates parent-owned.

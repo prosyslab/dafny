@@ -14,7 +14,7 @@ namespace DafnyTestGeneration.Test;
 
 public class ContractRuntimeLibraryTests {
   // SHA-256 of the Dafny text pinned after the Runtime/Smt role renaming; changing the file changes source-set hashes.
-  private const string DafnySourceSha256 = "b858e89cca9f646e394eb5049cc3b1e481a6c4a07ca8bbfc269cfbbfa335aaa0";
+  private const string DafnySourceSha256 = "adcd11f333a7086255e3736b212dbd613737f7b6af084f64f86545cf76d5425e";
 
   private static string Sha256(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
 

@@ -2,6 +2,8 @@
 
 # Native Dafny plans
 
+- [PBT random API bounds and Unicode scalar draws](2026-10-20-pbt-random-api.md) — done; corrected normalized resource hash, native API/runtime fix and 23 independently checked pure-memory cases; parent owns requested commit/integration.
+
 - [Clarify native proof-input projection limits](2026-10-16-proof-input-scope-limits.md) — done; source/documentation boundary independently accepted after a pruning-scope wording correction. No producer change, native execution or claim of false-proof acceptance.
 
 - [Remove command tests that create temporary directories](2026-10-16-remove-proof-input-tempdir-tests.md) — done; six-case source removed and static scope independently accepted after historical wiki wording correction. No runtime change or test/build execution.
