@@ -1,3 +1,5 @@
+- [Generator proof helpers](pbt-generator-proof-helpers.md) — exact complete sidecar placement and checked transitive helper closure; independent native proof/runtime controls accepted.
+
 - [Exact generator admission proof boundary](pbt-generator-proof-integrity.md) — accepted locally; analyzer reuse, full source/scope/options binding and internal certificate authority, with independent native controls.
 
 2026-10-19: [PBT trusted source snapshots](pbt-trusted-sources.md) records exact source/digest trust binding and retained runtime/type/heap admission; combined-tree source independently accepted on base `29da48b6`, focused tests15/15; see the [owner plan](../plan/2026-10-19-pbt-trusted-sources.md).
