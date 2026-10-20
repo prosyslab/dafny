@@ -92,6 +92,11 @@ namespace Microsoft.Dafny {
 
   public class DafnyOptions : Bpl.CommandLineOptions {
 
+    private const int MaximumDetachedOptionCollectionItems = 1_000_000;
+    private const int MaximumDetachedLibraryItems = 4096;
+    private const int MaximumDetachedOptionBudgetItems = 8192;
+    private const long MaximumDetachedOptionCollectionCharacters = 8L * 1024 * 1024;
+
     public TextWriter BaseOutputWriter => base.OutputWriter;
 
     public new IDafnyOutputWriter OutputWriter =>
@@ -380,7 +385,8 @@ namespace Microsoft.Dafny {
     public string DafnyPrelude = null;
     public string DafnyPrintFile = null;
     public bool AllowSourceFolders = false;
-    public List<string> SourceFolders { get; } = []; // list of folders, for those commands that permit processing all source files in folders
+    private List<string> sourceFolders = [];
+    public List<string> SourceFolders => sourceFolders; // list of folders, for those commands that permit processing all source files in folders
 
     public enum ContractTestingMode {
       None,
@@ -510,9 +516,12 @@ namespace Microsoft.Dafny {
     /// <summary>
     /// Automatic shallow-copy constructor
     /// </summary>
-    public DafnyOptions(DafnyOptions src, bool useNullWriters = false) : this(
+    public DafnyOptions(DafnyOptions src, bool useNullWriters = false) : this(src, useNullWriters, false) {
+    }
+
+    private DafnyOptions(DafnyOptions src, bool useNullWriters, bool preserveFreshMutableContainers) : this(
       src.Input, src.BaseOutputWriter, src.ErrorWriter) {
-      src.CopyTo(this, useNullWriters);
+      src.CopyTo(this, useNullWriters, preserveFreshMutableContainers);
       CliRootSourceUris = new List<Uri>(src.CliRootSourceUris);
       ProverOptions = [.. src.ProverOptions];
       Options = new Options(
@@ -520,11 +529,315 @@ namespace Microsoft.Dafny {
         src.Options.Arguments.ToDictionary(kv => kv.Key, kv => kv.Value));
     }
 
-    private void CopyTo(DafnyOptions dst, bool useNullWriters) {
+    /// <summary>
+    /// Creates a detached copy of supported option state with fresh mutable collections and the built-in C# backend.
+    /// Returns false for unsupported option, backend or test-generation representations.
+    /// </summary>
+    public bool TryCreateDetachedSnapshot(out DafnyOptions snapshot, out string failure) {
+      if (GetType() != typeof(DafnyOptions) || Backend?.GetType() != typeof(CsharpBackend) ||
+          !TryCopyTestGenerationOptions(out var detachedTestGenOptions)) {
+        snapshot = null;
+        failure = "Only exact DafnyOptions instances with the built-in C# backend and supported test-generation settings can be detached.";
+        return false;
+      }
+      try {
+        if (!TryMeasureDetachedOptionTextBudget(out _) ||
+            Options.OptionArguments.Count > MaximumDetachedOptionCollectionItems ||
+            Options.Arguments.Count > MaximumDetachedOptionCollectionItems ||
+            UseResolvedProgram.Count != 0 || Cho.Count != 0 ||
+            !TryCopyStrings(ProverOptions, out var proverOptions) ||
+            !TryCopyStrings(ProcsToCheck, out var proceduresToCheck) ||
+            !TryCopyStrings(ProcsToIgnore, out var proceduresToIgnore) ||
+            !TryCopyStrings(sourceFolders, out var detachedSourceFolders) ||
+            !TryCopyStrings(DafnyPrintExportedViews, out var detachedExportedViews) ||
+            !TryCopyStrings(MainArgs, out var detachedMainArgs) ||
+            !TryCopyUris(CliRootSourceUris, out var detachedRootUris) ||
+            !TryCopyStrings(AdditionalPluginArguments, out var detachedPluginArguments) ||
+            !TryCopyLibraryFiles(Libraries, out var detachedLibraries) ||
+            !TryCopyLibraryFiles(LibraryFiles, out var detachedLibraryFiles) ||
+            AdditionalPlugins.Count > MaximumDetachedOptionCollectionItems ||
+            cliPluginCache?.Count > MaximumDetachedOptionCollectionItems) {
+          snapshot = null;
+          failure = "An option collection exceeds the bounded detached snapshot policy.";
+          return false;
+        }
+        snapshot = new DafnyOptions(this, useNullWriters: false, preserveFreshMutableContainers: true);
+        snapshot.CliRootSourceUris = detachedRootUris;
+        snapshot.Libraries = detachedLibraries;
+        snapshot.ProverOptions = proverOptions;
+        snapshot.ProcsToCheck = proceduresToCheck;
+        snapshot.ProcsToIgnore = proceduresToIgnore;
+        snapshot.sourceFolders = detachedSourceFolders;
+        snapshot.DafnyPrintExportedViews = detachedExportedViews;
+        snapshot.MainArgs = detachedMainArgs;
+        snapshot.LibraryFiles = detachedLibraryFiles;
+        snapshot.AdditionalPlugins = new List<Plugin>(AdditionalPlugins);
+        snapshot.AdditionalPluginArguments = detachedPluginArguments;
+        snapshot.cliPluginCache = cliPluginCache == null ? null : new List<Plugin>(cliPluginCache);
+        snapshot.testGenOptions = detachedTestGenOptions;
+
+        if (!TryCopyOptionValues(Options.OptionArguments, out var copiedOptionValues, out failure) ||
+            !TryCopyArgumentValues(Options.Arguments, out var copiedArgumentValues, out failure)) {
+          snapshot = null;
+          return false;
+        }
+        snapshot.Options = new Options(copiedOptionValues, copiedArgumentValues);
+        failure = "";
+        return true;
+      } catch (InvalidOperationException) {
+        snapshot = null;
+        failure = "An option collection changed while its detached snapshot was being created.";
+        return false;
+      } catch (ArgumentException) {
+        snapshot = null;
+        failure = "An option collection contains a value that cannot be detached safely.";
+        return false;
+      } catch (NotSupportedException) {
+        snapshot = null;
+        failure = "An option collection contains a value that cannot be detached safely.";
+        return false;
+      } catch (IOException) {
+        snapshot = null;
+        failure = "An option path could not be represented in a detached snapshot.";
+        return false;
+      }
+    }
+
+    private bool TryMeasureDetachedOptionTextBudget(out string failure) {
+      long characters = 0;
+      var items = 0;
+      bool AddItem(string text) {
+        if (++items > MaximumDetachedOptionBudgetItems) { return false; }
+        characters += text?.Length ?? 0;
+        return characters <= MaximumDetachedOptionCollectionCharacters;
+      }
+      bool AddStrings(IEnumerable<string> values) {
+        foreach (var value in values) {
+          if (value == null || !AddItem(value)) { return false; }
+        }
+        return true;
+      }
+      bool AddUris(IEnumerable<Uri> values) {
+        foreach (var value in values) {
+          if (value == null || !AddItem(value.OriginalString)) { return false; }
+        }
+        return true;
+      }
+      bool AddFiles(IEnumerable<FileInfo> values) {
+        foreach (var value in values) {
+          if (value == null || !AddItem(value.FullName)) { return false; }
+        }
+        return true;
+      }
+      bool AddOptionValue(object value, int depth) {
+        if (depth > 24) { return false; }
+        switch (value) {
+          case null:
+            return AddItem(null);
+          case string text:
+            return AddItem(text);
+          case FileInfo file:
+            return AddItem(file.FullName);
+          case Uri uri:
+            return AddItem(uri.OriginalString);
+          case string[] strings:
+            return AddStrings(strings);
+          case FileInfo[] files:
+            return AddFiles(files);
+          case List<string> strings:
+            return AddStrings(strings);
+          case List<FileInfo> files:
+            return AddFiles(files);
+          default:
+            return AddItem(null);
+        }
+      }
+
+      var directStrings = new[] { DafnyPrelude, DafnyPrintFile, DafnyPrintResolvedFile, CompilerName,
+        DafnyPrintCompiledFile, CoverageLegendFile, MainMethod, AutoReqPrintFile, MethodsToTest,
+        SolverIdentifier, ProverPreamble, StagedHoudini, VariableDependenceIgnore, ProverDllName };
+      foreach (var value in directStrings) {
+        if (!AddItem(value)) {
+          failure = "Verifier option text exceeds the detached snapshot character or item budget.";
+          return false;
+        }
+      }
+      if (testGenOptions != null && (!AddItem(testGenOptions.PrintBpl) || !AddItem(testGenOptions.CoverageReport))) {
+        failure = "Verifier option text exceeds the detached snapshot character or item budget.";
+        return false;
+      }
+      if (!AddStrings(ProverOptions) || !AddStrings(ProcsToCheck) ||
+          !AddStrings(ProcsToIgnore) || !AddStrings(sourceFolders) || !AddStrings(DafnyPrintExportedViews) ||
+          !AddStrings(MainArgs) || !AddStrings(AdditionalPluginArguments) || !AddUris(CliRootSourceUris) ||
+          !AddStrings(Libraries) || !AddStrings(LibraryFiles)) {
+        failure = "Verifier option text exceeds the detached snapshot character or item budget.";
+        return false;
+      }
+      foreach (var (option, value) in Options.OptionArguments) {
+        if (!AddItem(option.Name) || !AddOptionValue(value, 0)) {
+          failure = "Verifier option text exceeds the detached snapshot character or item budget.";
+          return false;
+        }
+      }
+      foreach (var (argument, value) in Options.Arguments) {
+        if (!AddItem(argument.Name) || !AddOptionValue(value, 0)) {
+          failure = "Verifier option text exceeds the detached snapshot character or item budget.";
+          return false;
+        }
+      }
+      if (AdditionalPlugins.Count > MaximumDetachedOptionBudgetItems ||
+          (cliPluginCache?.Count ?? 0) > MaximumDetachedOptionBudgetItems) {
+        failure = "Verifier plugin settings exceed the detached snapshot item budget.";
+        return false;
+      }
+      failure = "";
+      return true;
+    }
+
+    private static bool TryCopyStrings(IEnumerable<string> source, out List<string> copy) {
+      copy = [];
+      var itemCount = source switch {
+        List<string> list => list.Count,
+        string[] array => array.Length,
+        _ => -1
+      };
+      if (itemCount < 0 || itemCount > MaximumDetachedOptionCollectionItems) { return false; }
+      long characters = 0;
+      foreach (var value in source) {
+        if (copy.Count == MaximumDetachedOptionCollectionItems || value == null) { return false; }
+        characters += value.Length;
+        if (characters > MaximumDetachedOptionCollectionCharacters) { return false; }
+        copy.Add(value);
+      }
+      return true;
+    }
+
+    private static bool TryCopyUris(IList<Uri> source, out List<Uri> copy) {
+      copy = [];
+      if (source is not List<Uri> && source is not Uri[] || source.Count > MaximumDetachedOptionCollectionItems) { return false; }
+      long characters = 0;
+      foreach (var value in source) {
+        if (copy.Count == MaximumDetachedOptionCollectionItems || value == null) { return false; }
+        characters += value.OriginalString.Length;
+        if (characters > MaximumDetachedOptionCollectionCharacters) { return false; }
+        copy.Add(value);
+      }
+      return true;
+    }
+
+    private static bool TryCopyLibraryFiles(HashSet<string> source, out HashSet<string> copy) {
+      var comparer = source.Comparer;
+      if (!ReferenceEquals(comparer, EqualityComparer<string>.Default) &&
+          !ReferenceEquals(comparer, StringComparer.Ordinal) &&
+          !ReferenceEquals(comparer, StringComparer.OrdinalIgnoreCase) &&
+          !ReferenceEquals(comparer, StringComparer.InvariantCulture) &&
+          !ReferenceEquals(comparer, StringComparer.InvariantCultureIgnoreCase)) {
+        copy = [];
+        return false;
+      }
+      copy = new HashSet<string>(comparer);
+      long characters = 0;
+      foreach (var value in source) {
+        if (copy.Count == MaximumDetachedLibraryItems || value == null) { return false; }
+        characters += value.Length;
+        if (characters > MaximumDetachedOptionCollectionCharacters) { return false; }
+        copy.Add(value);
+      }
+      return true;
+    }
+
+    private static bool TryCopyOptionValues(Dictionary<Option, object> source,
+      out Dictionary<Option, object> copy, out string failure) {
+      copy = new Dictionary<Option, object>(source.Count);
+      foreach (var (option, value) in source) {
+        if (!TryCopyOptionValue(value, out var detached)) {
+          failure = "Option value for '" + option.Name + "' has an unsupported mutable representation.";
+          return false;
+        }
+        copy.Add(option, detached);
+      }
+      failure = "";
+      return true;
+    }
+
+    private static bool TryCopyArgumentValues(Dictionary<Argument, object> source,
+      out Dictionary<Argument, object> copy, out string failure) {
+      copy = new Dictionary<Argument, object>(source.Count);
+      foreach (var (argument, value) in source) {
+        if (!TryCopyOptionValue(value, out var detached)) {
+          failure = "Argument value for '" + argument.Name + "' has an unsupported mutable representation.";
+          return false;
+        }
+        copy.Add(argument, detached);
+      }
+      failure = "";
+      return true;
+    }
+
+    private static bool TryCopyOptionValue(object value, out object detached) {
+      switch (value) {
+        case null:
+          detached = null;
+          return true;
+        case string or bool or byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal:
+        case char or DateTime or DateTimeOffset or TimeSpan or Guid or System.Version or Uri or System.Type:
+        case Enum:
+          detached = value;
+          return true;
+        case FileInfo file:
+          if (file.ToString().Length > MaximumDetachedOptionCollectionCharacters) {
+            detached = null;
+            return false;
+          }
+          detached = new FileInfo(file.FullName);
+          return true;
+        case string[] strings when TryCopyStrings(strings, out var copiedStrings):
+          detached = copiedStrings.ToArray();
+          return true;
+        case FileInfo[] files when TryCopyFiles(files, out var copiedFiles):
+          detached = copiedFiles.ToArray();
+          return true;
+        case List<string> strings when TryCopyStrings(strings, out var copiedListStrings):
+          detached = copiedListStrings;
+          return true;
+        case List<FileInfo> files when TryCopyFiles(files, out var copiedListFiles):
+          detached = copiedListFiles;
+          return true;
+        default:
+          detached = null;
+          return false;
+      }
+    }
+
+    private static bool TryCopyFiles(IEnumerable<FileInfo> source, out List<FileInfo> copy) {
+      copy = [];
+      long characters = 0;
+      foreach (var file in source) {
+        if (copy.Count == MaximumDetachedOptionCollectionItems || file == null) { return false; }
+        if (file.ToString().Length > MaximumDetachedOptionCollectionCharacters) { return false; }
+        var path = file.FullName;
+        characters += path.Length;
+        if (characters > MaximumDetachedOptionCollectionCharacters) { return false; }
+        copy.Add(new FileInfo(path));
+      }
+      return true;
+    }
+
+    private void CopyTo(DafnyOptions dst, bool useNullWriters) => CopyTo(dst, useNullWriters, false);
+
+    private void CopyTo(DafnyOptions dst, bool useNullWriters, bool preserveFreshMutableContainers) {
       var type = typeof(DafnyOptions);
       while (type != null) {
         var fields = type.GetFields(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
         foreach (var fi in fields) {
+          if (preserveFreshMutableContainers && fi.DeclaringType == typeof(Bpl.CommandLineOptions) &&
+              IsFreshDetachedContainerField(fi.Name)) {
+            continue;
+          }
+          if (preserveFreshMutableContainers && fi.DeclaringType == typeof(DafnyOptions) &&
+              fi.Name is nameof(Backend) or nameof(testGenOptions)) {
+            continue;
+          }
           var value = fi.GetValue(this);
           // This hacky code is necessary until we switch to a Boogie version that implements https://github.com/boogie-org/boogie/pull/788
           if (useNullWriters && fi.Name is "<ErrorWriter>k__BackingField" or "<OutputWriter>k__BackingField") {
@@ -534,10 +847,41 @@ namespace Microsoft.Dafny {
         }
         type = type.BaseType;
       }
+      if (preserveFreshMutableContainers) {
+        dst.Ai.J_Intervals = Ai.J_Intervals;
+        dst.Ai.J_Trivial = Ai.J_Trivial;
+        dst.Ai.DebugStatistics = Ai.DebugStatistics;
+        dst.Ai.StepsBeforeWidening = Ai.StepsBeforeWidening;
+        dst.Cho = new List<Bpl.CoreOptions.ConcurrentHoudiniOptions>();
+      }
     }
+
+    private static bool IsFreshDetachedContainerField(string fieldName) =>
+      fieldName == "<" + nameof(Bpl.CommandLineOptions.Ai) + ">k__BackingField" ||
+      fieldName == "<" + nameof(Bpl.CommandLineOptions.UseResolvedProgram) + ">k__BackingField" ||
+      fieldName == "<" + nameof(Bpl.CommandLineOptions.Libraries) + ">k__BackingField" ||
+      fieldName == "<" + nameof(Bpl.CommandLineOptions.Cho) + ">k__BackingField";
 
     public virtual TestGenerationOptions TestGenOptions =>
       testGenOptions ??= new TestGenerationOptions();
+
+    /// <summary>Copies the lazily initialized test-generation settings without materializing absent settings.</summary>
+    public bool TryCopyTestGenerationOptions([CanBeNull] out TestGenerationOptions copy) {
+      copy = null;
+      if (GetType() != typeof(DafnyOptions)) { return false; }
+      if (testGenOptions == null) { return true; }
+      if (testGenOptions.GetType() != typeof(TestGenerationOptions)) { return false; }
+      copy = new TestGenerationOptions {
+        WarnDeadCode = testGenOptions.WarnDeadCode,
+        IgnoreWarnings = testGenOptions.IgnoreWarnings,
+        Mode = testGenOptions.Mode,
+        SeqLengthLimit = testGenOptions.SeqLengthLimit,
+        PrintBpl = testGenOptions.PrintBpl,
+        ForcePrune = testGenOptions.ForcePrune,
+        CoverageReport = testGenOptions.CoverageReport
+      };
+      return true;
+    }
 
     protected override bool ParseOption(string name, Bpl.CommandLineParseState ps) {
       if (ParseDafnySpecificOption(name, ps)) {

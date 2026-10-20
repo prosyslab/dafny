@@ -21,12 +21,59 @@ public static class ContractRuntimeCampaignRunner {
     string SourcePath, string CanonicalSourcePath, string QueryName, string Role, int SampleOrdinal,
     string QueryArtifact, string ResultArtifact, string ResultSha256, ContractQueryOutcome Outcome);
 
-  public static ContractRuntimeCampaignResult Failure(ContractRuntimeStatus status, string reason, string seed = "") =>
-    new(ContractJson.SchemaVersion, status, reason, seed, new(), [], [], [], [], null, [], []);
+  /// <summary>Creates an evidence-free diagnostic with the selected runtime result schema.</summary>
+  public static ContractRuntimeCampaignResult Failure(ContractRuntimeStatus status, string reason, string seed = "",
+    bool proveGeneratorPreconditions = false) =>
+    new(ContractRuntimeCampaignSchema.ResultVersion(proveGeneratorPreconditions), status, reason, seed,
+      new(), [], [], [], [], null, [], [], GeneratorProof: proveGeneratorPreconditions ? NotAttemptedGeneratorProof() : null);
+
+  internal static int GeneratorProofBudgetMilliseconds(int campaignTimeoutMilliseconds, long elapsedMilliseconds) {
+    var remaining = (long)campaignTimeoutMilliseconds - elapsedMilliseconds;
+    return remaining <= 1 ? 0 : (int)Math.Min(10_000L, remaining / 2);
+  }
+
+  private static ContractRuntimeGeneratorProofResult NotAttemptedGeneratorProof() =>
+    new(ContractRuntimeGeneratorProofStatus.NotAttempted, "", false, 0, 0, 0);
+
+  internal static ContractRuntimeGeneratorProofResult GeneratorProofResult(ContractGeneratorProofReport? report,
+    bool entryRequiresOmitted, int elapsedMilliseconds) {
+    if (report == null) { return NotAttemptedGeneratorProof(); }
+    var required = report.RequiredNativeChecks.Distinct(StringComparer.Ordinal).ToHashSet(StringComparer.Ordinal);
+    var covered = report.CoveredNativeChecks.Distinct(StringComparer.Ordinal).ToHashSet(StringComparer.Ordinal);
+    var status = report.Status switch {
+      ContractGeneratorProofStatus.Verified => ContractRuntimeGeneratorProofStatus.Verified,
+      ContractGeneratorProofStatus.Failed => ContractRuntimeGeneratorProofStatus.Failed,
+      ContractGeneratorProofStatus.Unsupported => ContractRuntimeGeneratorProofStatus.Unsupported,
+      ContractGeneratorProofStatus.TimedOut => ContractRuntimeGeneratorProofStatus.TimedOut,
+      ContractGeneratorProofStatus.Cancelled => ContractRuntimeGeneratorProofStatus.Cancelled,
+      _ => ContractRuntimeGeneratorProofStatus.Unsupported
+    };
+    var diagnostics = report.Diagnostics ?? "";
+    var complete = required.Count > 0 && required.SetEquals(covered);
+    if (status == ContractRuntimeGeneratorProofStatus.Verified && (!entryRequiresOmitted || !complete)) {
+      status = ContractRuntimeGeneratorProofStatus.Unsupported;
+      diagnostics = string.Join("\n", new[] { diagnostics,
+        !entryRequiresOmitted ? "The verified certificate did not match and omit the selected entry requires clauses." :
+          "The verified report did not contain complete positive native check coverage." }.Where(text => text.Length > 0));
+    }
+    return new(status, BoundGeneratorProofDiagnostics(diagnostics),
+      status == ContractRuntimeGeneratorProofStatus.Verified && entryRequiresOmitted,
+      required.Count, covered.Count, Math.Max(0, elapsedMilliseconds));
+  }
+
+  private static string BoundGeneratorProofDiagnostics(string diagnostics) {
+    const string suffix = "...[truncated]";
+    return diagnostics.Length <= 8192 ? diagnostics : diagnostics[..(8192 - suffix.Length)] + suffix;
+  }
 
   public static async Task<ContractRuntimeCampaignResult> RunAsync(ContractRuntimeCampaignRequest request,
     DafnyOptions options, string directory, CancellationToken cancellationToken) {
     Validate(request);
+    ContractGeneratorProofReport? generatorProofReport = null;
+    var generatorProofElapsedMilliseconds = 0;
+    var generatorProofResult = request.ProveGeneratorPreconditions ? NotAttemptedGeneratorProof() : null;
+    ContractRuntimeCampaignResult CampaignFailure(ContractRuntimeStatus status, string reason) =>
+      Failure(status, reason, request.Seed, request.ProveGeneratorPreconditions) with { GeneratorProof = generatorProofResult };
     var clock = Stopwatch.StartNew();
     var phases = new ContractPhaseRecorder(Path.Combine(directory, "campaign-phases.jsonl"));
     var profile = new ContractProfileRecorder(Path.Combine(directory, "campaign-profile.json"));
@@ -37,11 +84,11 @@ public static class ContractRuntimeCampaignRunner {
     var reporter = new BatchErrorReporter(options);
     var program = await ContractSourceSnapshot.ParseAsync(reporter, request.Sources, cancellationToken,
       phaseObserver: (phase, state) => phases.Record("original:" + phase, state));
-    if (reporter.ErrorCount > 0) { return Failure(ContractRuntimeStatus.Error, Diagnostics(reporter), request.Seed); }
+    if (reporter.ErrorCount > 0) { return CampaignFailure(ContractRuntimeStatus.Error, Diagnostics(reporter)); }
     var goal = ContractCallableSelector.SelectMethod(program, request.Entry, requireConcreteReceiver: false, allowLemmaContract: true);
     var lemmaContract = goal is Lemma;
     if (!lemmaContract && (goal.FunctionFromWhichThisIsByMethodDecl is { ByMethodBody: null } || goal.Body == null)) {
-      return Failure(ContractRuntimeStatus.Unsupported, "Runtime goals require an implemented method or function-by-method.", request.Seed);
+      return CampaignFailure(ContractRuntimeStatus.Unsupported, "Runtime goals require an implemented method or function-by-method.");
     }
     var originalProgram = program;
     var source = ContractSourceSnapshot.Find(request.Sources, goal.Origin.Uri);
@@ -53,15 +100,15 @@ public static class ContractRuntimeCampaignRunner {
       "method {:pbt_generator \"" + goal.FullDafnyName + "\"} Generate(r: PbtRandom.Source) returns (" +
       string.Join(", ", (goal.IsStatic ? Enumerable.Empty<string>() : ["receiver: " + goal.EnclosingClass.Name]).Concat(goal.Ins.Select(f => f.Name + ": " + f.Type))) + ")") : null;
     if (missing.Count > 0 || generator != null) {
-      return Failure(missing.Count > 0 ? ContractRuntimeStatus.DraftsRequired : ContractRuntimeStatus.GeneratorRequired,
-        missing.Count > 0 ? "Reachable implementations require drafts." : "The goal requires a generator.", request.Seed) with {
+      return CampaignFailure(missing.Count > 0 ? ContractRuntimeStatus.DraftsRequired : ContractRuntimeStatus.GeneratorRequired,
+        missing.Count > 0 ? "Reachable implementations require drafts." : "The goal requires a generator.") with {
         MissingDrafts = missing,
         MissingGenerator = generator
       };
     }
     foreach (var formal in goal.Ins) {
       if (!ContractRuntimeObligationTransformer.CompilableType(formal.Type)) {
-        return Failure(ContractRuntimeStatus.Unsupported, "non_compilable_input_type: " + formal.Name, request.Seed);
+        return CampaignFailure(ContractRuntimeStatus.Unsupported, "non_compilable_input_type: " + formal.Name);
       }
     }
     phases.Record("source_preparation", "started");
@@ -71,7 +118,7 @@ public static class ContractRuntimeCampaignRunner {
     var visibilityReporter = new BatchErrorReporter(options);
     var visibilityProgram = await ContractSourceSnapshot.ParseAsync(visibilityReporter, sourcePreparation.Sources, cancellationToken, resolve: false,
       phaseObserver: (phase, state) => phases.Record("visibility:" + phase, state));
-    if (visibilityReporter.ErrorCount > 0) { return Failure(ContractRuntimeStatus.Unsupported, Diagnostics(visibilityReporter), request.Seed); }
+    if (visibilityReporter.ErrorCount > 0) { return CampaignFailure(ContractRuntimeStatus.Unsupported, Diagnostics(visibilityReporter)); }
     var runtimeSource = ContractRuntimeInstrumentation.DafnySource;
     var snapshots = ContractRuntimeObligationTransformer.MakeGeneratorVisible(visibilityProgram, sourcePreparation.Sources, new HashSet<string>()).ToList();
     snapshots.Add(new("PbtRuntime.dfy", runtimeSource, ContractHarnessBuilder.Hash(runtimeSource)));
@@ -85,8 +132,8 @@ public static class ContractRuntimeCampaignRunner {
     await File.WriteAllTextAsync(Path.Combine(directory, "reachability-diagnostics.txt"),
       string.Join("\n", deferred.Select(diagnostic => diagnostic.Message)), cancellationToken);
     if (reporter.ErrorCount > 0) {
-      return Failure(ContractRuntimeStatus.Unsupported, "Draft or generator resolution failed: " +
-        Diagnostics(reporter, sourcePreparation.SourceMap), request.Seed);
+      return CampaignFailure(ContractRuntimeStatus.Unsupported, "Draft or generator resolution failed: " +
+        Diagnostics(reporter, sourcePreparation.SourceMap));
     }
     goal = ContractCallableSelector.SelectMethod(program, request.Entry, requireConcreteReceiver: false, allowLemmaContract: true);
     ContractDiagnosticConstruction.AuditResolved(program, goal, sourcePreparation.DiagnosticConstructors ?? new HashSet<string>());
@@ -95,7 +142,18 @@ public static class ContractRuntimeCampaignRunner {
     var unresolved = MissingDrafts(program, snapshots, goal, [], sourcePreparation.SourceMap)
       .Concat(MissingDrafts(program, snapshots, generatedMethod, [], sourcePreparation.SourceMap)).DistinctBy(d => d.Symbol).ToList();
     if (unresolved.Count > 0) {
-      return Failure(ContractRuntimeStatus.DraftsRequired, "A draft or generator reaches further missing implementations.", request.Seed) with { MissingDrafts = unresolved };
+      return CampaignFailure(ContractRuntimeStatus.DraftsRequired, "A draft or generator reaches further missing implementations.") with { MissingDrafts = unresolved };
+    }
+    if (request.ProveGeneratorPreconditions) {
+      var proofBudget = GeneratorProofBudgetMilliseconds(request.TimeoutMilliseconds, clock.ElapsedMilliseconds);
+      if (proofBudget > 0) {
+        var proofClock = Stopwatch.StartNew();
+        generatorProofReport = await ContractGeneratorProof.TryProveAsync(program, snapshots, goal, generatedMethod,
+          options, proofBudget, cancellationToken);
+        generatorProofElapsedMilliseconds = (int)Math.Min(int.MaxValue, proofClock.ElapsedMilliseconds);
+        cancellationToken.ThrowIfCancellationRequested();
+        generatorProofResult = GeneratorProofResult(generatorProofReport, false, generatorProofElapsedMilliseconds);
+      }
     }
     ContractRuntimeTransformation transformation = null!;
     var rejectedDeclarations = new Dictionary<string, string>();
@@ -105,7 +163,12 @@ public static class ContractRuntimeCampaignRunner {
     for (var attempt = 0; ; attempt++) {
       phases.Record("transformation:" + attempt, "started");
       transformation = new ContractRuntimeObligationTransformer(program, snapshots, goal, sourcePreparation.SourceMap, rejectedDeclarations, decisionCaps,
-        sourcePreparation.DiagnosticConstructors, ContractRuntimeTypeEvidence.SourceSetHash(request.Sources)).Transform();
+        sourcePreparation.DiagnosticConstructors, ContractRuntimeTypeEvidence.SourceSetHash(request.Sources),
+        generatorProof: generatorProofReport).Transform();
+      if (request.ProveGeneratorPreconditions) {
+        generatorProofResult = GeneratorProofResult(generatorProofReport, transformation.EntryRequiresOmitted,
+          generatorProofElapsedMilliseconds);
+      }
       phases.Record("transformation:" + attempt, "completed");
       Directory.CreateDirectory(directory);
       await WriteJsonAsync(Path.Combine(directory, "transformed-sources.json"), transformation.Sources);
@@ -130,7 +193,7 @@ public static class ContractRuntimeCampaignRunner {
         continue;
       }
       if (transformedProgram.ModuleSigs == null) {
-        return Failure(ContractRuntimeStatus.Unsupported, "Diagnostic parsing failed: " + Diagnostics(transformedReporter), request.Seed) with {
+        return CampaignFailure(ContractRuntimeStatus.Unsupported, "Diagnostic parsing failed: " + Diagnostics(transformedReporter)) with {
           DeghostExclusions = transformation.Exclusions
         };
       }
@@ -169,7 +232,7 @@ public static class ContractRuntimeCampaignRunner {
         }
       }
       if (!added || attempt >= maximumAttempts - 1) {
-        return Failure(ContractRuntimeStatus.Unsupported, "Diagnostic resolution failed: " + Diagnostics(transformedReporter), request.Seed) with {
+        return CampaignFailure(ContractRuntimeStatus.Unsupported, "Diagnostic resolution failed: " + Diagnostics(transformedReporter)) with {
           DeghostExclusions = transformation.Exclusions.Concat(rejectedDeclarations.Select(p => new ContractRuntimeDeghostExclusion(p.Key, p.Value))).Distinct().ToList()
         };
       }
@@ -177,7 +240,7 @@ public static class ContractRuntimeCampaignRunner {
     phases.Record("compilation", "started");
     var compile = await ContractCompilerWorker.CompileRuntimeAsync(transformation, request, directory, options, cancellationToken);
     phases.Record("compilation", "completed");
-    if (compile.Status != ContractTestStatus.Passed) { return Failure(ContractRuntimeStatus.Unsupported, compile.Reason, request.Seed); }
+    if (compile.Status != ContractTestStatus.Passed) { return CampaignFailure(ContractRuntimeStatus.Unsupported, compile.Reason); }
     var population = new ContractRuntimePopulation();
     // A check still absent from compiled code can never be evaluated; it is reported as unchecked, never as runtime.
     var obligations = transformation.Clauses.ToDictionary(c => c.Obligation.Id, c =>
@@ -490,9 +553,9 @@ public static class ContractRuntimeCampaignRunner {
       .GroupBy(violation => violation.ObligationId)
       .SelectMany(group => group.OrderBy(violation => JsonSerializer.Serialize(violation.Inputs, ContractJson.Options).Length)
         .ThenBy(violation => violation.SampleOrdinal).Take(request.MaxViolationsPerObligation)).ToList();
-    return new(1, status, reason, request.Seed, population, reportedObligations, reportedViolations,
+    return new(ContractRuntimeCampaignSchema.ResultVersion(request.ProveGeneratorPreconditions), status, reason, request.Seed, population, reportedObligations, reportedViolations,
       calleeViolations.OrderBy(violation => violation.SampleOrdinal).ToList(), [], null, transformation.Exclusions,
-      errors.OrderBy(error => error.SampleOrdinal).Take(20).ToList());
+      errors.OrderBy(error => error.SampleOrdinal).Take(20).ToList(), GeneratorProof: generatorProofResult);
 
     DafnyOptions ClosedQueryOptions() =>
       new(options) { TimeLimit = (uint)Math.Max(1, (request.ClosedQueryTimeoutMilliseconds + 999) / 1000) };
@@ -1099,7 +1162,7 @@ public static class ContractRuntimeCampaignRunner {
   }
 
   private static void Validate(ContractRuntimeCampaignRequest request) {
-    if (request.SchemaVersion != 2 || request.Sources == null || request.Sources.Count == 0 || request.Entry == null ||
+    if (request.SchemaVersion != ContractRuntimeCampaignSchema.RequestVersion(request.ProveGeneratorPreconditions) || request.Sources == null || request.Sources.Count == 0 || request.Entry == null ||
         !ulong.TryParse(request.Seed, NumberStyles.None, CultureInfo.InvariantCulture, out _) || request.SampleCount <= 0 ||
         request.SampleTimeoutMilliseconds <= 0 || request.TimeoutMilliseconds <= 0 ||
         request.ClosedQueryTimeoutMilliseconds <= 0 || request.MaxViolationsPerObligation <= 0 || request.ReplayOrdinal < 0) {

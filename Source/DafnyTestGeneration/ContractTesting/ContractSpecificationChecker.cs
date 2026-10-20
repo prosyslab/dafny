@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,6 +15,8 @@ using Declaration = Microsoft.Dafny.Declaration;
 using Function = Microsoft.Dafny.Function;
 using Program = Microsoft.Dafny.Program;
 using Type = Microsoft.Dafny.Type;
+
+[assembly: InternalsVisibleTo("DafnyTestGeneration.Test")]
 
 namespace DafnyTestGeneration.ContractTesting;
 
@@ -32,6 +35,8 @@ internal sealed record ContractSpecificationCheck(Declaration Declaration, Contr
 /// <summary>A closed set of original declarations whose contracts need native validation.</summary>
 public sealed class ContractSpecificationScope {
   internal HashSet<Declaration> Declarations { get; }
+  internal ContractGeneratorProofAudit? ProofAudit { get; }
+  internal string CurrentIdentity(string context) => context + "\n" + Role + "\n" + string.Join("\n", Symbols.Concat(RequiredNativeChecks));
   internal ContractSpecificationChecker Owner { get; }
   internal HashSet<ContractSpecificationCheck> Checks { get; }
   public ContractSpecificationRole Role { get; }
@@ -46,13 +51,15 @@ public sealed class ContractSpecificationScope {
   public bool ContainsDeclaration(Declaration declaration) => Declarations.Contains(declaration);
 
   internal ContractSpecificationScope(ContractSpecificationChecker owner, string context, ContractSpecificationRole role,
-    HashSet<Declaration> declarations, HashSet<ContractSpecificationCheck> checks, string? failure) {
+    HashSet<Declaration> declarations, HashSet<ContractSpecificationCheck> checks, string? failure,
+    ContractGeneratorProofAudit? proofAudit = null) {
     Owner = owner;
+    ProofAudit = proofAudit;
     Role = role;
     Declarations = declarations;
     Checks = checks;
     Failure = failure;
-    CacheIdentity = context + "\n" + role + "\n" + string.Join("\n", Symbols.Concat(RequiredNativeChecks));
+    CacheIdentity = CurrentIdentity(context);
   }
 }
 
@@ -64,6 +71,8 @@ public sealed record ContractSpecificationResult(bool Verified, string Diagnosti
   public string? TrustSetHash { get; init; }
   public ContractSequenceRefinementResult? SequenceRefinement { get; init; }
   public ContractSpecificationRole? Role { get; init; }
+  internal IReadOnlyList<string> CoveredNativeChecks { get; init; } = [];
+  internal IReadOnlyList<string> VerifiedImplementationChecks { get; init; } = [];
 }
 
 /// <summary>Source- and trust-bound independent global inhabitance evidence, separate from any captured state.</summary>
@@ -86,6 +95,8 @@ public sealed class ContractSpecificationChecker {
   private readonly string sourceSetHash;
   private readonly string trustSetHash;
   private ContractGlobalInhabitationCertificate? independentGlobals;
+  private readonly ContractPinnedSolverIdentity? proofSolver;
+  internal string? FinalNativeOptionsFingerprint { get; private set; }
 
   // Every scope is certified against the original sources with abstract-global axioms removed.
   private string ScopeContext => sourceSetHash + "/trusted-sources:" + trustSetHash +
@@ -93,11 +104,16 @@ public sealed class ContractSpecificationChecker {
 
   /// <summary>Creates a campaign-local checker bound to one immutable original source program.</summary>
   public ContractSpecificationChecker(Program original, IReadOnlyList<ContractSource> sources, DafnyOptions options,
-    IReadOnlyList<ContractDependency>? trustedSources = null) {
+    IReadOnlyList<ContractDependency>? trustedSources = null) : this(original, sources, options, null, trustedSources) {
+  }
+
+  internal ContractSpecificationChecker(Program original, IReadOnlyList<ContractSource> sources, DafnyOptions options,
+    ContractPinnedSolverIdentity? proofSolver, IReadOnlyList<ContractDependency>? trustedSources = null) {
     ContractSourceSnapshot.ValidateTrustedSources(sources, trustedSources);
     this.original = original;
     originalModules = original.RawModules().ToHashSet();
     this.sources = sources;
+    this.proofSolver = proofSolver;
     sourceSetHash = ContractRuntimeTypeEvidence.SourceSetHash(sources);
     trustSetHash = TrustSetHash(trustedSources);
     trustedSourceUris = (trustedSources ?? []).Select(source => ContractSourceSnapshot.UriFor(source.Path)).ToHashSet();
@@ -119,16 +135,34 @@ public sealed class ContractSpecificationChecker {
   public ContractSpecificationScope LogicalScope(IEnumerable<MethodOrFunction> roots, IEnumerable<Type>? types = null,
     IEnumerable<ConstantField>? constants = null) => CreateScope(ContractSpecificationRole.Logical, roots, types, constants);
 
+  internal ContractSpecificationScope AuditedProofScope(ContractSpecificationRole role,
+    IEnumerable<MethodOrFunction> roots, IEnumerable<Type>? types, IEnumerable<ConstantField>? constants,
+    ContractGeneratorProofAudit audit) {
+    if (audit.Failure != null) {
+      return UnsupportedScope(audit.Failure);
+    }
+    if (!audit.IsBoundTo(original, sources)) {
+      return UnsupportedScope("The proof audit is not bound to this exact resolved program and source set.");
+    }
+    return CreateScope(role, roots, types, constants, audit);
+  }
+
   internal ContractSpecificationScope UnsupportedScope(string reason) => new(this,
     ScopeContext, ContractSpecificationRole.Execution, [], [], reason);
 
   private ContractSpecificationScope CreateScope(ContractSpecificationRole role, IEnumerable<MethodOrFunction> roots,
-    IEnumerable<Type>? types, IEnumerable<ConstantField>? constants) {
+    IEnumerable<Type>? types, IEnumerable<ConstantField>? constants, ContractGeneratorProofAudit? audit = null) {
     var declarations = new HashSet<Declaration>();
     if (role == ContractSpecificationRole.Execution) {
       ContractRuntimeObligationTransformer.ExecutionReachable(original, roots, types, declarations, constants);
     } else {
       ContractRuntimeObligationTransformer.LogicalReachable(original, roots, types, declarations, constants);
+    }
+    if (audit != null && !audit.IsBoundTo(original, sources)) {
+      return new(this, ScopeContext, role, [], [], "The exact embedded RNG audit no longer matches the proof program.");
+    }
+    if (audit != null) {
+      declarations.RemoveWhere(audit.IsPinnedRngDeclaration);
     }
     declarations.RemoveWhere(declaration => Module(declaration) == original.SystemModuleManager.SystemModule ||
       declaration is not (MethodOrFunction or ConstantField or SubsetTypeDecl or NewtypeDecl) || declaration is NonNullTypeDecl ||
@@ -141,6 +175,14 @@ public sealed class ContractSpecificationChecker {
     var failure = trust.Count == 0 ? null : string.Join(", ", trust.Select(item => item.Symbol + ":" + item.Kind));
     foreach (var declaration in declarations) {
       if (!Owns(declaration)) { failure ??= "Declaration is not from the original resolved program: " + Name(declaration); }
+      if (audit != null) {
+        var retainedNodes = role == ContractSpecificationRole.Logical && declaration is MethodOrFunction callable
+          ? ContractRuntimeObligationTransformer.LogicalNodes(callable)
+          : declaration.Descendants();
+        if (retainedNodes.OfType<ExpectStmt>().Any()) {
+          failure ??= "unchecked expect statement in retained proof closure: " + Name(declaration);
+        }
+      }
       if (IsTrusted(declaration)) { continue; }
       if (role == ContractSpecificationRole.Logical && declaration is Function function) {
         if (function.Body == null) { failure ??= "bodyless logical function: " + Name(function); }
@@ -171,7 +213,7 @@ public sealed class ContractSpecificationChecker {
       if (declaration is ConstantField { Rhs: null }) { failure ??= "bodyless constant: " + Name(declaration); }
     }
     return new(this, ScopeContext, role, declarations,
-      declarations.Where(declaration => !IsTrusted(declaration)).SelectMany(NativeChecks).ToHashSet(), failure);
+      declarations.Where(declaration => !IsTrusted(declaration)).SelectMany(NativeChecks).ToHashSet(), failure, audit);
   }
 
   private bool IsTrusted(Declaration declaration) => trustedSourceUris.Contains(declaration.Origin.Uri);
@@ -301,6 +343,9 @@ public sealed class ContractSpecificationChecker {
   public async Task<ContractSpecificationResult> CheckModuleAsync(ContractSpecificationScope scope, string moduleName,
     CancellationToken cancellationToken, Action<string, string>? phaseObserver = null, long? deadlineTimestamp = null) {
     ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
+    if (proofSolver != null && !ContractGeneratorProof.HasExactTrustedVerifierFactory(options)) {
+      return new(false, "The proof checker does not carry the exact captured trusted Boogie verifier factory.", [], []);
+    }
     if (!BoundScope(scope)) { return new(false, "Specification scope is not bound to this original checker/source context.", [], []); }
     if (scope.Failure != null) { return new(false, scope.Failure, [], []); }
     var selected = scope.Checks.Where(check => Module(check.Declaration).FullDafnyName == moduleName &&
@@ -322,7 +367,29 @@ public sealed class ContractSpecificationChecker {
         }
       }
       verificationProgram = parsed;
-      options.ProcessSolverOptions(reporter, Microsoft.Dafny.Token.NoToken);
+      if (proofSolver == null) {
+        options.ProcessSolverOptions(reporter, Microsoft.Dafny.Token.NoToken);
+      } else {
+        var proverPaths = options.ProverOptions.Where(option => option.StartsWith("PROVER_PATH=", StringComparison.Ordinal))
+          .Select(option => option["PROVER_PATH=".Length..]).Distinct(StringComparer.Ordinal).ToList();
+        if (!StringComparer.Ordinal.Equals(proofSolver.Path, "/usr/bin/z3") || proverPaths.Count != 1 ||
+            !StringComparer.Ordinal.Equals(proverPaths[0], proofSolver.Path) ||
+            !Version.TryParse(proofSolver.Version, out var pinnedVersion) ||
+            options.SolverIdentifier is not (null or "Z3") || options.SolverVersion is not null && options.SolverVersion != pinnedVersion) {
+          verificationProgram = null;
+          return new(false, "The proof checker options do not match the exact pinned system Z3 identity.", [], []);
+        }
+        options.SetZ3Options(pinnedVersion);
+        if (!ContractGeneratorProof.HasExactTrustedVerifierFactory(options)) {
+          verificationProgram = null;
+          return new(false, "The proof checker verifier factory changed before native verification.", [], []);
+        }
+        if (!ContractGeneratorProof.TryOptionsFingerprint(options, out var nativeOptionsFingerprint)) {
+          verificationProgram = null;
+          return new(false, "The proof checker native options have no complete supported fingerprint.", [], []);
+        }
+        FinalNativeOptionsFingerprint = nativeOptionsFingerprint;
+      }
       if (reporter.ErrorCount != 0) {
         verificationProgram = null;
         return new(false, string.Join("\n", reporter.AllMessages.Select(message => message.Message)), [], []);
@@ -361,7 +428,16 @@ public sealed class ContractSpecificationChecker {
     if (selectedImplementations.Count == 0) {
       ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
       checkedChecks.UnionWith(selected);
-      return Evidence(new(true, globalContext + "\nNative declarations contain no assertions.", [], assertionFree));
+      return Evidence(new ContractSpecificationResult(true, globalContext + "\nNative declarations contain no assertions.", [], assertionFree) with {
+        CoveredNativeChecks = selected.Select(check => check.VerboseName).ToList()
+      });
+    }
+    if (proofSolver != null && !ContractGeneratorProof.IsPinnedSolverFileCurrent(proofSolver,
+          deadlineTimestamp, cancellationToken)) {
+      return Evidence(new(false, "The pinned Z3 executable changed before native verification.", implementationNames, []));
+    }
+    if (proofSolver != null && !ContractGeneratorProof.HasExactTrustedVerifierFactory(options)) {
+      return Evidence(new(false, "The proof checker verifier factory changed before native verification.", implementationNames, []));
     }
     using var engine = ExecutionEngine.CreateWithoutSharedCache(options);
     var log = new StringWriter();
@@ -369,12 +445,20 @@ public sealed class ContractSpecificationChecker {
       cancellationToken, () => DafnyMain.BoogieOnce(reporter!, options, log, engine,
         "contract-specification", module.SanitizedName, translated, null, cancellationToken));
     ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
+    var solverStillPinned = proofSolver == null || ContractGeneratorProof.IsPinnedSolverFileCurrent(proofSolver,
+      deadlineTimestamp, cancellationToken);
     var success = outcome is PipelineOutcome.Done or PipelineOutcome.VerificationCompleted &&
+      solverStillPinned && BoundScope(scope) &&
       stats.ErrorCount + stats.TimeoutCount + stats.InconclusiveCount + stats.OutOfResourceCount + stats.OutOfMemoryCount + stats.SolverExceptionCount == 0 &&
       stats.VerifiedCount == selectedImplementations.Count;
     ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
     if (success) { checkedChecks.UnionWith(selected); }
-    return Evidence(new(success, globalContext + "\n" + log, implementationNames, assertionFree, stats.VerifiedCount, stats.ErrorCount));
+    return Evidence(new ContractSpecificationResult(success, globalContext + "\n" + log, implementationNames, assertionFree,
+      stats.VerifiedCount, stats.ErrorCount) with {
+      CoveredNativeChecks = success ? selected.Select(check => check.VerboseName).ToList() : [],
+      VerifiedImplementationChecks = success ? selected.Where(check => selectedImplementations.Any(implementation =>
+        implementation.VerboseName == check.VerboseName)).Select(check => check.VerboseName).ToList() : []
+    });
 
     ContractSpecificationResult Evidence(ContractSpecificationResult result) => result with {
       SourceSetHash = sourceSetHash,
@@ -384,8 +468,27 @@ public sealed class ContractSpecificationChecker {
     };
   }
 
+  internal string? ResolvedSolverVersion(string expectedPath) {
+    if (proofSolver == null || !StringComparer.Ordinal.Equals(proofSolver.Path, expectedPath) ||
+        !ContractGeneratorProof.HasExactTrustedVerifierFactory(options) ||
+        !StringComparer.Ordinal.Equals(expectedPath, "/usr/bin/z3") ||
+        !StringComparer.Ordinal.Equals(options.SolverIdentifier, "Z3") ||
+        !Version.TryParse(proofSolver.Version, out var pinnedVersion) || options.SolverVersion != pinnedVersion ||
+        FinalNativeOptionsFingerprint == null ||
+        !ContractGeneratorProof.TryOptionsFingerprint(options, out var currentFingerprint) ||
+        !StringComparer.Ordinal.Equals(FinalNativeOptionsFingerprint, currentFingerprint)) {
+      return null;
+    }
+    var proverPaths = options.ProverOptions.Where(option => option.StartsWith("PROVER_PATH=", StringComparison.Ordinal))
+      .Select(option => option["PROVER_PATH=".Length..]).Distinct(StringComparer.Ordinal).ToList();
+    return proverPaths.Count == 1 && StringComparer.Ordinal.Equals(proverPaths[0], expectedPath)
+      ? options.SolverVersion.ToString() : null;
+  }
+
   private bool BoundScope(ContractSpecificationScope scope) => ReferenceEquals(scope.Owner, this) &&
-    sourceSetHash == ContractRuntimeTypeEvidence.SourceSetHash(sources);
+    sourceSetHash == ContractRuntimeTypeEvidence.SourceSetHash(sources) &&
+    scope.CacheIdentity == scope.CurrentIdentity(ScopeContext) &&
+    (scope.ProofAudit == null || scope.ProofAudit.IsBoundTo(original, sources));
 
   private bool Owns(Declaration declaration) => originalModules.Contains(Module(declaration)) && (declaration switch {
     Method { FunctionFromWhichThisIsByMethodDecl: { } function } method =>

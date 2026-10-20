@@ -37,6 +37,7 @@ public static class TestContractsCommand {
     var runtimeResultPath = context.ParseResult.GetValueForOption(RuntimeWorker);
     var runtimeRequested = context.ParseResult.GetValueForOption(RuntimeCheck) || runtimeResultPath != null;
     string runtimeSeed = "";
+    var runtimeProofRequested = false;
     object result;
     try {
       if (!runtimeRequested) {
@@ -46,6 +47,7 @@ public static class TestContractsCommand {
       var request = JsonSerializer.Deserialize<ContractRuntimeCampaignRequest>(json, ContractJson.Options)
         ?? throw new JsonException("Null runtime campaign request.");
       runtimeSeed = request.Seed;
+      runtimeProofRequested = request.ProveGeneratorPreconditions;
       result = runtimeResultPath != null
         ? await ContractRuntimeCampaignRunner.RunAsync(request, options, Path.GetDirectoryName(runtimeResultPath)!, cancellationToken)
         : await SuperviseRuntimeAsync(request, cancellationToken);
@@ -71,7 +73,7 @@ public static class TestContractsCommand {
     return 0;
 
     object Failure(ContractTestStatus status, string reason) =>
-      ContractRuntimeCampaignRunner.Failure(status == ContractTestStatus.Unsupported ? ContractRuntimeStatus.Unsupported : ContractRuntimeStatus.Error, reason, runtimeSeed);
+      ContractRuntimeCampaignRunner.Failure(status == ContractTestStatus.Unsupported ? ContractRuntimeStatus.Unsupported : ContractRuntimeStatus.Error, reason, runtimeSeed, runtimeProofRequested);
   }
 
   private static async Task<ContractRuntimeCampaignResult> SuperviseRuntimeAsync(ContractRuntimeCampaignRequest request,
@@ -91,11 +93,11 @@ public static class TestContractsCommand {
       resultPath], directory, timeout.Token);
     if (process.Cancelled) {
       return ContractRuntimeCampaignRunner.Failure(ContractRuntimeStatus.Inconclusive,
-        "Runtime campaign deadline expired or was cancelled; process tree reaped.", request.Seed);
+        "Runtime campaign deadline expired or was cancelled; process tree reaped.", request.Seed, request.ProveGeneratorPreconditions);
     }
     if (process.ExitCode != 0 || !File.Exists(resultPath)) {
       return ContractRuntimeCampaignRunner.Failure(ContractRuntimeStatus.Error,
-        "Runtime worker returned no structured result. " + process.StandardError, request.Seed);
+        "Runtime worker returned no structured result. " + process.StandardError, request.Seed, request.ProveGeneratorPreconditions);
     }
     return JsonSerializer.Deserialize<ContractRuntimeCampaignResult>(await File.ReadAllTextAsync(resultPath, cancellationToken), ContractJson.Options)
       ?? throw new JsonException("Runtime worker returned null.");

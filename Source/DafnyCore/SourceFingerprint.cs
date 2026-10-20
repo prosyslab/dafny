@@ -28,22 +28,21 @@ public static class SourceFingerprint {
   private sealed record SemanticToken(int Kind, string Value, int Start, int End);
   private sealed record TokenRange(int Start, int End);
 
+  /// <summary>Fingerprints source regions loaded from their original files.</summary>
   public static SourceFingerprintDocument? Compute(
     DafnyOptions options,
     SourceFingerprintRequest request,
     out string? error) {
     error = null;
-    var tokensBySource = new Dictionary<string, IReadOnlyList<SemanticToken>>(StringComparer.Ordinal);
+    var sources = new Dictionary<string, byte[]>(StringComparer.Ordinal);
     foreach (var sourcePath in request.Regions.Select(region => Path.GetFullPath(region.SourcePath))
                .Distinct(StringComparer.Ordinal)) {
       if (Path.GetExtension(sourcePath) != ".dfy" || !File.Exists(sourcePath)) {
         error = $"source-fingerprint input is not a Dafny file: {sourcePath}";
         return null;
       }
-
-      IReadOnlyList<SemanticToken>? tokens;
       try {
-        tokens = ScanTokens(options, sourcePath);
+        sources.Add(sourcePath, File.ReadAllBytes(sourcePath));
       } catch (IOException exception) {
         error = $"could not read source-fingerprint input: {exception.Message}";
         return null;
@@ -51,7 +50,34 @@ public static class SourceFingerprint {
         error = $"could not read source-fingerprint input: {exception.Message}";
         return null;
       }
+    }
+    return ComputeBytes(options, request, sources, out error);
+  }
+
+  /// <summary>Fingerprints exact in-memory source snapshots with the same scanner and region rules as file analysis.</summary>
+  public static SourceFingerprintDocument? Compute(
+    DafnyOptions options,
+    SourceFingerprintRequest request,
+    IReadOnlyDictionary<string, string> sources,
+    out string? error) {
+    var bytes = sources.ToDictionary(pair => Path.GetFullPath(pair.Key),
+      pair => Encoding.UTF8.GetBytes(pair.Value), StringComparer.Ordinal);
+    return ComputeBytes(options, request, bytes, out error);
+  }
+
+  private static SourceFingerprintDocument? ComputeBytes(DafnyOptions options,
+    SourceFingerprintRequest request, IReadOnlyDictionary<string, byte[]> sources, out string? error) {
+    error = null;
+    var tokensBySource = new Dictionary<string, IReadOnlyList<SemanticToken>>(StringComparer.Ordinal);
+    foreach (var sourcePath in request.Regions.Select(region => Path.GetFullPath(region.SourcePath))
+               .Distinct(StringComparer.Ordinal)) {
+      if (Path.GetExtension(sourcePath) != ".dfy" || !sources.TryGetValue(sourcePath, out var bytes)) {
+        error = $"source-fingerprint input is not a supplied Dafny source: {sourcePath}";
+        return null;
+      }
+      var tokens = ScanTokens(options, sourcePath, bytes);
       if (tokens == null) {
+        error = $"source-fingerprint input could not be tokenized: {sourcePath}";
         return null;
       }
       tokensBySource[sourcePath] = tokens;
@@ -60,7 +86,7 @@ public static class SourceFingerprint {
     var fingerprints = new List<SourceFingerprintResult>();
     foreach (var region in request.Regions) {
       var sourcePath = Path.GetFullPath(region.SourcePath);
-      var sourceLength = new FileInfo(sourcePath).Length;
+      var sourceLength = sources[sourcePath].LongLength;
       var excludedSpans = region.ExcludedSpans ?? [];
       if (!ValidSpan(region.IncludedSpan, sourceLength) ||
           excludedSpans.Any(span => !ValidSpan(span, sourceLength))) {
@@ -108,12 +134,11 @@ public static class SourceFingerprint {
     return new SourceFingerprintDocument(fingerprints);
   }
 
-  private static IReadOnlyList<SemanticToken>? ScanTokens(DafnyOptions options, string sourcePath) {
+  private static IReadOnlyList<SemanticToken>? ScanTokens(DafnyOptions options, string sourcePath, byte[] bytes) {
     var uri = new Uri(sourcePath);
     var reporter = new BatchErrorReporter(options);
     var errors = new Errors(reporter);
     var firstToken = new Token { Uri = uri };
-    var bytes = File.ReadAllBytes(sourcePath);
     using var stream = new MemoryStream(bytes, writable: false);
     var scanner = new Scanner(stream, errors, uri, firstToken: firstToken);
     var result = new List<SemanticToken>();

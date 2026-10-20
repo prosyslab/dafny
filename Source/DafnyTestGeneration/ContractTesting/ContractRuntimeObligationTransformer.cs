@@ -11,9 +11,13 @@ namespace DafnyTestGeneration.ContractTesting;
 public sealed record ContractRuntimeClause(ContractRuntimeObligation Obligation, Expression Expression,
   IReadOnlyList<IVariable> Variables, Method Owner, bool UnvalidatedCallees = false,
   int? EntryHeapPostcondition = null, bool TypeConstraint = false, string? OriginalSourceHash = null, string? OriginalSourceSetHash = null, string? CallHeapScope = null);
+/// <summary>Contains detached runtime sources and the original checks retained for execution.</summary>
 public sealed record ContractRuntimeTransformation(IReadOnlyList<ContractSource> Sources,
   IReadOnlyList<ContractRuntimeClause> Clauses, IReadOnlyList<ContractRuntimeDeghostExclusion> Exclusions,
-  string MainName, ContractPreparedProgram Prepared, IReadOnlySet<Field> CompiledGhostFields);
+  string MainName, ContractPreparedProgram Prepared, IReadOnlySet<Field> CompiledGhostFields) {
+  /// <summary>Whether a matching internal proof omitted the selected entry method's explicit requires checks.</summary>
+  public bool EntryRequiresOmitted { get; init; }
+}
 
 /// <summary>Creates a detached executable diagnostic copy while preserving original obligation locations.</summary>
 public sealed class ContractRuntimeObligationTransformer {
@@ -36,6 +40,7 @@ public sealed class ContractRuntimeObligationTransformer {
   private readonly Dictionary<Function, string> specWrappers = [];
   private readonly Function? goalFunction;
   private readonly bool lemmaContract;
+  private readonly bool omitEntryRequires;
   private readonly IReadOnlyDictionary<string, ContractRuntimeDecisionMethod> decisionCaps;
   private readonly Dictionary<TopLevelDecl, string?> membershipHelpers = [];
   private readonly Dictionary<DatatypeDecl, string?> recursiveMembershipHelpers = [];
@@ -47,8 +52,10 @@ public sealed class ContractRuntimeObligationTransformer {
   private int nextName;
   private sealed record Edit(Uri Uri, int Start, int Length, string Text);
 
+  /// <summary>Prepares runtime obligations, accepting proof omission only through a matching internal certificate.</summary>
   public ContractRuntimeObligationTransformer(Program program, IReadOnlyList<ContractSource> sources, Method goal, ContractRuntimeSourceMap? sourceMap = null, IReadOnlyDictionary<string, string>? rejected = null,
-    IReadOnlyDictionary<string, ContractRuntimeDecisionMethod>? decisionCaps = null, IReadOnlySet<string>? diagnosticConstructors = null, string? originalSourceSetHash = null) {
+    IReadOnlyDictionary<string, ContractRuntimeDecisionMethod>? decisionCaps = null, IReadOnlySet<string>? diagnosticConstructors = null, string? originalSourceSetHash = null,
+    ContractGeneratorProofReport? generatorProof = null) {
     this.program = program;
     // The transformer emits detached text without mutating this resolved program.
     resultFamily = new(() => ContractBodyNames.Family(program, "contractResult"));
@@ -57,6 +64,20 @@ public sealed class ContractRuntimeObligationTransformer {
     this.sources = sources;
     this.goal = goal;
     lemmaContract = goal is Lemma;
+    var verifiedCertificate = generatorProof is {
+      Status: ContractGeneratorProofStatus.Verified,
+      VerifiedCertificate: { } certificate
+    } ? certificate : null;
+    var requiredProofChecks = generatorProof?.RequiredNativeChecks?.ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>(StringComparer.Ordinal);
+    var coveredProofChecks = generatorProof?.CoveredNativeChecks?.ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>(StringComparer.Ordinal);
+    var selectedGenerator = verifiedCertificate != null && !lemmaContract
+      ? Members(program).OfType<Method>().SingleOrDefault(method => method.Name == "Generate" &&
+        method.EnclosingClass.EnclosingModuleDefinition == goal.EnclosingClass.EnclosingModuleDefinition)
+      : null;
+    omitEntryRequires = selectedGenerator != null && requiredProofChecks.Count > 0 &&
+      requiredProofChecks.SetEquals(coveredProofChecks) && verifiedCertificate!.Matches(
+      program, sources, goal, selectedGenerator, program.Options);
+
     this.sourceMap = sourceMap;
     this.rejected = rejected ?? new Dictionary<string, string>();
     this.diagnosticConstructors = diagnosticConstructors ?? new HashSet<string>();
@@ -500,7 +521,7 @@ public sealed class ContractRuntimeObligationTransformer {
       new(source.Path, goal.Origin.line, goal.Origin.col, goal.FullDafnyName, source.Sha256), OriginalCallable: goal.FunctionFromWhichThisIsByMethodDecl ?? (MethodOrFunction)goal, Sources: sources);
     return new(transformed, clauses, exclusions,
       (goal.EnclosingClass.EnclosingModuleDefinition.FullDafnyName is { Length: > 0 } moduleName ? moduleName + "." : "") + "PbtMain", prepared,
-      compiledGhostFields);
+      compiledGhostFields) { EntryRequiresOmitted = omitEntryRequires };
   }
 
   /// <summary>Assertions reached through the target's executable statement tree, excluding proof-only descendants.</summary>
@@ -589,7 +610,8 @@ public sealed class ContractRuntimeObligationTransformer {
     var outputKind = entry ? ContractRuntimeObligationKind.Postcondition : ContractRuntimeObligationKind.CalleePostcondition;
     // Declared subset/newtype constraints belong to the same boundary as the requires and ensures clauses.
     var before = TypeConstraintChecks(method.Ins, entry || goalSite ? inputKind : ContractRuntimeObligationKind.CalleePostcondition, method, site) +
-      string.Join("\n", method.Req.Select(c => !entry && !goalSite ? InternalPrecondition(c.E, method.EnclosingClass.EnclosingModuleDefinition) : Check(c.E, inputKind, method, "-1", site)));
+      string.Join("\n", method.Req.Where(_ => !(omitEntryRequires && entry && ReferenceEquals(method, goal)))
+        .Select(c => !entry && !goalSite ? InternalPrecondition(c.E, method.EnclosingClass.EnclosingModuleDefinition) : Check(c.E, inputKind, method, "-1", site)));
     var after = string.Join("\n", method.Ens.Select(c => Check(c.E, outputKind, method, "-1", null))) + "\n" +
       TypeConstraintChecks(method.Outs, outputKind, method, null);
     if (entry) {

@@ -1,3 +1,5 @@
+- [Promote exact generator admission proofs](2026-10-20-pbt-generator-proof-promotion.md) — done; shared analyzer fingerprints, internal authority, 140 independent memory cases and actual proof/fallback controls pass.
+
 - [Bind PBT trusted source snapshots](2026-10-19-pbt-trusted-sources.md) — done; combined base `29da48b6` preserves visibility metadata; independent source acceptance and focused tests15/15.
 
 # Native Dafny plans
