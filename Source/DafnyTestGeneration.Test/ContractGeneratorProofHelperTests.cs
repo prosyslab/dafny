@@ -14,7 +14,7 @@ using Xunit;
 namespace DafnyTestGeneration.Test;
 
 // Boundary trace: every helper parses bounded strings through ContractSourceSnapshot's dictionary filesystem,
-// reads one embedded runtime resource, merges source strings, fingerprints ASTs and inspects native check sets.
+// reads one embedded runtime resource, merges/authenticates source strings and inspects native check sets.
 // No fixtures, disk writes/directories, native compilation/verification, solver probes, processes or cleanup run here.
 public sealed class ContractGeneratorProofHelperTests {
   private const string GoalPath = "/workspace/tmp/pbt-generator-helper-memory/Target.dfy";
@@ -29,7 +29,7 @@ public sealed class ContractGeneratorProofHelperTests {
     }
     """;
   private const string GeneratorSource = """
-    method {:pbt_generator "M.Goal"} Generate(r: PbtRandom.Source) returns (x: int) {
+    method {:pbt_generator "M.Goal"} Generate(r: PbtRandom.Source) returns (x: int) ensures x >= 0 ensures x % 2 == 0 {
       x := Twice(2);
       TwiceIsNonnegative(2);
       assert x >= 0;
@@ -43,10 +43,16 @@ public sealed class ContractGeneratorProofHelperTests {
     """;
 
   private sealed record Prepared(Program Original, Program Program, DafnyOptions Options,
-    ContractRuntimePreparedSources Preparation, IReadOnlyList<ContractSource> Sources,
+    ContractRuntimePreparedSources Preparation, IReadOnlyList<ContractSource> Sources, IReadOnlyList<ContractSource> RuntimeSources,
     Method Goal, Method Generator, string RandomSource);
 
   private sealed record Proof(Program Program, Method Admission, ContractSpecificationScope Scope);
+
+  private sealed class UnusedVerifier : IProgramVerifier {
+    public Task<IReadOnlyList<Microsoft.Boogie.IVerificationTask>> GetVerificationTasksAsync(Microsoft.Boogie.ExecutionEngine engine,
+      ResolutionResult resolution, ModuleDefinition moduleDefinition, CancellationToken cancellationToken) =>
+      throw new InvalidOperationException("This boundary must reject before native verification or analyzer hashing.");
+  }
 
   private static ContractSource Snapshot(string path, string content) =>
     new(path, content, ContractHarnessBuilder.Hash(content));
@@ -74,9 +80,15 @@ public sealed class ContractGeneratorProofHelperTests {
     var start = runtime.IndexOf(marker, StringComparison.Ordinal);
     Assert.True(start >= 0);
     var random = runtime[start..];
-    var preparedSources = preparation.Sources.Append(Snapshot(GoalPath + ".rng.dfy", random)).ToList();
+    var raw = await Parse(preparation.Sources, options, resolve: false);
+    var runtimeSources = ContractRuntimeObligationTransformer.MakeGeneratorVisible(raw, preparation.Sources, new HashSet<string>())
+      .Append(Snapshot(GoalPath + ".runtime.dfy", ContractRuntimeInstrumentation.DafnySource)).ToArray();
+    var authenticated = await ContractGeneratorProof.AuthoredProofSourcesAsync(preparation.Sources, runtimeSources, options, CancellationToken.None);
+    Assert.NotNull(authenticated);
+    var preparedSources = authenticated!.Select(source => source.Content == ContractRuntimeInstrumentation.DafnySource
+      ? Snapshot(source.Path, random) : source).ToArray();
     var program = await Parse(preparedSources, options);
-    return new(original, program, options, preparation, preparedSources, Method(program, "Goal"),
+    return new(original, program, options, preparation, preparedSources, runtimeSources, Method(program, "Goal"),
       Method(program, "Generate"), random);
   }
 
@@ -108,7 +120,8 @@ public sealed class ContractGeneratorProofHelperTests {
   private static ContractGeneratorProofCoverage Coverage(Proof proof, IReadOnlySet<string> covered, bool failed = false) {
     var admission = Check(proof.Admission, ContractNativeProofRole.Correctness);
     return new(proof.Scope.RequiredNativeChecks.ToHashSet(StringComparer.Ordinal), covered,
-      proof.Scope.Failure == null, admission, new HashSet<string>([admission], StringComparer.Ordinal), failed);
+      proof.Scope.Failure == null, admission, "M.Generate (correctness)",
+      new HashSet<string>([admission, "M.Generate (correctness)"], StringComparer.Ordinal), failed);
   }
 
   // Sibling helpers retain their authored identity and location while the original target contract remains intact.
@@ -175,6 +188,75 @@ public sealed class ContractGeneratorProofHelperTests {
       proof.Scope.RequiredNativeChecks.ToHashSet(StringComparer.Ordinal), failed: true)));
   }
 
+  // The actual visibility seam erases runtime lemmas but proof reconstruction retains each authored assertion.
+  [Theory]
+  [InlineData(false)]
+  [InlineData(true)]
+  public async Task VisibilityDoesNotEraseAuthoredHelperProof(bool falseAssertion) {
+    var source = falseAssertion ? GeneratorSource.Replace("assert Twice(value) == value + value;", "assert false;", StringComparison.Ordinal) : GeneratorSource;
+    var prepared = await Prepare(source);
+    var runtime = await Parse(prepared.RuntimeSources, prepared.Options);
+    Assert.Empty(Method(runtime, "TwiceIsNonnegative").Body!.Body);
+    var proof = await PrepareProof(prepared);
+    var assertion = Assert.IsType<AssertStmt>(Assert.Single(Method(proof.Program, "TwiceIsNonnegative").Body!.Body));
+    if (falseAssertion) { Assert.Equal(false, Assert.IsType<LiteralExpr>(assertion.Expr.Resolved).Value); } else { Assert.IsType<BinaryExpr>(assertion.Expr.Resolved); }
+    Assert.Contains("M.TwiceIsNonnegative (correctness)", proof.Scope.RequiredNativeChecks);
+  }
+
+  // Public verified metadata cannot omit entry checks across the real prepared runtime transformation.
+  [Fact]
+  public async Task ForgedReportPreservesRuntimeEntryRequires() {
+    var prepared = await Prepare();
+    var runtime = await Parse(prepared.RuntimeSources, prepared.Options);
+    var forged = new ContractGeneratorProofReport(ContractGeneratorProofStatus.Verified, "forged", ["check"], ["check"]);
+    var transformation = new ContractRuntimeObligationTransformer(runtime, prepared.RuntimeSources, Method(runtime, "Goal"),
+      generatorProof: forged, selectedGenerator: Method(runtime, "Generate")).Transform();
+    Assert.False(transformation.EntryRequiresOmitted);
+    Assert.Contains(transformation.Clauses, clause => clause.Obligation.Kind == ContractRuntimeObligationKind.EntryPrecondition && !clause.TypeConstraint);
+  }
+
+  // Invalid authored ghost code is rejected by ordinary resolution before any analyzer or verifier is reached.
+  [Fact]
+  public async Task InvalidErasedGhostBodyKeepsProofUnsupported() {
+    var prepared = await Prepare();
+    var authored = prepared.Preparation.Sources.Select(source => Snapshot(source.Path,
+      source.Content.Replace("assert Twice(value) == value + value;", "assert missingProofName;", StringComparison.Ordinal))).ToArray();
+    var raw = await Parse(authored, prepared.Options, resolve: false);
+    var runtime = ContractRuntimeObligationTransformer.MakeGeneratorVisible(raw, authored, new HashSet<string>())
+      .Append(Snapshot(GoalPath + ".runtime.dfy", ContractRuntimeInstrumentation.DafnySource)).ToArray();
+    var report = await ContractGeneratorProof.TryProveAsync(runtime, authored, "M.Goal", "Generate", prepared.Options,
+      new UnusedVerifier(), 1000);
+    Assert.Equal(ContractGeneratorProofStatus.Unsupported, report.Status);
+    Assert.Contains("do not resolve normally", report.Diagnostics, StringComparison.Ordinal);
+    Assert.Null(report.VerifiedCertificate);
+  }
+
+  // Caller cancellation is observable before source parsing, analyzer hashing or native verification starts.
+  [Fact]
+  public async Task CallerCancellationStopsProofBeforeExternalBoundaries() {
+    using var cancellation = new CancellationTokenSource();
+    await cancellation.CancelAsync();
+    var report = await ContractGeneratorProof.TryProveAsync([], [], "M.Goal", "Generate", ContractGeneratorProofTests.Options(),
+      new UnusedVerifier(), 1000, cancellation.Token);
+    Assert.Equal(ContractGeneratorProofStatus.Cancelled, report.Status);
+    Assert.Null(report.VerifiedCertificate);
+  }
+
+  // Proof-local cancellation from the fake whole analyzer retains runtime checks without cancelling the caller.
+  [Fact]
+  public async Task ProofLocalCancellationReportsTimeout() {
+    var prepared = await Prepare();
+    var report = await ContractGeneratorProof.TryProveAsync(prepared.RuntimeSources, prepared.Preparation.Sources,
+      "M.Goal", "Generate", prepared.Options, new UnusedVerifier(), 1000,
+      analyze: (_, _) => throw new OperationCanceledException("Simulated proof-local cancellation"));
+    Assert.Equal(ContractGeneratorProofStatus.TimedOut, report.Status);
+    Assert.Null(report.VerifiedCertificate);
+    var runtime = await Parse(prepared.RuntimeSources, prepared.Options);
+    var transformed = new ContractRuntimeObligationTransformer(runtime, prepared.RuntimeSources, Method(runtime, "Goal"),
+      generatorProof: report, selectedGenerator: Method(runtime, "Generate")).Transform();
+    Assert.False(transformed.EntryRequiresOmitted);
+  }
+
   // An assumption in a called sibling lemma cannot enter an audited generator proof closure.
   [Fact]
   public async Task AssumptionInSiblingLemmaRejectsProofScope() {
@@ -194,7 +276,7 @@ public sealed class ContractGeneratorProofHelperTests {
   // Authored generator preconditions cannot restrict the universal generation proof even when helpers are present.
   [Fact]
   public async Task AuthoredGeneratorRequiresRejectsRawAudit() {
-    var prepared = await Prepare(GeneratorSource.Replace("returns (x: int) {", "returns (x: int) requires false {",
+    var prepared = await Prepare(GeneratorSource.Replace("returns (x: int) ensures", "returns (x: int) requires false ensures",
       StringComparison.Ordinal));
     Assert.Contains("must not have authored requires", await RawAudit(prepared), StringComparison.Ordinal);
   }

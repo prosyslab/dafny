@@ -90,7 +90,7 @@ public sealed class ContractRuntimeObligationTransformer {
     var proofSelectedGenerator = verifiedCertificate != null && !lemmaContract ? generator : null;
     omitEntryRequires = proofSelectedGenerator != null && requiredProofChecks.Count > 0 &&
       requiredProofChecks.SetEquals(coveredProofChecks) && verifiedCertificate!.Matches(
-      program, sources, goal, proofSelectedGenerator, program.Options);
+      program, sources, goal, proofSelectedGenerator, program.Options, requiredProofChecks);
 
     this.sourceMap = sourceMap;
     this.rejected = rejected ?? new Dictionary<string, string>();

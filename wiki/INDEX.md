@@ -1,8 +1,8 @@
 - [Nested statement matches in proof expressions](nested-match-substitution.md) — independently accepted compiler substitution, local scope and ordinary proof rejection; source delivery on expecto, image and weekly outcomes tracked by the parent.
 
-- [Generator proof helpers](pbt-generator-proof-helpers.md) — exact complete sidecar placement and checked transitive helper closure; independent native proof/runtime controls accepted.
+- [Generator proof helpers](pbt-generator-proof-helpers.md) — authored ensures, ordinary implication lemma and complete helper/ambient closure; current refactor memory-tested, independent/native controls pending.
 
-- [Exact generator admission proof boundary](pbt-generator-proof-integrity.md) — accepted locally; analyzer reuse, full source/scope/options binding and internal certificate authority, with independent native controls.
+- [Exact generator admission proof boundary](pbt-generator-proof-integrity.md) — authored contracts, analyzer identities and ordinary verifier tasks; accepted public diagnostic identifies helper definition-input drift. Core memory regression reproduces repeat-translation drift; scoped naming repair retains exact evidence gates, with fresh review and operational acceptance pending.
 
 2026-10-19: [PBT trusted source snapshots](pbt-trusted-sources.md) records exact source/digest trust binding and retained runtime/type/heap admission; combined-tree source independently accepted on base `29da48b6`, focused tests15/15; see the [owner plan](../plan/2026-10-19-pbt-trusted-sources.md).
 

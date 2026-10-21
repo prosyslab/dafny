@@ -6,7 +6,7 @@ using Xunit;
 
 namespace DafnyDriver.Test.ContractRuntime;
 
-// These checks use JSON values and pure result helpers, never campaign execution or staging.
+// These checks use JSON values, pure result helpers, and pre-artifact request validation; they never stage sources or execute a campaign.
 public sealed class GeneratorProofResultTests {
   // An early opt-in failure reports its distinct result schema and an evidence-free proof outcome.
   [Fact]
@@ -36,6 +36,17 @@ public sealed class GeneratorProofResultTests {
     Assert.False(legacy.RootElement.TryGetProperty("proveGeneratorPreconditions", out _));
     Assert.True(proof.RootElement.GetProperty("proveGeneratorPreconditions").GetBoolean());
     Assert.Equal(4, ContractRuntimeCampaignSchema.RequestVersion(true));
+  }
+
+  // A null draft is rejected at the request boundary before campaign recorders or disk paths are constructed.
+  [Fact]
+  public async Task NullDraftIsRejectedBeforeCampaignArtifacts() {
+    const string content = "method Goal() {}";
+    var source = new ContractSource("M.dfy", content, ContractHarnessBuilder.Hash(content));
+    var request = new ContractRuntimeCampaignRequest(2, [source], new("Goal"), "1", Drafts: [null!]);
+
+    await Assert.ThrowsAsync<ArgumentException>(() => ContractRuntimeCampaignRunner.RunAsync(
+      request, null!, "/workspace/unused-null-draft-campaign", CancellationToken.None));
   }
 
   // The proof budget leaves half the remaining campaign time and never exceeds ten seconds.

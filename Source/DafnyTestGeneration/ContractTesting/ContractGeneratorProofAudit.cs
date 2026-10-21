@@ -10,22 +10,20 @@ namespace DafnyTestGeneration.ContractTesting;
 
 /// <summary>Records the source audit that permits one exact embedded RNG module inside a proof scope.</summary>
 internal sealed class ContractGeneratorProofAudit {
-  internal const string PolicyVersion = "pbt-generator-proof-v2";
+  internal const string PolicyVersion = "pbt-authored-generator-proof-v3";
   internal const string PbtRandomModuleName = "PbtRandom";
   internal const string PbtRandomSourceSha256 = "f565ca5d86962c87a6b64f860fb7ba8450dbe5573f6980eb6b5751f577df8f72";
 
   private readonly Program program;
   private readonly string sourceSetHash;
-  private readonly string? semanticFingerprint;
   private readonly HashSet<Declaration> pinnedRandomDeclarations;
 
   public string? Failure { get; }
   public string PbtRandomSourceHash { get; }
 
   private ContractGeneratorProofAudit(Program program, string sourceSetHash,
-    HashSet<Declaration> pinnedRandomDeclarations, string? failure, string randomSourceHash, string? semanticFingerprint) {
+    HashSet<Declaration> pinnedRandomDeclarations, string? failure, string randomSourceHash) {
     this.program = program;
-    this.semanticFingerprint = semanticFingerprint;
     this.sourceSetHash = sourceSetHash;
     this.pinnedRandomDeclarations = pinnedRandomDeclarations;
     Failure = failure;
@@ -43,14 +41,14 @@ internal sealed class ContractGeneratorProofAudit {
       return "The pinned PbtRandom source must have exactly one canonical source snapshot.";
     }
     var randomUri = ContractSourceSnapshot.UriFor(exactRandomSources[0].Path);
-    var randomModules = rawProgram.Descendants().OfType<ModuleDefinition>()
+    var declarations = RawNodes(rawProgram).ToList();
+    var randomModules = declarations.OfType<ModuleDefinition>()
       .Where(module => module.Name == PbtRandomModuleName).ToList();
     if (randomModules.Count != 1 || randomModules[0].EnclosingModule is not DefaultModuleDefinition || randomModules[0].Origin.Uri != randomUri) {
       return "The only PbtRandom module must be the exact top-level module from the pinned runtime source.";
     }
     var pinnedRandomModule = randomModules[0];
     var randomUris = new HashSet<Uri> { randomUri };
-    var declarations = rawProgram.Descendants().ToList();
     var pbtGeneratorCount = 0;
     foreach (var host in declarations.OfType<IAttributeBearingDeclaration>()) {
       var hostNode = host as INode;
@@ -152,6 +150,18 @@ internal sealed class ContractGeneratorProofAudit {
     return null;
   }
 
+  // Concrete-syntax expressions expose their original children before resolution, not their resolved Children.
+  private static IEnumerable<INode> RawNodes(INode root) {
+    var seen = new HashSet<INode>(ReferenceEqualityComparer.Instance);
+    var pending = new Stack<INode>();
+    pending.Push(root);
+    while (pending.TryPop(out var node)) {
+      if (!seen.Add(node)) { continue; }
+      yield return node;
+      foreach (var child in node.PreResolveChildren) { pending.Push(child); }
+    }
+  }
+
   internal static ContractGeneratorProofAudit BindResolved(Program program, IReadOnlyList<ContractSource> sources,
     string? rawFailure, string randomModuleSource) {
     var randomHash = ContractHarnessBuilder.Hash(randomModuleSource);
@@ -178,16 +188,11 @@ internal sealed class ContractGeneratorProofAudit {
         }
       }
     }
-    if (!ContractGeneratorProof.TryResolvedProgramFingerprint(program, out var fingerprint)) {
-      failure ??= "The audited proof program has no complete semantic fingerprint.";
-    }
-    return new(program, ContractRuntimeTypeEvidence.SourceSetHash(sources), pinned, failure, randomHash, fingerprint);
+    return new(program, ContractRuntimeTypeEvidence.SourceSetHash(sources), pinned, failure, randomHash);
   }
 
   internal bool IsBoundTo(Program candidate, IReadOnlyList<ContractSource> sources) =>
-    ReferenceEquals(program, candidate) && sourceSetHash == ContractRuntimeTypeEvidence.SourceSetHash(sources) &&
-    semanticFingerprint != null && ContractGeneratorProof.TryResolvedProgramFingerprint(candidate, out var fingerprint) &&
-    semanticFingerprint == fingerprint;
+    ReferenceEquals(program, candidate) && sourceSetHash == ContractRuntimeTypeEvidence.SourceSetHash(sources);
 
   internal bool IsPinnedRngDeclaration(Declaration declaration) => pinnedRandomDeclarations.Contains(declaration);
 }

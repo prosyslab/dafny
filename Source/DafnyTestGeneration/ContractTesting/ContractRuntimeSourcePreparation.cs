@@ -114,7 +114,7 @@ public sealed class ContractRuntimeSourceMap {
 /// <summary>Installs draft bodies without changing contracts, then adds a typed goal generator.</summary>
 public static class ContractRuntimeSourcePreparation {
   private sealed record Edit(Uri Uri, int Start, int Length, string Text,
-    ContractSource Original, int OriginalStart, bool Anchor = false);
+    ContractSource Original, int OriginalStart, bool Anchor = false, int TiePriority = 0);
 
   public static async Task<ContractRuntimePreparedSources> PrepareAsync(Program program,
     IReadOnlyList<ContractSource> sources, Method goal, IReadOnlyList<ContractRuntimeDraft> drafts,
@@ -122,8 +122,10 @@ public static class ContractRuntimeSourcePreparation {
     var edits = new List<Edit>();
     var module = goal.EnclosingClass.EnclosingModuleDefinition;
     var source = ContractSourceSnapshot.Find(sources, goal.Origin.Uri);
-    var modulePosition = module == program.DefaultModuleDef ? 0 : module.BodyStartTok.pos + 1;
-    edits.Add(new(goal.Origin.Uri, modulePosition, 0, "\nimport PbtRandom\n", source, modulePosition, true));
+    var modulePosition = InsertionPosition(module, program, source);
+    if (module != program.DefaultModuleDef) {
+      edits.Add(new(goal.Origin.Uri, modulePosition, 0, "\nimport PbtRandom\n", source, modulePosition, true));
+    }
     var moduleNames = new Dictionary<ModuleDefinition, HashSet<string>> { [module] = ModuleNames(module) };
     var names = moduleNames[module];
     var generatorNames = ContractRuntimeGeneratorSignature.Names(goal);
@@ -294,13 +296,21 @@ public static class ContractRuntimeSourcePreparation {
     if (!names.Add(name)) {
       throw new NotSupportedException("Diagnostic helper collides with a declaration: " + name);
     }
-    var insertion = module == program.DefaultModuleDef ? 0 : module.BodyStartTok.pos + 1;
+    var insertion = InsertionPosition(module, program, targetSource);
     var range = helper.EntireRange;
     var text = Slice(draft.Content, range.StartToken.pos, range.Length);
-    edits.Add(new(ContractSourceSnapshot.UriFor(targetSource.Path), insertion, 0, "\n", targetSource, insertion, true));
-    edits.Add(new(ContractSourceSnapshot.UriFor(targetSource.Path), insertion, 0, text, draft, range.StartToken.pos));
-    edits.Add(new(ContractSourceSnapshot.UriFor(targetSource.Path), insertion, 0, "\n", targetSource, insertion, true));
+    edits.Add(new(ContractSourceSnapshot.UriFor(targetSource.Path), insertion, 0, "\n", targetSource, insertion,
+      true, 1));
+    edits.Add(new(ContractSourceSnapshot.UriFor(targetSource.Path), insertion, 0, text, draft, range.StartToken.pos,
+      false, 1));
+    edits.Add(new(ContractSourceSnapshot.UriFor(targetSource.Path), insertion, 0, "\n", targetSource, insertion,
+      true, 1));
   }
+
+  private static int InsertionPosition(ModuleDefinition module, Program program, ContractSource targetSource) =>
+    module == program.DefaultModuleDef
+      ? Encoding.UTF8.GetByteCount(targetSource.Content)
+      : module.BodyStartTok.pos + 1;
 
   private static void ReplaceBody(MethodOrFunction original, MethodOrFunction draft, ContractSource draftSource,
     ContractSource targetSource, List<Edit> edits) {
@@ -346,7 +356,8 @@ public static class ContractRuntimeSourcePreparation {
       var output = new StringBuilder();
       var outputBytes = 0;
       var segments = new List<ContractRuntimeSourceMap.Segment>();
-      foreach (var edit in edits.Where(edit => edit.Uri == uri).OrderBy(edit => edit.Start)) {
+      foreach (var edit in edits.Where(edit => edit.Uri == uri).OrderBy(edit => edit.Start)
+                 .ThenBy(edit => edit.TiePriority)) {
         if (edit.Start < cursor || edit.Start + edit.Length > bytes.Length) {
           throw new NotSupportedException("Overlapping or out-of-range diagnostic source edits.");
         }

@@ -1,5 +1,6 @@
 #nullable enable
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading;
@@ -84,6 +85,73 @@ public class ContractRuntimeSourcePreparationTests {
     Assert.Equal(source.IndexOf(marker, StringComparison.Ordinal) - source.IndexOf('\n'), location.Column);
     Assert.Equal(ContractHarnessBuilder.Hash(source), location.Sha256);
     Assert.Equal("M.dfy", location.Path);
+  }
+
+  // An include-first default module keeps its preamble when a generator follows a Unicode EOF comment.
+  [Fact]
+  public async Task AppendsDefaultModuleRuntimeDeclarationsAfterIncludeSource() {
+    const string main = "include \"Dependency.dfy\"\n" +
+      "class Runner { static method Goal(x: int) returns (y: int) { y := x; } }\n// 목표 끝";
+    const string dependency = "class Dependency {}";
+    const string generator =
+      "method {:pbt_generator \"Runner.Goal\"} Generate(r: PbtRandom.Source) returns (x: int) { x := 2; }";
+    IReadOnlyList<ContractSource> sources = [Snapshot("Main.dfy", main), Snapshot("Dependency.dfy", dependency)];
+
+    var prepared = await Prepare(sources, "Runner.Goal", null, generator, "Support.Helper");
+
+    var transformedMain = prepared.Sources.Single(source => source.Path == "Main.dfy").Content;
+    Assert.StartsWith("include \"Dependency.dfy\"\n", transformedMain, StringComparison.Ordinal);
+    Assert.Contains("// 목표 끝\nmethod {:pbt_generator", transformedMain, StringComparison.Ordinal);
+    Assert.DoesNotContain("import PbtRandom", transformedMain, StringComparison.Ordinal);
+    await Resolve(prepared);
+  }
+
+  // A cross-file draft helper is appended after a Unicode EOF comment and retains exact source-map ownership.
+  [Fact]
+  public async Task AppendsDraftHelperToIncludedDefaultModuleSource() {
+    const string main = "include \"Helper.dfy\"\n" +
+      "class Runner { static method Goal(x: int) returns (y: int) { y := Helper(x); } }\n// 주 실행 끝";
+    const string helper = "// 도우미\nmethod Helper(x: int) returns (y: int) " +
+      "ensures y == x + 1 { assert false; }\n// 도우미 끝";
+    const string draft = "method {:pbt_draft \"Helper\"} Helper(x: int) returns (y: int) " +
+      "{ y := Increment(x); }\nfunction Increment(x: int): int { x + 1 }";
+    const string generator =
+      "method {:pbt_generator \"Runner.Goal\"} Generate(r: PbtRandom.Source) returns (x: int) { x := 2; }";
+    IReadOnlyList<ContractSource> sources = [Snapshot("Main.dfy", main), Snapshot("Helper.dfy", helper)];
+
+    var prepared = await Prepare(sources, "Runner.Goal", draft, generator, "Helper");
+
+    var transformedHelper = prepared.Sources.Single(source => source.Path == "Helper.dfy");
+    Assert.StartsWith("// 도우미\nmethod Helper", transformedHelper.Content, StringComparison.Ordinal);
+    Assert.Contains("// 도우미 끝\nfunction Increment", transformedHelper.Content, StringComparison.Ordinal);
+    var helperMarker = "ensures y == x + 1";
+    var helperPosition = Encoding.UTF8.GetByteCount(
+      transformedHelper.Content[..transformedHelper.Content.IndexOf(helperMarker, StringComparison.Ordinal)]);
+    var originalLocation = prepared.SourceMap.ResolveLocation(
+      ContractSourceSnapshot.UriFor(transformedHelper.Path), helperPosition, "Helper");
+    Assert.Equal(new ContractSourceLocation("Helper.dfy", 2,
+      helper.IndexOf(helperMarker, StringComparison.Ordinal) - helper.IndexOf('\n'), "Helper",
+      ContractHarnessBuilder.Hash(helper)), originalLocation);
+    var draftMarker = "function Increment";
+    var draftPosition = Encoding.UTF8.GetByteCount(
+      transformedHelper.Content[..transformedHelper.Content.IndexOf(draftMarker, StringComparison.Ordinal)]);
+    var draftLocation = prepared.SourceMap.ResolveLocation(
+      ContractSourceSnapshot.UriFor(transformedHelper.Path), draftPosition, "Increment");
+    Assert.Equal(new ContractSourceLocation("Draft.dfy", 2, 1, "Increment", ContractHarnessBuilder.Hash(draft)),
+      draftLocation);
+    await Resolve(prepared);
+  }
+
+  // A helper from an earlier draft follows a later bodyless method body inserted at the same EOF offset.
+  [Fact]
+  public async Task InsertsBodylessMethodBeforeEarlierDraftHelperAtEof() {
+    await InsertsBodylessCallableBeforeEarlierDraftHelperAtEof(function: false);
+  }
+
+  // A helper from an earlier draft follows a later bodyless function body inserted at the same EOF offset.
+  [Fact]
+  public async Task InsertsBodylessFunctionBeforeEarlierDraftHelperAtEof() {
+    await InsertsBodylessCallableBeforeEarlierDraftHelperAtEof(function: true);
   }
 
   // Bodyless external declarations receive the draft body and lose their native binding.
@@ -187,18 +255,65 @@ public class ContractRuntimeSourcePreparationTests {
 
   private static async Task<ContractRuntimePreparedSources> Prepare(string source, string? draft,
     string generator = Generator, string draftSymbol = "M.Helper") {
+    return await Prepare([Snapshot("M.dfy", source)], "M.Goal", draft, generator, draftSymbol);
+  }
+
+  private static async Task<ContractRuntimePreparedSources> Prepare(IReadOnlyList<ContractSource> snapshots,
+    string goalSymbol, string? draft, string generator, string draftSymbol) {
+    var drafts = draft == null ? Array.Empty<ContractRuntimeDraft>() :
+      new[] { new ContractRuntimeDraft(draftSymbol, "Draft.dfy", draft, ContractHarnessBuilder.Hash(draft)) };
+    return await Prepare(snapshots, goalSymbol, drafts, generator);
+  }
+
+  private static async Task<ContractRuntimePreparedSources> Prepare(IReadOnlyList<ContractSource> snapshots,
+    string goalSymbol, IReadOnlyList<ContractRuntimeDraft> drafts, string generator) {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
-    var snapshots = new[] { new ContractSource("M.dfy", source, ContractHarnessBuilder.Hash(source)) };
     var reporter = new BatchErrorReporter(options);
     var program = await ContractSourceSnapshot.ParseAsync(reporter, snapshots, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
-    var goal = ContractCallableSelector.SelectMethod(program, new("M.Goal"), requireConcreteReceiver: false);
-    var drafts = draft == null ? Array.Empty<ContractRuntimeDraft>() :
-      new[] { new ContractRuntimeDraft(draftSymbol, "Helper.dfy", draft, ContractHarnessBuilder.Hash(draft)) };
+    var goal = ContractCallableSelector.SelectMethod(program, new(goalSymbol), requireConcreteReceiver: false);
     return await ContractRuntimeSourcePreparation.PrepareAsync(program, snapshots, goal, drafts,
       new("Generator.dfy", generator, ContractHarnessBuilder.Hash(generator)), options, CancellationToken.None);
   }
+
+  private static async Task InsertsBodylessCallableBeforeEarlierDraftHelperAtEof(bool function) {
+    var main = function
+      ? "include \"Helper.dfy\"\nclass Runner { static method Goal(x: int) returns (y: int) { y := Last(First(x)); } }"
+      : "include \"Helper.dfy\"\nclass Runner { static method Goal(x: int) returns (y: int) " +
+        "{ var z := First(x); y := Last(z); } }";
+    var helper = function
+      ? "function {:axiom} First(x: int): int ensures First(x) == x + 1 " +
+        "function {:axiom} Last(x: int): int ensures Last(x) == x + 2"
+      : "method {:extern} {:axiom} First(x: int) returns (y: int) ensures y == x + 1 " +
+        "method {:extern} {:axiom} Last(x: int) returns (y: int) ensures y == x + 2";
+    var firstDraft = function
+      ? "function {:pbt_draft \"First\"} First(x: int): int { Increment(x) } " +
+        "function Increment(x: int): int { x + 1 }"
+      : "method {:pbt_draft \"First\"} First(x: int) returns (y: int) { y := Increment(x); } " +
+        "function Increment(x: int): int { x + 1 }";
+    var lastDraft = function
+      ? "function {:pbt_draft \"Last\"} Last(x: int): int { x + 2 }"
+      : "method {:pbt_draft \"Last\"} Last(x: int) returns (y: int) { y := x + 2; }";
+    const string generator =
+      "method {:pbt_generator \"Runner.Goal\"} Generate(r: PbtRandom.Source) returns (x: int) { x := 2; }";
+    IReadOnlyList<ContractSource> sources = [Snapshot("Main.dfy", main), Snapshot("Helper.dfy", helper)];
+    IReadOnlyList<ContractRuntimeDraft> drafts = [
+      new("First", "FirstDraft.dfy", firstDraft, ContractHarnessBuilder.Hash(firstDraft)),
+      new("Last", "LastDraft.dfy", lastDraft, ContractHarnessBuilder.Hash(lastDraft))
+    ];
+
+    var prepared = await Prepare(sources, "Runner.Goal", drafts, generator);
+
+    var transformedHelper = prepared.Sources.Single(source => source.Path == "Helper.dfy").Content;
+    var bodyMarker = function ? "{ x + 2 }" : "{ y := x + 2; }";
+    Assert.True(transformedHelper.IndexOf(bodyMarker, StringComparison.Ordinal) <
+      transformedHelper.IndexOf("function Increment", StringComparison.Ordinal));
+    await Resolve(prepared);
+  }
+
+  private static ContractSource Snapshot(string path, string content) =>
+    new(path, content, ContractHarnessBuilder.Hash(content));
 
   private static async Task Resolve(ContractRuntimePreparedSources prepared) {
     const string runtime = "module PbtRandom { class Source {} }";

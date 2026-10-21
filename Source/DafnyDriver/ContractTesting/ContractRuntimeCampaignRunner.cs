@@ -148,8 +148,18 @@ public static class ContractRuntimeCampaignRunner {
       var proofBudget = GeneratorProofBudgetMilliseconds(request.TimeoutMilliseconds, clock.ElapsedMilliseconds);
       if (proofBudget > 0) {
         var proofClock = Stopwatch.StartNew();
-        generatorProofReport = await ContractGeneratorProof.TryProveAsync(program, snapshots, goal, generatedMethod,
-          options, proofBudget, cancellationToken);
+        generatorProofReport = await ContractGeneratorProof.TryProveAsync(snapshots, sourcePreparation.Sources,
+          goal.FullDafnyName, generatedMethod.Name,
+          options, new Microsoft.Dafny.LanguageServer.Language.DafnyProgramVerifier(
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<Microsoft.Dafny.LanguageServer.Language.DafnyProgramVerifier>.Instance),
+          proofBudget, cancellationToken);
+        if (generatorProofReport.VerifiedCertificate is { } certificate) {
+          // The proof owns an ordinary resolve of these exact runtime snapshots, never the deferred diagnostic AST.
+          program = certificate.RuntimeProgram;
+          options = program.Options;
+          goal = certificate.RuntimeGoal;
+          generatedMethod = certificate.RuntimeGenerator;
+        }
         generatorProofElapsedMilliseconds = (int)Math.Min(int.MaxValue, proofClock.ElapsedMilliseconds);
         cancellationToken.ThrowIfCancellationRequested();
         generatorProofResult = GeneratorProofResult(generatorProofReport, false, generatorProofElapsedMilliseconds);
@@ -1169,6 +1179,9 @@ public static class ContractRuntimeCampaignRunner {
         request.SampleTimeoutMilliseconds <= 0 || request.TimeoutMilliseconds <= 0 ||
         request.ClosedQueryTimeoutMilliseconds <= 0 || request.MaxViolationsPerObligation <= 0 || request.ReplayOrdinal < 0) {
       throw new ArgumentException("Invalid runtime campaign schema, seed, sources, entry, or budgets.");
+    }
+    if ((request.Drafts ?? []).Any(draft => draft == null)) {
+      throw new ArgumentException("Runtime drafts must not contain null entries.");
     }
     var files = request.Sources.Concat((request.Drafts ?? []).Select(d => new ContractSource(d.Path, d.Content, d.Sha256)))
       .Concat(request.Generator == null ? [] : [request.Generator]).ToList();

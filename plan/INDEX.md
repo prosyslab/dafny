@@ -1,3 +1,11 @@
+- [Verify generator bodies and an ordinary implication lemma](2026-10-21-pbt-authored-generator-proofs.md) — in-progress; preserve authored proofs and exact evidence; bounded binding diagnostics follow-up identifies the still-unattributed r02 rejection.
+
+- [Preserve include preambles during PBT source preparation](2026-10-21-pbt-preparation-preambles.md) — done; exact default-module EOF placement, default-scope import handling and cross-draft body/helper tie ordering accepted independently after 57 memory checks.
+
+- [Repair PBT worker null failures](2026-10-21-pbt-worker-failure.md) — bounded native repair independently accepted:157 affected cases pass with zero skips, full build and scoped checks pass. Retain in-progress status because the ordinary-source live worker cause remains unresolved; earlier unaccepted handoff preserved.
+
+- [Integrate reviewed PBT native source into live main](2026-10-21-integrate-reviewed-pbt-native.md) — done; exact live transfer, independent review, eight affected builds, 139 memory checks, scoped formatting/diff audits and canonical launcher build accepted; source/local scope only.
+
 - [Make proof inputs repeatable across translations](2026-10-21-repeatable-proof-inputs.md) — in-progress; actual pre-fix drift reproduced, scoped naming repaired, eight builds and 139 final memory cases pass; fresh independent/operational acceptance pending.
 
 - [Substitute nested statement matches in proof expressions](2026-10-21-nested-match-substitution.md) — done; independent build, in-memory binding/scope regression, formatting and direct positive/strict-negative weekly-policy proofs pass; focused delivery on expecto.
