@@ -92,7 +92,13 @@ namespace Microsoft.Dafny {
     }
 
     [NotDelayed]
-    public BoogieGenerator(ErrorReporter reporter, ProofDependencyManager depManager, TranslatorFlags flags = null) {
+    public BoogieGenerator(ErrorReporter reporter, ProofDependencyManager depManager, TranslatorFlags flags = null)
+      : this(reporter, depManager, flags, null) {
+    }
+
+    [NotDelayed]
+    internal BoogieGenerator(ErrorReporter reporter, ProofDependencyManager depManager, TranslatorFlags flags,
+      Func<IReadOnlyList<string>, Bpl.Program> readPrelude) {
       this.options = reporter.Options;
       this.flags = new TranslatorFlags(options);
       this.proofDependencies = depManager;
@@ -103,7 +109,7 @@ namespace Microsoft.Dafny {
         };
       }
       this.flags = flags;
-      Bpl.Program boogieProgram = ReadPrelude();
+      Bpl.Program boogieProgram = ReadPrelude(readPrelude);
       if (boogieProgram != null) {
         sink = boogieProgram;
         foreach (var function in boogieProgram.TopLevelDeclarations.OfType<Bpl.Function>()) {
@@ -723,14 +729,7 @@ namespace Microsoft.Dafny {
       return null;
     }
 
-    Bpl.Program ReadPrelude() {
-      string preludePath = options.DafnyPrelude;
-      if (preludePath == null) {
-        //using (System.IO.Stream stream = Cce.NonNull( System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream("DafnyPrelude.bpl")) // Use this once Spec#/VSIP supports designating a non-.resx project item as an embedded resource
-        string codebase = Cce.NonNull(System.IO.Path.GetDirectoryName(Cce.NonNull(System.Reflection.Assembly.GetExecutingAssembly().Location)));
-        preludePath = System.IO.Path.Combine(codebase, "DafnyPrelude.bpl");
-      }
-
+    Bpl.Program ReadPrelude(Func<IReadOnlyList<string>, Bpl.Program> readPrelude) {
       var defines = new List<string>();
       if (6 <= options.ArithMode) {
         defines.Add("ARITH_DISTR");
@@ -747,6 +746,14 @@ namespace Microsoft.Dafny {
       }
       if (options.Get(CommonOptionBag.UnicodeCharacters)) {
         defines.Add("UNICODE_CHAR");
+      }
+      if (readPrelude != null) {
+        return readPrelude(defines);
+      }
+      string preludePath = options.DafnyPrelude;
+      if (preludePath == null) {
+        string codebase = Cce.NonNull(System.IO.Path.GetDirectoryName(Cce.NonNull(System.Reflection.Assembly.GetExecutingAssembly().Location)));
+        preludePath = System.IO.Path.Combine(codebase, "DafnyPrelude.bpl");
       }
       int errorCount = BplParser.Parse(preludePath, defines, out var prelude);
       if (prelude == null || errorCount > 0) {
@@ -778,6 +785,7 @@ namespace Microsoft.Dafny {
         }
       }
 
+      using var namingScope = new VerificationNamingScope();
       program = p;
       this.forModule = forModule;
       triggersCollector = new TriggersCollector(new Dictionary<Expression, HashSet<OldExpr>>(), options, forModule);

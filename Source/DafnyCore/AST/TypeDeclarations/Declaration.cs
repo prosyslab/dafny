@@ -170,7 +170,9 @@ public abstract class Declaration : NodeWithOrigin, IAttributeBearingDeclaration
   }
 
   // For Boogie
-  internal VerificationIdGenerator IdGenerator = new();
+  private readonly VerificationIdGenerator legacyIdGenerator = new();
+  internal VerificationIdGenerator IdGenerator =>
+    VerificationNamingScope.Current?.Generator(this, legacyIdGenerator) ?? legacyIdGenerator;
   public override IEnumerable<INode> Children => []; // Attributes should be enumerated by the parent, as they could be placed in different places
   public override IEnumerable<INode> PreResolveChildren => Children;
   public abstract SymbolKind? Kind { get; }

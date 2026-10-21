@@ -22,6 +22,7 @@
 
     <ItemGroup>
       <ProjectReference Include="..\DafnyCore\DafnyCore.csproj" />
+      <EmbeddedResource Include="..\DafnyCore\DafnyPrelude.bpl" LogicalName="ProofInputPrelude.bpl" />
     </ItemGroup>
 
     <ItemGroup>

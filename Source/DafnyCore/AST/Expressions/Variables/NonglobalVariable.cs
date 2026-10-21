@@ -33,9 +33,13 @@ public abstract class NonglobalVariable : NodeWithOrigin, IVariable {
     LocalVariable.DisplayNameHelper(this);
 
   private string? uniqueName;
-  public string? UniqueName => uniqueName;
-  public bool HasBeenAssignedUniqueName => uniqueName != null;
+  public string? UniqueName => VerificationNamingScope.Current is { } scope ? scope.Name(this) : uniqueName;
+  public bool HasBeenAssignedUniqueName => UniqueName != null;
   public string AssignUniqueName(VerificationIdGenerator generator) {
+    if (VerificationNamingScope.Current is { } scope) {
+      uniqueName ??= scope.LegacyGenerator(generator).FreshId(Name + "#");
+      return scope.AssignName(this, generator);
+    }
     return uniqueName ??= generator.FreshId(Name + "#");
   }
 

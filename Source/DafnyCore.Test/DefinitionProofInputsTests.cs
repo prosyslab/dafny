@@ -3,6 +3,7 @@ using Microsoft.Dafny;
 
 namespace DafnyCore.Test;
 
+[Collection("Proof input translation")]
 public class DefinitionProofInputsTests {
   private const string ModularMethods = """
     method B(x: int) returns (y: int)
@@ -254,19 +255,15 @@ public class DefinitionProofInputsTests {
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     configure?.Invoke(options);
     var uri = new Uri(path);
-    options.CliRootSourceUris.Add(uri);
-    Microsoft.Dafny.Type.ResetScopes();
-    var reporter = new BatchErrorReporter(options);
-    var parsed = await ProgramParser.Parse(source, uri, reporter);
-    Assert.Equal(0, reporter.ErrorCount);
-    await new ProgramResolver(parsed.Program).Resolve(CancellationToken.None);
-    Assert.Equal(0, reporter.ErrorCount);
+    var program = await ProofInputRepeatabilityTests.Parse(source, options, path);
     afterResolve?.Invoke(options);
 
-    var result = DefinitionAnalysis.AnalyzeDocument(parsed.Program, new HashSet<Uri> { uri },
-      includeProofInputs: includeProofInputs);
-    Assert.Equal(0, reporter.ErrorCount);
-    return result.SourceFacts;
+    var result = DefinitionAnalysis.AnalyzeDocument(program, new HashSet<Uri> { uri });
+    var proofInputs = includeProofInputs
+      ? DefinitionAnalysis.ProofInputsFor(program, new HashSet<Uri> { uri },
+        ProofInputRepeatabilityTests.Translate, () => new string('a', 64)) : null;
+    Assert.Equal(0, program.Reporter.ErrorCount);
+    return result.SourceFacts with { ProofInputs = proofInputs };
   }
 
   private sealed class EmptyPluginConfiguration : Microsoft.Dafny.Plugins.PluginConfiguration { }

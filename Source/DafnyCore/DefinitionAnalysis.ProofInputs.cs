@@ -28,7 +28,13 @@ public static partial class DefinitionAnalysis {
     DefinitionNode? Owner,
     bool ExcludableImplementation);
 
-  private static DafnyProofInputs? ProofInputsFor(Program program, IReadOnlySet<Uri> analysisSourceUris) {
+  private static DafnyProofInputs? ProofInputsFor(Program program, IReadOnlySet<Uri> analysisSourceUris) =>
+    ProofInputsFor(program, analysisSourceUris,
+      input => BoogieGenerator.Translate(input, input.Reporter), () => ProofToolchainIdentity.Value);
+
+  // Let memory tests supply the translation environment and toolchain identity; keep fingerprinting here.
+  internal static DafnyProofInputs? ProofInputsFor(Program program, IReadOnlySet<Uri> analysisSourceUris,
+    Func<Program, IEnumerable<Tuple<string, Bpl.Program>>> translate, Func<string?> toolchainIdentity) {
     var options = program.Options;
     // Plugins and arbitrary Boogie arguments may install transformations that consume
     // implementation bodies. Their dependency semantics are outside this schema.
@@ -57,7 +63,7 @@ public static partial class DefinitionAnalysis {
     };
     var translated = new List<TranslatedProofDeclaration>();
     var errorCount = program.Reporter.ErrorCount;
-    foreach (var (moduleName, boogieProgram) in BoogieGenerator.Translate(program, program.Reporter)) {
+    foreach (var (moduleName, boogieProgram) in translate(program)) {
       // Serialize the fresh translation without resolving it or invoking a solver.
       var procedures = boogieProgram.TopLevelDeclarations.OfType<Bpl.Procedure>()
         .GroupBy(procedure => procedure.Name, StringComparer.Ordinal)
@@ -86,7 +92,7 @@ public static partial class DefinitionAnalysis {
       return null;
     }
 
-    var toolchain = ProofToolchainIdentity.Value;
+    var toolchain = toolchainIdentity();
     if (toolchain == null) {
       return null;
     }
