@@ -616,22 +616,32 @@ public sealed class ContractRuntimeObligationTransformer {
   // with traps keeps unrelated native dependencies out of the diagnostic without touching any contract.
   private void EraseUnreachableBody(MemberDecl member) {
     if (member is not MethodOrFunction callable || reachable.Contains(callable)) { return; }
-    if (callable is Constructor { Body: { } constructorBody } constructor) {
-      if (!((TopLevelDeclWithMembers)constructor.EnclosingClass).Members.OfType<Field>().Any(fields.Contains)) { return; }
-      var assignments = new List<string>();
-      foreach (var field in ((TopLevelDeclWithMembers)constructor.EnclosingClass).Members.OfType<Field>().Where(f => !f.IsStatic && f.Origin.line > 0)) {
-        if (!field.IsGhost || fields.Contains(field) && CompilableType(field.Type)) {
-          assignments.Add("this." + field.Name + " := " + RuntimeChecks + ".UnreachableValue<" + field.Type + ">();");
-        } else {
-          var local = "pbtOmitted" + nextName++;
-          assignments.Add("ghost var " + local + ": " + field.Type + " :| true; this." + field.Name + " := " + local + ";");
-        }
+    if (callable is Constructor constructor) {
+      if (constructor.Body is { } constructorBody) {
+        if (!((TopLevelDeclWithMembers)constructor.EnclosingClass).Members.OfType<Field>().Any(fields.Contains)) { return; }
+        RemoveKeyword(constructor, "ghost");
+        Replace(constructorBody, UnreachableConstructorBody(constructor));
+      } else if (!constructor.IsGhost && !constructor.IsAbstract &&
+                 !constructor.IsExtern(program.Options, out _, out _)) {
+        InsertUnreachableBody(constructor, "\n" + UnreachableConstructorBody(constructor));
       }
-      RemoveKeyword(constructor, "ghost");
-      Replace(constructorBody, "{ " + string.Join("\n", assignments) + " new; " + RuntimeChecks + ".UnreachableBody(); }");
       return;
     }
-    if (callable.IsGhost || callable.OverriddenMember != null) { return; }
+    if (callable.IsGhost) { return; }
+    if (callable is Method { Body: null } method) {
+      if (!method.IsVirtual && !method.IsAbstract && !method.IsExtern(program.Options, out _, out _) &&
+          !Attributes.Contains(method.Attributes, "synthesize")) {
+        InsertUnreachableBody(method, "\n{ " + RuntimeChecks + ".UnreachableBody(); }");
+      }
+      return;
+    }
+    if (callable is Function { Body: null } function) {
+      if (!function.IsVirtual && !function.IsAbstract && !function.IsExtern(program.Options, out _, out _)) {
+        InsertUnreachableBody(function, " { " + RuntimeChecks + ".UnreachableValue() }");
+      }
+      return;
+    }
+    if (callable.OverriddenMember != null) { return; }
     if (callable is Method { Body: { } body }) {
       Replace(body, "{ " + RuntimeChecks + ".UnreachableBody(); }");
     } else if (callable is Function { ByMethodBody: { } byMethodBody }) {
@@ -640,6 +650,24 @@ public sealed class ContractRuntimeObligationTransformer {
       Replace(expression, RuntimeChecks + ".UnreachableValue()");
     }
   }
+
+  private string UnreachableConstructorBody(Constructor constructor) {
+    var assignments = new List<string>();
+    foreach (var field in ((TopLevelDeclWithMembers)constructor.EnclosingClass).Members.OfType<Field>()
+               .Where(field => !field.IsStatic && field.Origin.line > 0 &&
+                 (field.IsUserMutable || field is ConstantField { Rhs: null }))) {
+      if (!field.IsGhost || fields.Contains(field) && CompilableType(field.Type)) {
+        assignments.Add("this." + field.Name + " := " + RuntimeChecks + ".UnreachableValue<" + field.Type + ">();");
+      } else {
+        var local = "pbtOmitted" + nextName++;
+        assignments.Add("ghost var " + local + ": " + field.Type + " :| true; this." + field.Name + " := " + local + ";");
+      }
+    }
+    return "{ " + string.Join("\n", assignments) + " new; " + RuntimeChecks + ".UnreachableBody(); }";
+  }
+
+  private void InsertUnreachableBody(MethodOrFunction callable, string text) =>
+    Insert(callable.Origin.Uri, callable.EndToken.pos + Encoding.UTF8.GetByteCount(callable.EndToken.val), text);
 
   private string Wrapper(Method method, string name, bool entry, IOrigin? site, bool goalSite = true) =>
     WithShapes(method.TypeArgs, () => WrapperCore(method, name, entry, site, goalSite));

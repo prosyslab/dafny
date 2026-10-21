@@ -1,3 +1,5 @@
+- [Diagnostic treatment of unrelated bodyless declarations](pbt-unreachable-bodyless.md) — independently accepted source/local repair2026-10-21; method/function/constructor/concrete-override traps, initialized-constant correction and legal null declarations preserved.119memory tests/two builds/style/diff pass; actual generated-program/image acceptance pending under the parent.
+
 - [Nested statement matches in proof expressions](nested-match-substitution.md) — independently accepted compiler substitution, local scope and ordinary proof rejection; source delivery on expecto, image and weekly outcomes tracked by the parent.
 
 - [Generator proof helpers](pbt-generator-proof-helpers.md) — authored ensures, ordinary implication lemma and complete helper/ambient closure; current refactor memory-tested, independent/native controls pending.

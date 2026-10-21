@@ -1,3 +1,5 @@
+- [Compile selected PBT helpers in unfinished workspaces](2026-10-21-pbt-unreachable-bodyless.md) — done source/local scope; plain bodyless methods/functions/constructors/overrides receive diagnostic traps, legal null declarations and exact proof gates remain. Independent initialized-constant finding corrected;119memory tests/two builds/style/diff accepted. Actual generated-program/image validation remains parent-owned.
+
 - [Verify generator bodies and an ordinary implication lemma](2026-10-21-pbt-authored-generator-proofs.md) — in-progress; preserve authored proofs and exact evidence; bounded binding diagnostics follow-up identifies the still-unattributed r02 rejection.
 
 - [Preserve include preambles during PBT source preparation](2026-10-21-pbt-preparation-preambles.md) — done; exact default-module EOF placement, default-scope import handling and cross-draft body/helper tie ordering accepted independently after 57 memory checks.
