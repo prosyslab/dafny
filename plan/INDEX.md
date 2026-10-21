@@ -1,3 +1,5 @@
+- [Substitute nested statement matches in proof expressions](2026-10-21-nested-match-substitution.md) — done; independent build, in-memory binding/scope regression, formatting and direct positive/strict-negative weekly-policy proofs pass; focused delivery on expecto.
+
 - [Verify sibling generator proof helpers](2026-10-20-pbt-generator-proof-helpers.md) — done; helper closure and original contracts checked; true/false native proofs and canonical transport accepted independently.
 
 - [Promote exact generator admission proofs](2026-10-20-pbt-generator-proof-promotion.md) — done; shared analyzer fingerprints, internal authority, 140 independent memory cases and actual proof/fallback controls pass.

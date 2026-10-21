@@ -849,6 +849,58 @@ namespace Microsoft.Dafny {
         var rr = new MatchStmt(s.Origin, Substitute(s.Source), s.Cases.ConvertAll(SubstMatchCaseStmt), s.UsesOptionalBraces);
         rr.MissingCases.AddRange(s.MissingCases);
         r = rr;
+      } else if (stmt is NestedMatchStmt) {
+        var s = (NestedMatchStmt)stmt;
+        var source = Substitute(s.Source);
+        var flattened = s.Flattened == null ? null : SubstStmt(s.Flattened);
+        var cases = new List<NestedMatchCaseStmt>();
+        foreach (var nestedMatchCase in s.Cases) {
+          var previousSubstMap = new Dictionary<IVariable, Expression>(substMap);
+          ExtendedPattern SubstitutePattern(ExtendedPattern pattern) {
+            switch (pattern) {
+              case DisjunctivePattern disjunctivePattern:
+                return new DisjunctivePattern(disjunctivePattern.Origin,
+                  disjunctivePattern.Alternatives.Select(SubstitutePattern).ToList(), disjunctivePattern.IsGhost);
+              case IdPattern idPattern:
+                if (idPattern.BoundVar == null) {
+                  return new IdPattern(idPattern.Origin, idPattern.Id, idPattern.Type.Subst(typeMap),
+                    idPattern.Arguments?.Select(SubstitutePattern).ToList(), idPattern.IsGhost,
+                    idPattern.HasParenthesis) {
+                    Ctor = idPattern.Ctor,
+                    ResolvedLit = idPattern.ResolvedLit
+                  };
+                }
+
+                var variable = idPattern.BoundVar;
+                substMap.Remove(variable);
+                IVariable newVariable = variable switch {
+                  BoundVar boundVariable => CreateBoundVarSubstitutions([boundVariable], false)[0],
+                  LocalVariable localVariable => CreateLocalVarSubstitutions([localVariable], false)[0],
+                  _ => throw new ArgumentOutOfRangeException(nameof(pattern))
+                };
+                return new IdPattern(idPattern.Origin, idPattern.Id, idPattern.Type.Subst(typeMap), null,
+                  idPattern.IsGhost, idPattern.HasParenthesis) {
+                  BoundVar = newVariable
+                };
+              case LitPattern litPattern:
+                return litPattern;
+              default:
+                throw new ArgumentOutOfRangeException(nameof(pattern));
+            }
+          }
+
+          var pattern = SubstitutePattern(nestedMatchCase.Pat);
+          var attributes = SubstAttributes(nestedMatchCase.Attributes);
+          var body = nestedMatchCase.Body.ConvertAll(SubstStmt);
+          substMap.Clear();
+          foreach (var (variable, replacement) in previousSubstMap) {
+            substMap.Add(variable, replacement);
+          }
+          cases.Add(new NestedMatchCaseStmt(nestedMatchCase.Origin, pattern, body, attributes));
+        }
+        r = new NestedMatchStmt(s.Origin, source, cases, s.UsesOptionalBraces, SubstAttributes(s.Attributes)) {
+          Flattened = flattened
+        };
       } else if (stmt is AssignSuchThatStmt) {
         var s = (AssignSuchThatStmt)stmt;
         r = new AssignSuchThatStmt(s.Origin, s.Lhss.ConvertAll(Substitute), Substitute(s.Expr), s.AssumeToken, null) {

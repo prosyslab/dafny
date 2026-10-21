@@ -1,3 +1,5 @@
+- [Nested statement matches in proof expressions](nested-match-substitution.md) — independently accepted compiler substitution, local scope and ordinary proof rejection; source delivery on expecto, image and weekly outcomes tracked by the parent.
+
 - [Generator proof helpers](pbt-generator-proof-helpers.md) — exact complete sidecar placement and checked transitive helper closure; independent native proof/runtime controls accepted.
 
 - [Exact generator admission proof boundary](pbt-generator-proof-integrity.md) — accepted locally; analyzer reuse, full source/scope/options binding and internal certificate authority, with independent native controls.

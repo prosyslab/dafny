@@ -1,0 +1,3 @@
+nested-statement-substitution.dfy(32,6): Error: assertion could not be proved
+
+Dafny program verifier finished with 2 verified, 1 error
