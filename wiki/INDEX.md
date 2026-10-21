@@ -1,5 +1,3 @@
-- [Diagnostic treatment of unrelated bodyless declarations](pbt-unreachable-bodyless.md) — independently accepted source/local repair2026-10-21; method/function/constructor/concrete-override traps, initialized-constant correction and legal null declarations preserved.119memory tests/two builds/style/diff pass; actual generated-program/image acceptance pending under the parent.
-
 - [Nested statement matches in proof expressions](nested-match-substitution.md) — independently accepted compiler substitution, local scope and ordinary proof rejection; source delivery on expecto, image and weekly outcomes tracked by the parent.
 
 - [Generator proof helpers](pbt-generator-proof-helpers.md) — authored ensures, ordinary implication lemma and complete helper/ambient closure; current refactor memory-tested, independent/native controls pending.
@@ -9,6 +7,9 @@
 2026-10-19: [PBT trusted source snapshots](pbt-trusted-sources.md) records exact source/digest trust binding and retained runtime/type/heap admission; combined-tree source independently accepted on base `29da48b6`, focused tests15/15; see the [owner plan](../plan/2026-10-19-pbt-trusted-sources.md).
 
 # Native Dafny knowledge
+
+- [Diagnostic treatment of unrelated bodyless declarations](pbt-unreachable-bodyless.md) — independently accepted source/local repair2026-10-21; method/function/constructor/concrete-override traps, initialized-constant correction and legal null declarations preserved.119memory tests/two builds/style/diff pass; actual generated-program/image acceptance pending under the parent.
+
 
 - [PBT random source bounds and Unicode scalar intervals](pbt-random-api.md) — size contract, deterministic constructor seam and scalar-gap mapping; 23 selected pure-memory cases and fresh independent review pass on 2026-10-20; exact normalized resource pin updated.
 

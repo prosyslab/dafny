@@ -1,16 +1,6 @@
-- [Compile selected PBT helpers in unfinished workspaces](2026-10-21-pbt-unreachable-bodyless.md) — done source/local scope; plain bodyless methods/functions/constructors/overrides receive diagnostic traps, legal null declarations and exact proof gates remain. Independent initialized-constant finding corrected;119memory tests/two builds/style/diff accepted. Actual generated-program/image validation remains parent-owned.
-
-- [Verify generator bodies and an ordinary implication lemma](2026-10-21-pbt-authored-generator-proofs.md) — in-progress; preserve authored proofs and exact evidence; bounded binding diagnostics follow-up identifies the still-unattributed r02 rejection.
-
-- [Preserve include preambles during PBT source preparation](2026-10-21-pbt-preparation-preambles.md) — done; exact default-module EOF placement, default-scope import handling and cross-draft body/helper tie ordering accepted independently after 57 memory checks.
-
-- [Repair PBT worker null failures](2026-10-21-pbt-worker-failure.md) — bounded native repair independently accepted:157 affected cases pass with zero skips, full build and scoped checks pass. Retain in-progress status because the ordinary-source live worker cause remains unresolved; earlier unaccepted handoff preserved.
-
-- [Integrate reviewed PBT native source into live main](2026-10-21-integrate-reviewed-pbt-native.md) — done; exact live transfer, independent review, eight affected builds, 139 memory checks, scoped formatting/diff audits and canonical launcher build accepted; source/local scope only.
-
-- [Make proof inputs repeatable across translations](2026-10-21-repeatable-proof-inputs.md) — in-progress; actual pre-fix drift reproduced, scoped naming repaired, eight builds and 139 final memory cases pass; fresh independent/operational acceptance pending.
-
 - [Substitute nested statement matches in proof expressions](2026-10-21-nested-match-substitution.md) — done; independent build, in-memory binding/scope regression, formatting and direct positive/strict-negative weekly-policy proofs pass; focused delivery on expecto.
+
+- [Deliver the latest compiler changes on expecto](2026-10-21-expecto-native-latest.md) — done; original five commits preserved, four focused source commits delivered, independent build/195 memory tests/format/direct positive-negative proofs pass; operational limits retained.
 
 - [Verify sibling generator proof helpers](2026-10-20-pbt-generator-proof-helpers.md) — done; helper closure and original contracts checked; true/false native proofs and canonical transport accepted independently.
 
@@ -19,6 +9,8 @@
 - [Bind PBT trusted source snapshots](2026-10-19-pbt-trusted-sources.md) — done; combined base `29da48b6` preserves visibility metadata; independent source acceptance and focused tests15/15.
 
 # Native Dafny plans
+
+- [Compile selected PBT helpers in unfinished workspaces](2026-10-21-pbt-unreachable-bodyless.md) — done source/local scope; plain bodyless methods/functions/constructors/overrides receive diagnostic traps, legal null declarations and exact proof gates remain. Independent initialized-constant finding corrected;119memory tests/two builds/style/diff accepted. Actual generated-program/image validation remains parent-owned.
 
 - [Preserve parseable PBT diagnostic source preambles](2026-10-20-pbt-diagnostic-parsing.md) — done; canonical runtime-snapshot bridge/façade placement and parser-owned named-module anchors independently accepted across four public memory regressions; no receipt-cause or live-effect claim.
 
@@ -48,3 +40,8 @@
 - [Avoid diagnostic generator name capture](2026-10-20-pbt-generator-formal-collisions.md) — done; exact formal/local names, capture/lookup and unchanged proof bindings independently accepted; module-member naming remains separate.
 - [Avoid runtime-class capture in instrumentation](2026-10-20-pbt-runtime-alias-capture.md) — done; canonical top-level bridge, declaration-reference binding and documentation independently accepted with 153 memory cases and a clean build; frozen trials unchanged.
 - [Preserve generator identity with fresh member names](2026-10-20-pbt-generator-member-collisions.md) — done; source, four direct selected-target cases, 146 full memory cases and exact-name wiki/guide closeout independently accepted; no solver or live-effect claim.
+- [Make proof inputs repeatable across translations](2026-10-21-repeatable-proof-inputs.md) — in-progress; actual pre-fix drift reproduced, scoped naming repaired, eight builds and 139 final memory cases pass; fresh independent/operational acceptance pending.
+- [Verify generator bodies and an ordinary implication lemma](2026-10-21-pbt-authored-generator-proofs.md) — in-progress; preserve authored proofs and exact evidence; bounded binding diagnostics follow-up identifies the still-unattributed r02 rejection.
+- [Repair PBT worker null failures](2026-10-21-pbt-worker-failure.md) — bounded native repair independently accepted:157 affected cases pass with zero skips, full build and scoped checks pass. Retain in-progress status because the ordinary-source live worker cause remains unresolved; earlier unaccepted handoff preserved.
+- [Preserve include preambles during PBT source preparation](2026-10-21-pbt-preparation-preambles.md) — done; exact default-module EOF placement, default-scope import handling and cross-draft body/helper tie ordering accepted independently after 57 memory checks.
+- [Integrate reviewed PBT native source into live main](2026-10-21-integrate-reviewed-pbt-native.md) — done; exact live transfer, independent review, eight affected builds, 139 memory checks, scoped formatting/diff audits and canonical launcher build accepted; source/local scope only.
