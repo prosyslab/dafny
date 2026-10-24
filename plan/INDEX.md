@@ -1,6 +1,6 @@
 - [Resolve verification-facts rebase conflicts](2026-10-22-resolve-rebase-conflicts.md) — done; all nine commits rebased, native source/tests match the target, both owner histories retained, conflict/whitespace/Markdown audits pass.
 
-- [Land reviewed PBT changes](2026-10-25-pbt-reviewed-main-delivery.md) — in-progress; focused runtime and native screening commits with matching-source validation limits.
+- [Land reviewed PBT changes](2026-10-25-pbt-reviewed-main-delivery.md) — done; two focused native commits, excluded unused DTOs and explicit matching-source/canonical-build limits.
 
 - [Substitute nested statement matches in proof expressions](2026-10-21-nested-match-substitution.md) — done; independent build, in-memory binding/scope regression, formatting and direct positive/strict-negative weekly-policy proofs pass; focused delivery on expecto.
 

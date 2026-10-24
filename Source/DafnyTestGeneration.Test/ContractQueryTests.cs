@@ -91,8 +91,6 @@ public class ContractQueryTests {
   [InlineData(ContractQueryKind.ClosedClause, false, ContractQueryOutcome.Sat)]
   [InlineData(ContractQueryKind.ObservedPostcondition, false, ContractQueryOutcome.Sat)]
   [InlineData(ContractQueryKind.PremiseConsistency, false, ContractQueryOutcome.Unsat)]
-  [InlineData(ContractQueryKind.ContractRealization, false, ContractQueryOutcome.Unsat)]
-  [InlineData(ContractQueryKind.ContractRealization, true, ContractQueryOutcome.Unsat)]
   [InlineData(ContractQueryKind.ClosedClause, true, ContractQueryOutcome.Unsat)]
   public async Task ModelAndPremiseQueriesRetainUnusedInconsistentAxiom(ContractQueryKind kind, bool captureModel, ContractQueryOutcome expected) {
     const string source = "type Empty = value:int | false witness 0 ghost const unused:Empty " +

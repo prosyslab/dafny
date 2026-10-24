@@ -9,10 +9,39 @@ public static class ContractQueryBuilder {
   public const string TargetMarker = "contract_query_target";
   public static string Name(ContractPreparedProgram prepared) => ContractBodyNames.Family(prepared.Program, QueryName);
 
+  /// <summary>Builds a native assertion over concrete inputs and, for methods, all legal outputs jointly.</summary>
+  internal static ContractScreenQuery BuildScreen(ContractPreparedProgram prepared,
+    IReadOnlyDictionary<string, ContractValue> inputs, bool domain, bool negate) {
+    var method = prepared.Method;
+    var scope = method.EnclosingClass.EnclosingModuleDefinition;
+    var parameters = string.Join(", ", method.Ins.Select(formal => formal.Name + ": " +
+      QualifiedType(prepared.Program, scope, formal.Type)));
+    var bindings = method.Ins.Select(formal => "requires " + formal.Name + " == " +
+      ContractModelCodec.ToDafny(inputs[formal.Name]));
+    var precondition = Conjunction(method.Req.Select(clause => RenderExpression(prepared, clause.E)));
+    var postcondition = Conjunction(method.Ens.Select(clause => RenderExpression(prepared, clause.E)));
+    var assertion = domain ? precondition : method.Outs.Count == 0 ? postcondition :
+      "(exists " + string.Join(", ", method.Outs.Select(formal => formal.Name + ": " +
+        QualifiedType(prepared.Program, scope, formal.Type))) + " :: " + postcondition + ")";
+    if (negate) { assertion = "!(" + assertion + ")"; }
+    var name = Name(prepared);
+    var declaration = "\nghost method " + name + "(" + parameters + ")\n" +
+      string.Join("\n", bindings) + "\n" + (domain ? "" : "requires " + precondition + "\n") +
+      "{ assert {:error \"" + TargetMarker + "\"} " + assertion + "; }\n";
+    var offset = method.StartToken.pos;
+    var bytes = System.Text.Encoding.UTF8.GetBytes(prepared.Source.Content);
+    var characterOffset = System.Text.Encoding.UTF8.GetCharCount(bytes, 0, offset);
+    return new(prepared.Source.Content.Insert(characterOffset, declaration), prepared.Source.Path, name,
+      offset, offset + System.Text.Encoding.UTF8.GetByteCount(declaration));
+  }
+
   public static string Build(ContractPreparedProgram prepared, ContractTestRequest request,
     ContractQueryKind kind, IReadOnlyDictionary<string, ContractValue>? outputs = null, bool negate = false,
     IReadOnlyDictionary<string, ContractValue>? observations = null, IReadOnlyList<string>? choiceConstraints = null,
     Expression? postconditionClause = null) {
+    if (kind == ContractQueryKind.ContractRealization) {
+      throw new System.NotSupportedException("Joint-output realizability requires the dedicated contract screen.");
+    }
     if (kind == ContractQueryKind.PremiseConsistency) { RequireInitializerDefinitions(prepared); }
     var method = prepared.Method;
     var formals = method.Ins.Concat(outputs == null ? [] : method.Outs).ToList();

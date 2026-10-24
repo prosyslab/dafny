@@ -1399,12 +1399,20 @@ internal sealed partial class PartialEvaluatorEngine {
       }
 
       var inlineDepthForUnrolledInstances = Math.Max(0, state.Depth - 1);
+      Dictionary<IVariable, Expression> unrolledWitnessValues = null;
       if ((!hasRecursiveLogicalBody || engine.UsesContractConcreteProfile) &&
           engine.TryUnrollQuantifier(
             quantifierExpr,
             expr => SimplifyExpression(expr, state.WithDepth(inlineDepthForUnrolledInstances)),
             out var unrolled,
-            emitOverflowResidual: engine.emitQuantifierOverflowResidual)) {
+            emitOverflowResidual: engine.emitQuantifierOverflowResidual,
+            onExistentialWitness: engine.proofCompositionMode && witnessBody != null
+              ? values => unrolledWitnessValues = new Dictionary<IVariable, Expression>(values)
+              : null)) {
+        if (unrolledWitnessValues != null && Expression.IsBoolLiteral(unrolled, out var proved) && proved) {
+          completedFullBody = true;
+          RecordConcreteExistentialWitness(quantifierExpr.BoundVars, witnessBody, unrolledWitnessValues);
+        }
         SetReplacement(quantifierExpr, unrolled);
       }
       return false;
@@ -1828,12 +1836,17 @@ internal sealed partial class PartialEvaluatorEngine {
     }
 
     private void RecordConcreteExistentialWitness(List<BoundVar> variables, Expression body) {
+      RecordConcreteExistentialWitness(variables, body, existentialWitnessValues);
+    }
+
+    private void RecordConcreteExistentialWitness(List<BoundVar> variables, Expression body,
+      Dictionary<IVariable, Expression> witnessValues) {
       engine.CheckForCancellation();
-      if (!variables.All(variable => existentialWitnessValues.TryGetValue(variable, out var value) &&
+      if (!variables.All(variable => witnessValues.TryGetValue(variable, out var value) &&
                                      IsContractConcreteValue(value, cancellationCheck))) {
         return;
       }
-      var substituter = engine.CreateSubstituter(null, existentialWitnessValues, null);
+      var substituter = engine.CreateSubstituter(null, witnessValues, null);
       var instance = substituter.Substitute(body);
       // Only escaping binder variables prevent lifting. Quantifiers inside the witness
       // bind their own variables and remain part of its independently checked assertion.

@@ -10,11 +10,43 @@ using Microsoft.Dafny;
 namespace DafnyTestGeneration.ContractTesting;
 
 public static class ContractSolver {
-  public static async Task<ContractQueryResult> CheckAsync(string source, ContractQueryKind kind,
+  public static Task<ContractQueryResult> CheckAsync(string source, ContractQueryKind kind,
     DafnyOptions baseOptions, CancellationToken cancellationToken, bool captureModel = false,
     string queryName = ContractQueryBuilder.QueryName,
     IReadOnlyList<ContractSource>? sourceSnapshots = null, string? sourcePath = null,
-    Action<string, string>? phaseObserver = null, long? deadlineTimestamp = null) {
+    Action<string, string>? phaseObserver = null, long? deadlineTimestamp = null) =>
+    CheckCoreAsync(source, kind, baseOptions, cancellationToken, captureModel, queryName,
+      sourceSnapshots, sourcePath, phaseObserver, deadlineTimestamp, null, null);
+
+  internal static async Task<(ContractQueryResult Result, string? OptionsIdentity, string? QueryIdentity)> CheckScreenAsync(
+    ContractScreenQuery query, IReadOnlyList<ContractSource> sources, DafnyOptions options,
+    CancellationToken cancellationToken, long deadlineTimestamp, Action<string, string>? phaseObserver = null) {
+    string? identity = null;
+    var result = await CheckCoreAsync(query.Source, ContractQueryKind.ClosedClause, options, cancellationToken,
+      false, query.Name, sources, query.SourcePath, phaseObserver, deadlineTimestamp, query, value => identity = value);
+    string? queryIdentity = null;
+    if (identity != null) {
+      var bytes = System.Text.Encoding.UTF8.GetBytes(query.Source);
+      var declaration = System.Text.Encoding.UTF8.GetString(bytes, query.Start, query.End - query.Start);
+      queryIdentity = ContractHarnessBuilder.Hash(System.Text.Json.JsonSerializer.Serialize(new {
+        query.Name,
+        query.SourcePath,
+        query.Start,
+        query.End,
+        sourceSha256 = ContractHarnessBuilder.Hash(query.Source),
+        sourceSetHash = ContractRuntimeTypeEvidence.SourceSetHash(ContractSourceSnapshot.Replace(sources, query.SourcePath, query.Source)),
+        querySha256 = ContractHarnessBuilder.Hash(declaration),
+        effectiveOptionsIdentity = identity
+      }, ContractJson.Options));
+    }
+    return (result, identity, queryIdentity);
+  }
+
+  private static async Task<ContractQueryResult> CheckCoreAsync(string source, ContractQueryKind kind,
+    DafnyOptions baseOptions, CancellationToken cancellationToken, bool captureModel,
+    string queryName, IReadOnlyList<ContractSource>? sourceSnapshots, string? sourcePath,
+    Action<string, string>? phaseObserver, long? deadlineTimestamp, ContractScreenQuery? screenQuery,
+    Action<string>? effectiveOptions) {
     void CheckQueryBoundary() => ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
     CheckQueryBoundary();
     var log = new StringWriter();
@@ -50,9 +82,11 @@ public static class ContractSolver {
         return new ContractQueryResult(kind, ContractQueryOutcome.Error,
           "Snapshot-backed queries require the exact replaced source path.");
       }
-      programSource = await ContractSourceSnapshot.ParseAsync(reporter,
-        ContractSourceSnapshot.Replace(sourceSnapshots, sourcePath, source), cancellationToken,
-        phaseObserver: phaseObserver);
+      var snapshots = ContractSourceSnapshot.Replace(sourceSnapshots, sourcePath, source);
+      programSource = screenQuery == null
+        ? await ContractSourceSnapshot.ParseAsync(reporter, snapshots, cancellationToken, phaseObserver: phaseObserver)
+        : (await ContractScreenSourcePreparation.ParseAsync(reporter, snapshots, cancellationToken,
+          screenQuery, phaseObserver, screenQuery.Projection)).Program;
     } else {
       programSource = await ContractPhaseRecorder.MeasureAsync(phaseObserver, "parse", cancellationToken,
         () => Utils.Parse(reporter, source, resolve: false,
@@ -89,9 +123,9 @@ public static class ContractSolver {
         function.ByMethodBody = null;
       }
     }
-    // Negated quantified assertions need witnesses that E-matching may not supply.
-    // Enable model-based instantiation for this polarity check, while keeping model
-    // generation on the existing counterexample path. Neither changes the domain.
+    // Preserve the legacy negated-quantifier profile. Positive screen existentials
+    // receive model-based instantiation only after complete concrete reduction has
+    // emitted a witness assertion; this is solver guidance, never a proof result.
     var hasQuantifiedAssertion = programSource.RawModules().SelectMany(module => module.TopLevelDecls)
       .OfType<TopLevelDeclWithMembers>().SelectMany(type => type.Members).OfType<Method>()
       .Where(method => method.Name == queryName && method.Body != null)
@@ -99,20 +133,22 @@ public static class ContractSolver {
       .Any(assertion => assertion.Expr.Resolved is UnaryOpExpr { Op: UnaryOpExpr.Opcode.Not } &&
                         (ContractReductionTraversal.LogicalNodes(assertion.Expr, CheckQueryBoundary).OfType<Microsoft.Dafny.QuantifierExpr>().Any() ||
                          HasLogicalUniversalQuantifier(assertion.Expr, CheckQueryBoundary)));
-    if (hasQuantifiedAssertion && options.IsUsingZ3()) {
-      options.ProverOptions.RemoveAll(option => option.StartsWith("O:smt.mbqi=", StringComparison.Ordinal));
-      options.ProverOptions.Add("O:smt.mbqi=true");
-    }
+    var concretePositiveWitness = false;
     if (!captureModel && kind != ContractQueryKind.PremiseConsistency) {
-      ContractPhaseRecorder.Measure(phaseObserver, "reduction", cancellationToken, () => {
+      concretePositiveWitness = ContractPhaseRecorder.Measure(phaseObserver, "reduction", cancellationToken, () => {
         CheckQueryBoundary();
-        ReduceConcreteAssertion(programSource, log, queryName, CheckQueryBoundary);
+        var guidance = ReduceConcreteAssertionCore(programSource, log, queryName, CheckQueryBoundary);
         CheckQueryBoundary();
-        return true;
+        return guidance;
       });
     }
     CheckQueryBoundary();
+    if ((hasQuantifiedAssertion || screenQuery != null && concretePositiveWitness) && options.IsUsingZ3()) {
+      options.ProverOptions.RemoveAll(option => option.StartsWith("O:smt.mbqi=", StringComparison.Ordinal));
+      options.ProverOptions.Add("O:smt.mbqi=true");
+    }
     options.ProcessSolverOptions(reporter, Microsoft.Dafny.Token.NoToken);
+    effectiveOptions?.Invoke(DefinitionAnalysis.ContextOptionsIdentity(options));
     if (reporter.ErrorCount != 0) {
       return new ContractQueryResult(kind, ContractQueryOutcome.Error,
         string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
@@ -228,16 +264,25 @@ public static class ContractSolver {
   /// <summary>Stages checked proof steps off-tree and publishes them only after the final query-boundary check.</summary>
   public static void ReduceConcreteAssertion(Microsoft.Dafny.Program program, TextWriter log, string queryName,
     System.Action cancellationCheck) {
+    _ = ReduceConcreteAssertionCore(program, log, queryName, cancellationCheck);
+  }
+
+  private static bool ReduceConcreteAssertionCore(Microsoft.Dafny.Program program, TextWriter log, string queryName,
+    System.Action cancellationCheck) {
+    var methodsProcessed = 0;
+    var concretePositiveWitness = false;
     foreach (var method in program.RawModules().SelectMany(module => module.TopLevelDecls)
                .OfType<TopLevelDeclWithMembers>().SelectMany(type => type.Members).OfType<Method>()
                .Where(method => method.Name == queryName)) {
       cancellationCheck();
+      methodsProcessed++;
       if (ContractQueryHeapReduction.TryApply(program, method, log, cancellationCheck)) { continue; }
       // Substituting initial bindings after an executable assignment would be wrong.
       // Path and heap-transition queries retain their original translation here.
       if (method.Body?.Body.Count != 1 || method.Body.Body[0] is not AssertStmt assertion) {
         continue;
       }
+      var originalIsExistential = assertion.Expr.Resolved is Microsoft.Dafny.ExistsExpr;
       var bindings = new Dictionary<IVariable, Expression>();
       foreach (var clause in method.Req) {
         cancellationCheck();
@@ -273,6 +318,12 @@ public static class ContractSolver {
       cancellationCheck();
       method.Body.Body.InsertRange(method.Body.Body.Count - 1, added);
       assertion.Expr = replacement;
+      // The full original and every staged assertion are now published. A concrete
+      // reduction only chooses a solver profile; all native proof/WD gates still run.
+      concretePositiveWitness |= originalIsExistential && reduction.Decision == ContractReductionDecision.True &&
+        Expression.IsBoolLiteral(reduction.ReducedExpression, out var holds) && holds && !reduction.BudgetExhausted &&
+        reduction.ProofWitnesses.Any(witness => reduction.ProofObligations.Any(obligation =>
+          obligation.Kind == ContractReductionProofKind.Witness && ReferenceEquals(obligation.Expression, witness)));
       log.WriteLine("Contract reduction: decision=" + reduction.Decision + ", residual=" + reduction.ResidualKind +
         ", quantifierInstances=" + reduction.QuantifierInstancesUsed + "/" + reduction.QuantifierInstanceLimit +
         ", exhaustion=" + string.Join(",", reduction.ExhaustionReasons) +
@@ -281,6 +332,7 @@ public static class ContractSolver {
         ", proofNodes=" + reduction.ProofCompositionNodesAdmitted + "/" +
         reduction.ProofCompositionNodesConsidered + "; original assertion retained.");
     }
+    return methodsProcessed == 1 && concretePositiveWitness;
   }
 
 }

@@ -11,7 +11,8 @@ public static partial class DefinitionAnalysis {
     DafnyOptions options,
     IReadOnlySet<Uri> analysisSourceUris,
     IReadOnlyList<DefinitionAnalysisResult> definitions,
-    DefinitionSourceFacts sourceFacts) {
+    DefinitionSourceFacts sourceFacts,
+    IReadOnlyDictionary<string, string>? sourceSnapshots = null) {
     var sources = analysisSourceUris
       .Where(uri => uri.IsFile)
       .Select(uri => Path.GetFullPath(uri.LocalPath))
@@ -76,7 +77,10 @@ public static partial class DefinitionAnalysis {
     }
 
     var request = new SourceFingerprintRequest(regions);
-    var fingerprintDocument = SourceFingerprint.Compute(options, request, out var error);
+    string? error;
+    var fingerprintDocument = sourceSnapshots == null
+      ? SourceFingerprint.Compute(options, request, out error)
+      : SourceFingerprint.Compute(options, request, sourceSnapshots, out error);
     if (fingerprintDocument == null) {
       throw new InvalidOperationException(
         error ?? "definition-analysis semantic fingerprinting failed");

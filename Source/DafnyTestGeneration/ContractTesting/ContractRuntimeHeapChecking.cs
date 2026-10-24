@@ -177,6 +177,11 @@ public static class ContractRuntimeHeapChecking {
     Func<ContractValue, Microsoft.Dafny.Type, bool> planValue, System.Action? hostCheck = null) =>
     CheckInitialTypesCore(originalProgram, initial, specifications, inputs, planValue, hostCheck);
 
+  /// <summary>Checks concrete pure inputs without inventing a runtime campaign or an initial-heap attestation.</summary>
+  internal static bool? CheckPureInputs(Program program,
+    IReadOnlyList<(ContractValue Value, Microsoft.Dafny.Type Type)> inputs) =>
+    CheckInitialTypesCore(program, [], null, inputs, null);
+
   private static bool? CheckInitialTypesCore(Program originalProgram, IReadOnlyList<ContractHeapObject> initial,
     ContractSpecificationChecker? specifications, IReadOnlyList<(ContractValue Value, Microsoft.Dafny.Type Type)> inputs,
     Func<ContractValue, Microsoft.Dafny.Type, bool>? planValue, System.Action? hostCheck = null) {

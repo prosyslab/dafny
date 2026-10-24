@@ -16,12 +16,14 @@ namespace Microsoft.Dafny;
 public static class TestContractsCommand {
   private static readonly Argument<FileInfo> Request = new("request", "Versioned contract test JSON request.");
   private static readonly Option<bool> RuntimeCheck = new("--runtime-check", "Check concrete runtime obligations using a supplied generator.");
+  private static readonly Option<bool> ScreenContract = new("--screen-contract", "Inspect or screen a proposed child contract on explicit typed inputs.");
   private static readonly Option<uint> VerificationSeed = new("--verification-seed", () => 0U,
     "Set the Boogie verification random seed (0 through 2147483647).");
   private static readonly Option<string> RuntimeWorker = new("--runtime-check-worker") { IsHidden = true };
 
   static TestContractsCommand() {
     OptionRegistry.RegisterOption(RuntimeCheck, OptionScope.Cli);
+    OptionRegistry.RegisterOption(ScreenContract, OptionScope.Cli);
     OptionRegistry.RegisterOption(VerificationSeed, OptionScope.Cli);
     VerificationSeed.AddValidator(result => {
       if (result.GetValueOrDefault<uint>() > int.MaxValue) {
@@ -36,6 +38,7 @@ public static class TestContractsCommand {
     var command = new Command("test-contracts", "Check original contracts on concrete runtime observations of a generator-driven campaign.");
     command.AddArgument(Request);
     command.AddOption(RuntimeCheck);
+    command.AddOption(ScreenContract);
     command.AddOption(VerificationSeed);
     command.AddOption(RuntimeWorker);
     DafnyNewCli.SetHandlerUsingDafnyOptionsContinuation(command, ExecuteAsync);
@@ -49,6 +52,9 @@ public static class TestContractsCommand {
     var file = context.ParseResult.GetValueForArgument(Request);
     var runtimeResultPath = context.ParseResult.GetValueForOption(RuntimeWorker);
     var runtimeRequested = context.ParseResult.GetValueForOption(RuntimeCheck) || runtimeResultPath != null;
+    if (context.ParseResult.GetValueForOption(ScreenContract)) {
+      return await ExecuteScreenAsync(options, file, runtimeRequested, cancellationToken);
+    }
     string runtimeSeed = "";
     var runtimeProofRequested = false;
     object result;
@@ -87,6 +93,45 @@ public static class TestContractsCommand {
 
     object Failure(ContractTestStatus status, string reason) =>
       ContractRuntimeCampaignRunner.Failure(status == ContractTestStatus.Unsupported ? ContractRuntimeStatus.Unsupported : ContractRuntimeStatus.Error, reason, runtimeSeed, runtimeProofRequested);
+  }
+
+  private static async Task<int> ExecuteScreenAsync(DafnyOptions options, FileInfo file, bool conflictingMode,
+    CancellationToken cancellationToken) {
+    ContractScreenRequest? request = null;
+    ContractScreenResult result;
+    try {
+      if (conflictingMode) { throw new ArgumentException("screen_contract_and_runtime_check_are_mutually_exclusive"); }
+      // Read at most the protocol bound plus one sentinel byte, even if a file grows during the read.
+      using var stream = File.OpenRead(file.FullName);
+      var buffer = new byte[ContractScreenValidation.MaximumRequestBytes + 1];
+      var length = 0;
+      while (length < buffer.Length) {
+        var read = await stream.ReadAsync(buffer.AsMemory(length), cancellationToken);
+        if (read == 0) { break; }
+        length += read;
+      }
+      if (length > ContractScreenValidation.MaximumRequestBytes) { throw new ArgumentException("request_too_large"); }
+      request = JsonSerializer.Deserialize<ContractScreenRequest>(buffer.AsSpan(0, length), ContractJson.Options)
+        ?? throw new JsonException("null_screen_request");
+      result = await ContractScreenService.RunAsync(request, options, cancellationToken);
+    } catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) {
+      result = Failure(ContractScreenStatus.Cancelled, "caller_cancelled");
+    } catch (ArgumentException error) {
+      result = Failure(ContractScreenStatus.InvalidInput, error.Message);
+    } catch (JsonException error) {
+      result = Failure(ContractScreenStatus.InvalidInput, error.Message);
+    } catch (NotSupportedException error) {
+      result = Failure(ContractScreenStatus.Unsupported, error.Message);
+    } catch (IOException error) {
+      result = Failure(ContractScreenStatus.Error, error.Message);
+    }
+    await options.OutputWriter.Code(JsonSerializer.Serialize(result, ContractJson.Options) + "\n");
+    return 0;
+
+    ContractScreenResult Failure(ContractScreenStatus status, string reason) => new(1,
+      request?.Action ?? ContractScreenAction.Screen, request?.Question ?? ContractScreenQuestion.InputDomain,
+      status, null, new(false, [reason], [], true), [], new(0, 0, 0, 0, 0),
+      [reason[..Math.Min(reason.Length, ContractScreenValidation.MaximumDiagnosticCharacters)]], []);
   }
 
   private static async Task<ContractRuntimeCampaignResult> SuperviseRuntimeAsync(ContractRuntimeCampaignRequest request,

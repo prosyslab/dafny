@@ -30,6 +30,11 @@ public class Method : MethodOrConstructor {
   }
 
   public override BlockStmt? Body => body;
+  /// <summary>Omits an implementation in a detached, pre-resolution diagnostic program.</summary>
+  public void ClearBody() {
+    body = null;
+  }
+
   public override void SetBody(BlockLikeStmt newBody) {
     body = (BlockStmt?)newBody;
   }

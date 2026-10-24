@@ -432,7 +432,8 @@ internal sealed class QuantifierBounds {
   /// </summary>
   internal bool TryUnrollQuantifier(QuantifierExpr quantifierExpr, Func<Expression, Expression> simplifyAfterSubst,
     out Expression rewritten, bool emitOverflowResidual = true,
-    Func<Expression, IReadOnlyDictionary<IVariable, Expression>, bool>? reserveInstanceExpansion = null) {
+    Func<Expression, IReadOnlyDictionary<IVariable, Expression>, bool>? reserveInstanceExpansion = null,
+    Action<IReadOnlyDictionary<IVariable, Expression>>? onExistentialWitness = null) {
     CheckForCancellation();
     rewritten = quantifierExpr;
 
@@ -557,6 +558,10 @@ internal sealed class QuantifierBounds {
       expansionBudget?.ConsumeInstance();
       var inst = substituter.Substitute(logicalBody);
       inst = simplifyAfterSubst(inst);
+      if (isExists && Expression.IsBoolLiteral(inst, out var holds) && holds) {
+        // The enumeration reuses this map; a consumer retaining an assignment must copy it.
+        onExistentialWitness?.Invoke(substMap);
+      }
       AddInstance(inst);
       instanceCount++;
       if (expansionBudget != null ? expansionBudget.Remaining == 0 :

@@ -27,6 +27,20 @@ public sealed class ContractInitialTypePreparation {
 
 /// <summary>A source-bound plan for proving exact heap carriers by native construction or compiled membership.</summary>
 public sealed class ContractInitialTypeProof {
+  /// <summary>Admits source-bound concrete inputs after the screen's independently checked ambient gate.</summary>
+  internal static bool? CheckScreenInputs(ContractPreparedProgram prepared,
+    IReadOnlyDictionary<string, ContractValue> inputs, ContractSpecificationChecker specifications) {
+    if (!specifications.IsBoundTo(prepared.Program, prepared.SourceSnapshots) ||
+        !prepared.Method.Ins.Select(formal => formal.Name).ToHashSet().SetEquals(inputs.Keys)) {
+      throw new System.ArgumentException("input_names_or_source_binding");
+    }
+    foreach (var value in inputs.Values) {
+      ContractScreenValidation.ValidateConcreteValue(value);
+    }
+    return ContractRuntimeHeapChecking.CheckPureInputs(prepared.Program,
+      prepared.Method.Ins.Select(formal => (inputs[formal.Name], formal.Type)).ToList());
+  }
+
   public ContractRuntimeHeapCheck Initial { get; }
   public IReadOnlyList<string> RuntimeChecks { get; }
   public bool RequiresNativeProof => Values.Count != 0;

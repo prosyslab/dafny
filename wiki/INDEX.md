@@ -1,3 +1,5 @@
+- [Native PBT delivery and validation boundaries](pbt-main-delivery.md) — reviewed runtime closure, checked helper screening, verifier-seed forwarding and explicit matching-source/canonical-build limits.
+
 - [Nested statement matches in proof expressions](nested-match-substitution.md) — independently accepted compiler substitution, local scope and ordinary proof rejection; source delivery on expecto, image and weekly outcomes tracked by the parent.
 
 - [Generator proof helpers](pbt-generator-proof-helpers.md) — authored ensures, ordinary implication lemma and complete helper/ambient closure; current refactor memory-tested, independent/native controls pending.

@@ -23,6 +23,7 @@ namespace DafnyTestGeneration.ContractTesting;
 
 /// <summary>Distinguishes logical proof from evidence usable for execution and construction.</summary>
 public enum ContractSpecificationRole { Execution, Logical }
+public enum ContractSpecificationOutcome { Verified, VerificationFailed, Unsupported, Timeout, Unknown, Error }
 
 internal enum ContractNativeProofRole { WellFormedness, Correctness, Override }
 internal sealed record ContractSpecificationCheck(Declaration Declaration, ContractNativeProofRole Role) {
@@ -68,6 +69,9 @@ public sealed class ContractSpecificationScope {
 public sealed record ContractSpecificationResult(bool Verified, string Diagnostics,
   IReadOnlyList<string> Implementations, IReadOnlyList<string> AssertionFreeDeclarations,
   int VerifiedCount = 0, int ErrorCount = 0) {
+  public ContractSpecificationOutcome Outcome { get; init; } = Verified
+    ? ContractSpecificationOutcome.Verified : ContractSpecificationOutcome.VerificationFailed;
+  public string? EffectiveOptionsIdentity { get; init; }
   public string? SourceSetHash { get; init; }
   public string? TrustSetHash { get; init; }
   public ContractSequenceRefinementResult? SequenceRefinement { get; init; }
@@ -84,6 +88,8 @@ public sealed record ContractGlobalInhabitationCertificate(string SourceSetHash,
 
 /// <summary>Validates original specification closures under exact source trust, with separately budgeted native checks.</summary>
 public sealed class ContractSpecificationChecker {
+  // Only the screen's complete ambient admission may select this preparation.
+  internal ContractScreenProjection? ScreenProjection { get; init; }
   private readonly Program original;
   private readonly IReadOnlyList<ContractSource> sources;
   private readonly DafnyOptions options;
@@ -337,16 +343,19 @@ public sealed class ContractSpecificationChecker {
   public async Task<ContractSpecificationResult> CheckModuleAsync(ContractSpecificationScope scope, string moduleName,
     CancellationToken cancellationToken, Action<string, string>? phaseObserver = null, long? deadlineTimestamp = null) {
     ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
-    if (!BoundScope(scope)) { return new(false, "Specification scope is not bound to this original checker/source context.", [], []); }
-    if (scope.Failure != null) { return new(false, scope.Failure, [], []); }
+    if (!BoundScope(scope)) { return new(false, "Specification scope is not bound to this original checker/source context.", [], []) { Outcome = ContractSpecificationOutcome.Error }; }
+    if (scope.Failure != null) { return new(false, scope.Failure, [], []) { Outcome = ContractSpecificationOutcome.Unsupported }; }
     var selected = scope.Checks.Where(check => Module(check.Declaration).FullDafnyName == moduleName &&
       !checkedChecks.Contains(check)).ToList();
     if (selected.Count == 0) { return new(true, "No remaining declarations in this module.", [], []); }
     if (verificationProgram == null) {
       reporter = new BatchErrorReporter(options);
-      var parsed = await ContractSourceSnapshot.ParseAsync(reporter, sources, cancellationToken, phaseObserver: phaseObserver);
+      var parsed = ScreenProjection != null
+        ? (await ContractScreenSourcePreparation.ParseAsync(reporter, sources, cancellationToken,
+          phaseObserver: phaseObserver, projection: ScreenProjection)).Program
+        : await ContractSourceSnapshot.ParseAsync(reporter, sources, cancellationToken, phaseObserver: phaseObserver);
       if (reporter.ErrorCount != 0) {
-        return new(false, string.Join("\n", reporter.AllMessages.Select(message => message.Message)), [], []);
+        return new(false, string.Join("\n", reporter.AllMessages.Select(message => message.Message)), [], []) { Outcome = ContractSpecificationOutcome.Error };
       }
       ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
       // Only this private parse is changed. A skipped body must pass the same native
@@ -361,11 +370,11 @@ public sealed class ContractSpecificationChecker {
       options.ProcessSolverOptions(reporter, Microsoft.Dafny.Token.NoToken);
       if (reporter.ErrorCount != 0) {
         verificationProgram = null;
-        return new(false, string.Join("\n", reporter.AllMessages.Select(message => message.Message)), [], []);
+        return new(false, string.Join("\n", reporter.AllMessages.Select(message => message.Message)), [], []) { Outcome = ContractSpecificationOutcome.Error };
       }
     }
     var module = BoogieGenerator.VerifiableModules(verificationProgram).SingleOrDefault(candidate => candidate.FullDafnyName == moduleName);
-    if (module == null) { return new(false, "Native verification owner unavailable: " + moduleName, [], []); }
+    if (module == null) { return new(false, "Native verification owner unavailable: " + moduleName, [], []) { Outcome = ContractSpecificationOutcome.Error }; }
     var verboseNames = selected.Select(check => check.VerboseName).ToHashSet(StringComparer.Ordinal);
     var translated = ContractPhaseRecorder.Measure(phaseObserver, "translation:" + moduleName, cancellationToken, () => {
       Type.ResetScopes();
@@ -380,7 +389,7 @@ public sealed class ContractSpecificationChecker {
     var missing = selected.Where(check => !procedures.Contains(check.VerboseName)).ToList();
     if (missing.Count != 0) {
       return new(false, "Missing native declaration coverage: " + string.Join(", ", missing.Select(check => check.VerboseName)),
-        selectedImplementations.Select(implementation => implementation.Name).ToList(), []);
+        selectedImplementations.Select(implementation => implementation.Name).ToList(), []) { Outcome = ContractSpecificationOutcome.Error };
     }
     var assertionFree = selected.Where(check => !selectedImplementations.Any(implementation =>
       implementation.VerboseName == check.VerboseName)).Select(check => Name(check.Declaration)).Distinct().ToList();
@@ -392,7 +401,7 @@ public sealed class ContractSpecificationChecker {
       () => ContractSequenceRefinementProof.Apply(translated, selectedImplementations, cancellationToken, deadlineTimestamp));
     ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
     if (!sequenceProof.Preserved) {
-      return Evidence(new(false, sequenceProof.Failure ?? "Original native assertion preservation failed.", implementationNames, []));
+      return Evidence(new(false, sequenceProof.Failure ?? "Original native assertion preservation failed.", implementationNames, []) { Outcome = ContractSpecificationOutcome.Error });
     }
     if (selectedImplementations.Count == 0) {
       ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
@@ -415,6 +424,12 @@ public sealed class ContractSpecificationChecker {
     if (success) { checkedChecks.UnionWith(selected); }
     return Evidence(new ContractSpecificationResult(success, globalContext + "\n" + log, implementationNames, assertionFree,
       stats.VerifiedCount, stats.ErrorCount) with {
+      Outcome = success ? ContractSpecificationOutcome.Verified :
+        stats.SolverExceptionCount > 0 || outcome is not (PipelineOutcome.Done or PipelineOutcome.VerificationCompleted)
+          ? ContractSpecificationOutcome.Error : stats.TimeoutCount > 0 ? ContractSpecificationOutcome.Timeout :
+        stats.InconclusiveCount + stats.OutOfResourceCount + stats.OutOfMemoryCount > 0
+          ? ContractSpecificationOutcome.Unknown : stats.ErrorCount > 0
+            ? ContractSpecificationOutcome.VerificationFailed : ContractSpecificationOutcome.Error,
       CoveredNativeChecks = success ? selected.Select(check => check.VerboseName).ToList() : [],
       VerifiedImplementationChecks = success ? selected.Where(check => selectedImplementations.Any(implementation =>
         implementation.VerboseName == check.VerboseName)).Select(check => check.VerboseName).ToList() : []
@@ -424,7 +439,8 @@ public sealed class ContractSpecificationChecker {
       SourceSetHash = sourceSetHash,
       TrustSetHash = trustSetHash,
       SequenceRefinement = sequenceProof,
-      Role = scope.Role
+      Role = scope.Role,
+      EffectiveOptionsIdentity = DefinitionAnalysis.ContextOptionsIdentity(options)
     };
   }
 

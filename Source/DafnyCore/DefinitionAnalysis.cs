@@ -277,12 +277,13 @@ public static partial class DefinitionAnalysis {
     bool includeStatements = false,
     bool includeSemanticFacts = false,
     bool includeProofInputs = false,
-    IEnumerable<ICanVerify>? verificationTargets = null) {
+    IEnumerable<ICanVerify>? verificationTargets = null,
+    IReadOnlyDictionary<string, string>? sourceSnapshots = null) {
     var (sourceFacts, programFacts) = SourceFacts.ForDocument(program, analysisSourceUris);
     var definitions = Analyze(program, sourceFacts, analysisSourceUris, includeStatements);
     if (includeSemanticFacts) {
       programFacts = programFacts with {
-        SemanticFacts = SemanticFactsFor(program.Options, analysisSourceUris, definitions, programFacts)
+        SemanticFacts = SemanticFactsFor(program.Options, analysisSourceUris, definitions, programFacts, sourceSnapshots)
       };
     }
     if (verificationTargets != null) {

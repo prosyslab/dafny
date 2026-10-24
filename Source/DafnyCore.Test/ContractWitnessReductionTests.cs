@@ -8,6 +8,169 @@ using Xunit;
 namespace DafnyCore.Test;
 
 public class ContractWitnessReductionTests {
+  // Bounded enumeration retains the actual full ground body before its checked native witness obligation.
+  [Fact]
+  public async Task BoundedExistentialPublishesActualGroundWitness() {
+    const string source = "method M() ensures exists y:int :: 0 <= y && y < 1 {}";
+    var result = await Reduce(source, new ContractReductionBudget(), composeNativeProof: true);
+    Assert.Equal(ContractReductionDecision.True, result.Decision);
+    Assert.False(result.BudgetExhausted);
+    Assert.Equal(1U, result.QuantifierInstancesUsed);
+    var witness = Assert.Single(result.ProofWitnesses);
+    var body = Assert.IsType<BinaryExpr>(witness.Resolved);
+    Assert.Equal(BinaryExpr.ResolvedOpcode.And, body.ResolvedOp);
+    var lower = Assert.IsType<BinaryExpr>(body.E0.Resolved);
+    var upper = Assert.IsType<BinaryExpr>(body.E1.Resolved);
+    Assert.Equal(BinaryExpr.ResolvedOpcode.Le, lower.ResolvedOp);
+    Assert.Equal(BinaryExpr.ResolvedOpcode.Lt, upper.ResolvedOp);
+    Assert.True(Expression.IsIntLiteral(lower.E0.Resolved, out var lowerBound) && lowerBound == 0);
+    Assert.True(Expression.IsIntLiteral(lower.E1.Resolved, out var lowerValue) && lowerValue == 0);
+    Assert.True(Expression.IsIntLiteral(upper.E0.Resolved, out var upperValue) && upperValue == 0);
+    Assert.True(Expression.IsIntLiteral(upper.E1.Resolved, out var upperBound) && upperBound == 1);
+    Assert.Empty(FreeVariablesUtil.ComputeFreeVariables(new DafnyOptions(DafnyOptions.Default), witness));
+    var obligation = Assert.Single(result.ProofObligations);
+    Assert.Equal(ContractReductionProofKind.Witness, obligation.Kind);
+    Assert.Same(witness, obligation.Expression);
+  }
+
+  // Every binder comes from the same successful assignment, including a success after earlier false instances.
+  [Theory]
+  [InlineData("<", 0, 1U)]
+  [InlineData(">", 1, 4U)]
+  public async Task BoundedExistentialCopiesCompleteSuccessfulAssignment(string comparison, int value,
+    uint instances) {
+    var result = await Reduce("method M() ensures exists y:int, z:int :: " +
+      "0 <= y && y < 2 && 0 <= z && z < 2 && y + z " + comparison + " 1 {}",
+      new ContractReductionBudget(), composeNativeProof: true);
+    Assert.Equal(ContractReductionDecision.True, result.Decision);
+    Assert.False(result.BudgetExhausted);
+    Assert.Equal(instances, result.QuantifierInstancesUsed);
+    var witness = Assert.Single(result.ProofWitnesses);
+    Assert.Empty(FreeVariablesUtil.ComputeFreeVariables(new DafnyOptions(DafnyOptions.Default), witness));
+    var sum = Assert.Single(witness.DescendantsAndSelf.OfType<BinaryExpr>()
+      .Where(binary => binary.ResolvedOp == BinaryExpr.ResolvedOpcode.Add));
+    Assert.True(Expression.IsIntLiteral(sum.E0.Resolved, out var left) && left == value);
+    Assert.True(Expression.IsIntLiteral(sum.E1.Resolved, out var right) && right == value);
+    var obligation = Assert.Single(result.ProofObligations);
+    Assert.Equal(ContractReductionProofKind.Witness, obligation.Kind);
+    Assert.Same(witness, obligation.Expression);
+  }
+
+  // False, empty, unbounded and universal reductions cannot manufacture an existential witness.
+  [Theory]
+  [InlineData("exists y:int :: 0 <= y && y < 2 && y*y < 0", ContractReductionDecision.False)]
+  [InlineData("exists y:int :: 0 <= y && y < 0", ContractReductionDecision.False)]
+  [InlineData("exists y:int :: y*y == 2", ContractReductionDecision.Residual)]
+  [InlineData("forall y:int | 0 <= y && y < 1 :: y < 1", ContractReductionDecision.True)]
+  public async Task BoundedEnumerationRequiresActualExistentialSuccess(string property,
+    ContractReductionDecision expected) {
+    var result = await Reduce("method M() ensures " + property + " {}", new ContractReductionBudget(),
+      composeNativeProof: true);
+    Assert.Equal(expected, result.Decision);
+    Assert.Empty(result.ProofWitnesses);
+    Assert.Empty(result.ProofObligations);
+  }
+
+  // A shared instance cap reached before success leaves the original quantified residual without guidance.
+  [Fact]
+  public async Task BoundedExistentialExhaustionDoesNotPublishWitness() {
+    var result = await Reduce("method M() ensures exists y:int :: 0 <= y && y < 4 && y*y > 0 {}",
+      new ContractReductionBudget(quantifierInstanceLimit: 1), composeNativeProof: true);
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Contains(ContractReductionExhaustionReason.QuantifierInstanceLimit, result.ExhaustionReasons);
+    Assert.Equal(1U, result.QuantifierInstancesUsed);
+    Assert.Empty(result.ProofWitnesses);
+    Assert.Empty(result.ProofObligations);
+  }
+
+  // Enumerating a concrete assignment whose remaining condition is symbolic supplies no witness.
+  [Fact]
+  public async Task BoundedExistentialSymbolicInstanceRemainsResidual() {
+    var result = await Reduce("method M(guard:bool) ensures exists y:int :: 0 <= y && y < 1 && guard {}",
+      new ContractReductionBudget(), composeNativeProof: true);
+    Assert.Equal(ContractReductionDecision.Residual, result.Decision);
+    Assert.Empty(result.ExhaustionReasons);
+    Assert.Equal(1U, result.QuantifierInstancesUsed);
+    Assert.Empty(result.ProofWitnesses);
+    Assert.Empty(result.ProofObligations);
+  }
+
+  // One node short of recording the complete bounded witness retains charged enumeration but no proof guidance.
+  [Fact]
+  public async Task BoundedExistentialWitnessHonorsExpressionBudget() {
+    const string source = "method M() ensures exists y:int :: 0 <= y && y < 1 {}";
+    var complete = await Reduce(source, new ContractReductionBudget(), composeNativeProof: true);
+    Assert.Equal(ContractReductionDecision.True, complete.Decision);
+    Assert.Single(complete.ProofWitnesses);
+    Assert.Single(complete.ProofObligations);
+    var exactLimit = complete.SubstitutedExpressionNodeCount + complete.ExpressionExpansionNodeCount;
+    var exact = await Reduce(source, new ContractReductionBudget(expressionNodeLimit: exactLimit),
+      composeNativeProof: true);
+    Assert.Equal(ContractReductionDecision.True, exact.Decision);
+    Assert.Empty(exact.ExhaustionReasons);
+    Assert.Single(exact.ProofWitnesses);
+    Assert.Single(exact.ProofObligations);
+
+    var limited = await Reduce(source, new ContractReductionBudget(expressionNodeLimit: exactLimit - 1),
+      composeNativeProof: true);
+    Assert.Equal(ContractReductionDecision.Residual, limited.Decision);
+    Assert.Contains(ContractReductionExhaustionReason.ExpressionNodeLimit, limited.ExhaustionReasons);
+    Assert.Equal(1U, limited.QuantifierInstancesUsed);
+    Assert.Empty(limited.ProofWitnesses);
+    Assert.Empty(limited.ProofObligations);
+    Assert.InRange(limited.ExpressionExpansionNodeCount, 1U, complete.ExpressionExpansionNodeCount - 1);
+  }
+
+  // The retained body includes the declared nat binder's implied nonnegative constraint.
+  [Fact]
+  public async Task BoundedExistentialRetainsRefinedBinderConstraint() {
+    var result = await Reduce("method M() ensures exists y:nat :: y < 1 {}", new ContractReductionBudget(),
+      composeNativeProof: true);
+    Assert.Equal(ContractReductionDecision.True, result.Decision);
+    var witness = Assert.Single(result.ProofWitnesses);
+    var body = Assert.IsType<BinaryExpr>(witness.Resolved);
+    Assert.Equal(BinaryExpr.ResolvedOpcode.And, body.ResolvedOp);
+    var constraint = Assert.IsType<BinaryExpr>(body.E0.Resolved);
+    Assert.Equal(BinaryExpr.ResolvedOpcode.Le, constraint.ResolvedOp);
+    Assert.True(Expression.IsIntLiteral(constraint.E0.Resolved, out var bound) && bound == 0);
+    Assert.True(Expression.IsIntLiteral(constraint.E1.Resolved, out var value) && value == 0);
+    Assert.Same(witness, Assert.Single(result.ProofObligations).Expression);
+  }
+
+  // A bounded witness cannot escape an outer binder even when its occurrence simplifies away.
+  [Fact]
+  public async Task BoundedExistentialDoesNotEscapeOuterBinder() {
+    var result = await Reduce("method M() ensures forall outer:int :: exists y:int :: " +
+      "0 <= y && y < 1 && (outer < 0 || true) {}", new ContractReductionBudget(), composeNativeProof: true);
+    Assert.Equal(ContractReductionDecision.True, result.Decision);
+    Assert.Empty(result.ProofWitnesses);
+    Assert.Empty(result.ProofObligations);
+  }
+
+  // Negation and guarded or dead branches preserve the existing rollback of bounded witness artifacts.
+  [Theory]
+  [InlineData("!(exists y:int :: 0 <= y && y < 1)")]
+  [InlineData("guard ==> (exists y:int :: 0 <= y && y < 1)")]
+  [InlineData("true || (exists y:int :: 0 <= y && y < 1)")]
+  [InlineData("if guard then (exists y:int :: 0 <= y && y < 1) else true")]
+  public async Task BoundedExistentialKeepsContextualRollback(string property) {
+    var result = await Reduce("method M(guard:bool) ensures " + property + " {}", new ContractReductionBudget(),
+      composeNativeProof: true);
+    Assert.Empty(result.ProofWitnesses);
+    Assert.Empty(result.ProofObligations);
+  }
+
+  // Ordinary reduction keeps its existing Boolean result without publishing new proof guidance.
+  [Fact]
+  public async Task BoundedExistentialKeepsOrdinaryReductionBehavior() {
+    var result = await Reduce("method M() ensures exists y:int :: 0 <= y && y < 1 {}",
+      new ContractReductionBudget());
+    Assert.Equal(ContractReductionDecision.True, result.Decision);
+    Assert.Equal(1U, result.QuantifierInstancesUsed);
+    Assert.Empty(result.ProofWitnesses);
+    Assert.Empty(result.ProofObligations);
+  }
+
   // Character displays and strings compare semantic code points in both Unicode and legacy modes.
   [Theory]
   [InlineData("['\\U{1F600}', 'x'] == \"\\U{1F600}x\"", true, ContractReductionDecision.True)]
@@ -1018,13 +1181,33 @@ public class ContractWitnessReductionTests {
     Assert.Equal(0U, result.ProofCompositionNodesAdmitted);
   }
 
-  // An incomplete value parent discards a completed existential's support while retaining the work charged to it.
+  // A bounded remaining binder completes the live existential's staged conversion support and witness.
+  [Fact]
+  public async Task LiveExistentialSupportCompletesBoundedRemainingBinder() {
+    var result = await Reduce(SourceDerivedDigitWidthDeclarations(useCast: true) +
+      "method M() ensures exists parsed:NatParse, index:int :: PositiveNatRelation(\"5\", parsed) && " +
+      "parsed == NatOk(5) && 0 <= index && index < 1 {}", new ContractReductionBudget(), composeNativeProof: true);
+    Assert.Equal(ContractReductionDecision.True, result.Decision);
+    Assert.Empty(result.ExhaustionReasons);
+    Assert.True(result.QuantifierInstancesUsed > 0);
+    Assert.Contains(result.ProofWitnesses, witness => witness.DescendantsAndSelf.OfType<BinaryExpr>()
+      .Any(binary => binary.ResolvedOp == BinaryExpr.ResolvedOpcode.Lt &&
+        Expression.IsIntLiteral(binary.E0.Resolved, out var index) && index == 0 &&
+        Expression.IsIntLiteral(binary.E1.Resolved, out var upper) && upper == 1));
+    AssertAdjacentCheckedIntegerSubsetConversions(result);
+    Assert.Contains(result.ProofObligations, obligation => obligation.Kind == ContractReductionProofKind.Witness &&
+      result.ProofWitnesses.Any(witness => ReferenceEquals(witness, obligation.Expression)));
+  }
+
+  // An incomplete value parent discards bounded completion's support, including when recording exhausts its budget.
   [Fact]
   public async Task LiveExistentialSupportRollsBackIncompleteValueParent() {
-    var result = await Reduce(SourceDerivedDigitWidthDeclarations(useCast: true) +
+    var source = SourceDerivedDigitWidthDeclarations(useCast: true) +
       "ghost function Outer(n:int, marker:int):int { if marker == 0 && " +
-      "(exists parsed:NatParse :: PositiveNatRelation(\"5\", parsed) && parsed == NatOk(5)) then n else 0 } " +
-      "method M(n:int) ensures Outer(n, 0) == n {}", new ContractReductionBudget(), composeNativeProof: true);
+      "(exists parsed:NatParse, index:int :: PositiveNatRelation(\"5\", parsed) && " +
+      "parsed == NatOk(5) && 0 <= index && index < 1) then n else 0 } " +
+      "method M(n:int) ensures Outer(n, 0) == n {}";
+    var result = await Reduce(source, new ContractReductionBudget(), composeNativeProof: true);
 
     Assert.Equal(ContractReductionDecision.Residual, result.Decision);
     Assert.Empty(result.ExhaustionReasons);
@@ -1033,6 +1216,16 @@ public class ContractWitnessReductionTests {
     Assert.Equal(0U, result.ProofCompositionNodesAdmitted);
     Assert.True(result.ExpressionExpansionNodeCount > 0);
     Assert.True(result.QuantifierInstancesUsed > 0);
+
+    var exactLimit = result.SubstitutedExpressionNodeCount + result.ExpressionExpansionNodeCount;
+    var limited = await Reduce(source, new ContractReductionBudget(expressionNodeLimit: exactLimit - 1),
+      composeNativeProof: true);
+    Assert.Equal(ContractReductionDecision.Residual, limited.Decision);
+    Assert.Contains(ContractReductionExhaustionReason.ExpressionNodeLimit, limited.ExhaustionReasons);
+    Assert.Empty(limited.ProofObligations);
+    Assert.Empty(limited.ProofWitnesses);
+    Assert.Equal(0U, limited.ProofCompositionNodesAdmitted);
+    Assert.InRange(limited.ExpressionExpansionNodeCount, 1U, result.ExpressionExpansionNodeCount - 1);
   }
 
   // A false range leaves the term unreachable and cannot promote its conversion support through a Boolean result.

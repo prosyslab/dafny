@@ -22,6 +22,24 @@ public sealed record DafnyProofInputs(
 
 public static partial class DefinitionAnalysis {
   private static readonly Lazy<string?> ProofToolchainIdentity = new(ProofToolchainHash);
+  /// <summary>Identifies the bounded native producer assemblies without granting proof-input evidence.</summary>
+  public static string? ContextToolchainIdentity() => ProofToolchainIdentity.Value;
+
+  /// <summary>Identifies effective resolver and verifier settings, including native solver options.</summary>
+  public static string ContextOptionsIdentity(DafnyOptions options) => ProofOptionsHash(options);
+
+  /// <summary>Rejects transformations whose dependency semantics are outside native diagnostic binding.</summary>
+  public static bool SupportsDiagnosticContext(DafnyOptions options) =>
+    !(options.Get(CommonOptionBag.PluginOption)?.Count is > 0 ||
+      options.AdditionalPlugins.Count > 0 || options.AdditionalPluginArguments.Count > 0 ||
+      !options.Plugins.SequenceEqual(DafnyOptions.DefaultPlugins) ||
+      options.Get(BoogieOptionBag.BoogieArguments)?.Any() == true ||
+      options.InlineDepth != DafnyOptions.Default.InlineDepth ||
+      options.StratifiedInlining != DafnyOptions.Default.StratifiedInlining ||
+      options.ProcedureInlining != DafnyOptions.Default.ProcedureInlining || options.InferModifies ||
+      options.LoopUnrollCount != DafnyOptions.Default.LoopUnrollCount ||
+      options.SoundLoopUnrolling != DafnyOptions.Default.SoundLoopUnrolling ||
+      options.Get(CommonOptionBag.Libraries)?.Any() == true || options.Get(CommonOptionBag.Prelude) != null);
   private sealed record TranslatedProofDeclaration(
     string Module,
     string Sha256,

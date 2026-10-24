@@ -1,6 +1,6 @@
 # Commit the reviewed native PBT repairs
 
-Status: in-progress
+Status: done
 Date: 2026-10-25
 Owner: native Dafny repository
 Related: [Cosyn delivery](../../plan/2026-10-25-pbt-reviewed-main-delivery.md), [native reconciliation](2026-10-24-pbt-agent-experience-delivery.md)
@@ -16,7 +16,7 @@ validation evidence and a reviewed staged diff for each logical unit.
 
 ## Scope and evidence
 
-The exact23production and13test/project leaves listed in the earlier native
+The exact 23 production and 13 test/project leaves listed in the earlier native
 reconciliation plan are the candidate scope. The bounded existential reduction
 changes in PartialEvaluatorEngine, PartialEvaluatorVisitor and QuantifierBounds
 belong only if independent review confirms they are the PBT witness dependency.
@@ -56,9 +56,9 @@ limits below; no source delivery implies improved csplit success.
 
 ## Progress
 
-Independent current-tree native dependency/evidence review is in progress.
+Independent current-tree native dependency/evidence review accepted the source closure.
 
-Independent review accepted the exact source closure and35/36N/K leaf parity;
+Independent review accepted the exact source closure and 35/36 N/K leaf parity;
 the only difference is the default-on Driver.Test asset guard. New unused
 ContractRuntimePreparationModels.cs and ContractRuntimeFrontendModelsTests.cs
 remain unstaged. The witness rewriter edits are required by checked screen
@@ -87,7 +87,16 @@ Stage two units in this order:
    Add the concise delivery wiki and index after recording actual source limits.
 
 Working files remain intact during index-only CLI/index projection. Historical
-detached evidence covers exact selected26/26, related27/27, Core209/209 and
-screen36/36 source checks, plus the actual compiled seed forwarding. These are
+detached evidence covers exact selected 26/26, related 27/27, Core 209/209 and
+screen 36/36 source checks, plus the actual compiled seed forwarding. These are
 matching-source evidence, not executed canonical N checks. New owner records
 supersede broad historical source-only handoff wording for this delivery only.
+
+Runtime unit committed as `6f24e6046` after independent staged acceptance of
+its exact 16 paths and source closure; git diff --cached --check passed. The screen
+unit is committed separately with the concise wiki. Its source has unchanged exact
+matching-build evidence; canonical N builds remain explicitly unrun.
+
+The two source units have been committed after independent index review. The
+source-delivery acceptance scope is complete; canonical build execution remains
+outside this completed scope and is explicitly unrun. No paid run was resumed.

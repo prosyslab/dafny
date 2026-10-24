@@ -480,12 +480,22 @@ internal sealed partial class PartialEvaluatorEngine {
     Func<Expression, Expression> simplifyAfterSubst,
     out Expression rewritten,
     bool emitOverflowResidual) {
+    return TryUnrollQuantifier(quantifierExpr, simplifyAfterSubst, out rewritten, emitOverflowResidual, null);
+  }
+
+  internal bool TryUnrollQuantifier(
+    QuantifierExpr quantifierExpr,
+    Func<Expression, Expression> simplifyAfterSubst,
+    out Expression rewritten,
+    bool emitOverflowResidual,
+    Action<IReadOnlyDictionary<IVariable, Expression>> onExistentialWitness) {
     return GetQuantifierBounds().TryUnrollQuantifier(
       quantifierExpr,
       simplifyAfterSubst,
       out rewritten,
       emitOverflowResidual,
-      UsesContractConcreteProfile ? TryReserveQuantifierInstanceExpansion : null);
+      UsesContractConcreteProfile ? TryReserveQuantifierInstanceExpansion : null,
+      onExistentialWitness);
   }
 
   private bool TryReserveQuantifierInstanceExpansion(
