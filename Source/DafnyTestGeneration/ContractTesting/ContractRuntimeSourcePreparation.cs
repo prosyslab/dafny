@@ -24,6 +24,10 @@ public sealed record ContractRuntimeGeneratorNames(string Random, string? Receiv
   public string MethodName { get; init; } = "Generate";
 }
 
+internal sealed class ContractRuntimeDraftPreparationException(string symbol, string path, NotSupportedException error)
+  : NotSupportedException("Draft " + symbol + " (" + path + "): " + error.Message, error) {
+}
+
 /// <summary>Defines the exact generator signature expected for a runtime goal.</summary>
 public static class ContractRuntimeGeneratorSignature {
   /// <summary>Chooses deterministic diagnostic names outside the goal's explicit input names.</summary>
@@ -59,13 +63,11 @@ public static class ContractRuntimeGeneratorSignature {
 
   /// <summary>Selects the exact prepared generator identified by its target marker, module, source and canonical name.</summary>
   public static Method Select(Program program, Method goal, string expectedMethodName) {
-    if (!program.Descendants().OfType<Method>().Any(method => ReferenceEquals(method, goal))) {
-      throw new ArgumentException("The selected goal must belong to the supplied program.", nameof(goal));
-    }
-    var candidates = goal.EnclosingClass.EnclosingModuleDefinition.TopLevelDecls.OfType<DefaultClassDecl>()
+    var nativeGoal = ContractCallableSelector.NativeCallable(program, goal);
+    var candidates = nativeGoal.EnclosingClass.EnclosingModuleDefinition.TopLevelDecls.OfType<DefaultClassDecl>()
       .SelectMany(declaration => declaration.Members).OfType<Method>()
-      .Where(method => method.Name == expectedMethodName && method.Origin.Uri == goal.Origin.Uri &&
-        HasExactMarker(method, goal.FullDafnyName)).ToList();
+      .Where(method => method.Name == expectedMethodName && method.Origin.Uri == nativeGoal.Origin.Uri &&
+        HasExactMarker(method, nativeGoal.FullDafnyName)).ToList();
     if (candidates.Count != 1 || Names(goal, candidates.SingleOrDefault()).MethodName != expectedMethodName) {
       throw new NotSupportedException("The prepared generator does not match its exact target, module, source and canonical name.");
     }
@@ -116,9 +118,35 @@ public static class ContractRuntimeSourcePreparation {
   private sealed record Edit(Uri Uri, int Start, int Length, string Text,
     ContractSource Original, int OriginalStart, bool Anchor = false, int TiePriority = 0);
 
-  public static async Task<ContractRuntimePreparedSources> PrepareAsync(Program program,
+  public static Task<ContractRuntimePreparedSources> PrepareAsync(Program program,
     IReadOnlyList<ContractSource> sources, Method goal, IReadOnlyList<ContractRuntimeDraft> drafts,
-    ContractSource generator, DafnyOptions options, CancellationToken cancellationToken) {
+    ContractSource generator, DafnyOptions options, CancellationToken cancellationToken) =>
+    PrepareCoreAsync(program, sources, goal, drafts, generator, options, cancellationToken, false);
+
+  internal static Task<ContractRuntimePreparedSources> PrepareSelectedAsync(Program program,
+    IReadOnlyList<ContractSource> sources, Method goal, IReadOnlyList<ContractRuntimeDraft> drafts,
+    ContractSource generator, DafnyOptions options, CancellationToken cancellationToken) =>
+    PrepareCoreAsync(program, sources, goal, drafts, generator, options, cancellationToken, true);
+
+  internal static IReadOnlyDictionary<string, ContractRuntimeDraft> IndexDrafts(Program program,
+    IReadOnlyList<ContractRuntimeDraft> drafts) {
+    var callables = Members(program).OfType<MethodOrFunction>().ToList();
+    var indexed = new Dictionary<string, ContractRuntimeDraft>(StringComparer.Ordinal);
+    foreach (var draft in drafts) {
+      var targets = callables.Where(member => member.FullDafnyName == draft.Symbol || member.FullName == draft.Symbol).ToList();
+      if (targets.Count != 1) {
+        throw new NotSupportedException("Draft target must identify one callable: " + draft.Symbol);
+      }
+      if (!indexed.TryAdd(targets[0].FullDafnyName, draft)) {
+        throw new ArgumentException("Duplicate draft for " + targets[0].FullDafnyName);
+      }
+    }
+    return indexed;
+  }
+
+  private static async Task<ContractRuntimePreparedSources> PrepareCoreAsync(Program program,
+    IReadOnlyList<ContractSource> sources, Method goal, IReadOnlyList<ContractRuntimeDraft> drafts,
+    ContractSource generator, DafnyOptions options, CancellationToken cancellationToken, bool classifyDraftFailures) {
     var edits = new List<Edit>();
     var module = goal.EnclosingClass.EnclosingModuleDefinition;
     var source = ContractSourceSnapshot.Find(sources, goal.Origin.Uri);
@@ -131,6 +159,20 @@ public static class ContractRuntimeSourcePreparation {
     var generatorNames = ContractRuntimeGeneratorSignature.Names(goal);
     if (!names.Add(generatorNames.MethodName)) {
       throw new InvalidOperationException("The canonical generator name was not fresh in the original module.");
+    }
+    List<Node>? generatorDeclarations = null;
+    var reservedGeneratorHelpers = new HashSet<string>(StringComparer.Ordinal);
+    if (classifyDraftFailures) {
+      var parsed = await ParseDeclarations(generator, options, cancellationToken);
+      generatorDeclarations = Declarations(parsed).ToList();
+      foreach (var helper in generatorDeclarations.Where(declaration => declaration is not Method method ||
+                 AttributeSymbol(method.Attributes, "pbt_generator") != goal.FullDafnyName)) {
+        var name = HelperName(helper);
+        if (!names.Add(name)) {
+          throw new NotSupportedException("Diagnostic helper collides with a declaration: " + name);
+        }
+        reservedGeneratorHelpers.Add(name);
+      }
     }
     var supplied = new HashSet<string>(StringComparer.Ordinal);
     var installedDraftSymbols = new HashSet<string>(StringComparer.Ordinal);
@@ -145,34 +187,41 @@ public static class ContractRuntimeSourcePreparation {
         throw new NotSupportedException("Draft target must identify one callable: " + draft.Symbol);
       }
       var target = targets[0];
-      var snapshot = new ContractSource(draft.Path, draft.Content, draft.Sha256);
-      var parsed = await ParseDeclarations(snapshot, options, cancellationToken);
-      var declarations = Declarations(parsed).ToList();
-      var marked = declarations.OfType<MethodOrFunction>()
-        .Where(member => AttributeSymbol(member.Attributes, "pbt_draft") == draft.Symbol).ToList();
-      if (marked.Count != 1) {
-        throw new NotSupportedException("A draft must contain exactly one matching pbt_draft declaration: " + draft.Symbol);
+      try {
+        var snapshot = new ContractSource(draft.Path, draft.Content, draft.Sha256);
+        var parsed = await ParseDeclarations(snapshot, options, cancellationToken);
+        var declarations = Declarations(parsed).ToList();
+        var marked = declarations.OfType<MethodOrFunction>()
+          .Where(member => AttributeSymbol(member.Attributes, "pbt_draft") == draft.Symbol).ToList();
+        if (marked.Count != 1) {
+          throw new NotSupportedException("A draft must contain exactly one matching pbt_draft declaration: " + draft.Symbol);
+        }
+        var candidate = marked[0];
+        ValidateSignature(target, candidate);
+        var targetSource = ContractSourceSnapshot.Find(sources, target.Origin.Uri);
+        if (!NeedsDraft(target)) {
+          continue;
+        }
+        var targetModule = target.EnclosingClass.EnclosingModuleDefinition;
+        if (!moduleNames.TryGetValue(targetModule, out var targetNames)) {
+          targetNames = ModuleNames(targetModule);
+          moduleNames.Add(targetModule, targetNames);
+        }
+        foreach (var helper in declarations.Where(declaration => declaration != candidate)) {
+          AddHelper(helper, snapshot, targetModule, program, targetSource, targetNames, edits);
+        }
+        ReplaceBody(target, candidate, snapshot, targetSource, edits);
+        RemoveAttributes(target.Attributes, targetSource, edits);
+        installedDraftSymbols.Add(target.FullDafnyName);
+      } catch (NotSupportedException error) when (classifyDraftFailures) {
+        // This is the selected packet's parse/declaration-validation boundary, not the campaign workflow.
+        throw new ContractRuntimeDraftPreparationException(draft.Symbol, draft.Path, error);
       }
-      var candidate = marked[0];
-      ValidateSignature(target, candidate);
-      var targetSource = ContractSourceSnapshot.Find(sources, target.Origin.Uri);
-      if (!NeedsDraft(target)) {
-        continue;
-      }
-      var targetModule = target.EnclosingClass.EnclosingModuleDefinition;
-      if (!moduleNames.TryGetValue(targetModule, out var targetNames)) {
-        targetNames = ModuleNames(targetModule);
-        moduleNames.Add(targetModule, targetNames);
-      }
-      foreach (var helper in declarations.Where(declaration => declaration != candidate)) {
-        AddHelper(helper, snapshot, targetModule, program, targetSource, targetNames, edits);
-      }
-      ReplaceBody(target, candidate, snapshot, targetSource, edits);
-      RemoveAttributes(target.Attributes, targetSource, edits);
-      installedDraftSymbols.Add(target.FullDafnyName);
     }
-    var parsedGenerator = await ParseDeclarations(generator, options, cancellationToken);
-    var generatorDeclarations = Declarations(parsedGenerator).ToList();
+    if (generatorDeclarations == null) {
+      var parsedGenerator = await ParseDeclarations(generator, options, cancellationToken);
+      generatorDeclarations = Declarations(parsedGenerator).ToList();
+    }
     var generators = generatorDeclarations.OfType<Method>()
       .Where(method => AttributeSymbol(method.Attributes, "pbt_generator") == goal.FullDafnyName).ToList();
     if (generators.Count != 1) {
@@ -187,6 +236,7 @@ public static class ContractRuntimeSourcePreparation {
     if (!names.Remove(generatorNames.MethodName)) {
       throw new InvalidOperationException("The reserved generator name was lost during source preparation.");
     }
+    names.ExceptWith(reservedGeneratorHelpers);
     foreach (var declaration in generatorDeclarations) {
       AddHelper(declaration, generator, module, program, source, names, edits);
     }
@@ -288,11 +338,7 @@ public static class ContractRuntimeSourcePreparation {
 
   private static void AddHelper(Node helper, ContractSource draft, ModuleDefinition module,
     Program program, ContractSource targetSource, HashSet<string> names, List<Edit> edits) {
-    var name = helper switch {
-      MethodOrFunction callable => callable.Name,
-      DatatypeDecl datatype => datatype.Name,
-      _ => throw new NotSupportedException("Diagnostic helpers must be callable or datatype declarations.")
-    };
+    var name = HelperName(helper);
     if (!names.Add(name)) {
       throw new NotSupportedException("Diagnostic helper collides with a declaration: " + name);
     }
@@ -306,6 +352,12 @@ public static class ContractRuntimeSourcePreparation {
     edits.Add(new(ContractSourceSnapshot.UriFor(targetSource.Path), insertion, 0, "\n", targetSource, insertion,
       true, 1));
   }
+
+  private static string HelperName(Node helper) => helper switch {
+    MethodOrFunction callable => callable.Name,
+    DatatypeDecl datatype => datatype.Name,
+    _ => throw new NotSupportedException("Diagnostic helpers must be callable or datatype declarations.")
+  };
 
   private static int InsertionPosition(ModuleDefinition module, Program program, ContractSource targetSource) =>
     module == program.DefaultModuleDef

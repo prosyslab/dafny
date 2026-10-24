@@ -24,6 +24,7 @@ public sealed class ContractRuntimeObligationTransformer {
   private readonly Program program;
   private readonly IReadOnlyList<ContractSource> sources;
   private readonly Method goal;
+  private readonly MethodOrFunction nativeGoal;
   private readonly Method generator;
   private readonly ContractRuntimeSourceMap? sourceMap;
   private readonly IReadOnlyDictionary<string, string> rejected;
@@ -33,6 +34,7 @@ public sealed class ContractRuntimeObligationTransformer {
   private readonly List<ContractRuntimeDeghostExclusion> exclusions = [];
   private readonly HashSet<Function> functions;
   private readonly HashSet<MethodOrFunction> reachable;
+  private readonly HashSet<IteratorDecl> reachableIterators;
   private readonly HashSet<Field> fields;
   private readonly HashSet<Field> compiledGhostFields = [];
   private readonly HashSet<IVariable> variables = [];
@@ -50,6 +52,7 @@ public sealed class ContractRuntimeObligationTransformer {
   private readonly HashSet<MethodOrFunction> shapedCallables = [];
   private readonly string originalSourceSetHash;
   private readonly Lazy<string> resultFamily;
+  private readonly string outputFamily;
   private readonly string runtimeAlias;
   private readonly string runtimeBridge;
   private int nextName;
@@ -60,6 +63,7 @@ public sealed class ContractRuntimeObligationTransformer {
     IReadOnlyDictionary<string, ContractRuntimeDecisionMethod>? decisionCaps = null, IReadOnlySet<string>? diagnosticConstructors = null, string? originalSourceSetHash = null,
     ContractGeneratorProofReport? generatorProof = null, Method? selectedGenerator = null) {
     this.program = program;
+    nativeGoal = ContractCallableSelector.NativeCallable(program, goal);
     var generator = selectedGenerator ?? LegacyGenerator(program, goal);
     if (!Members(program).OfType<Method>().Any(method => ReferenceEquals(method, generator)) ||
         generator.EnclosingClass.EnclosingModuleDefinition != goal.EnclosingClass.EnclosingModuleDefinition) {
@@ -73,6 +77,7 @@ public sealed class ContractRuntimeObligationTransformer {
     }
     // The transformer emits detached text without mutating this resolved program.
     resultFamily = new(() => ContractBodyNames.Family(program, "contractResult"));
+    outputFamily = ContractBodyNames.Family(program, "pbtOutput");
     runtimeAlias = ContractBodyNames.Family(program, "PbtRuntimeAlias");
     runtimeBridge = ContractBodyNames.Family(program, "PbtRuntimeBridge");
     this.originalSourceSetHash = originalSourceSetHash ?? ContractRuntimeTypeEvidence.SourceSetHash(sources);
@@ -95,8 +100,12 @@ public sealed class ContractRuntimeObligationTransformer {
     this.sourceMap = sourceMap;
     this.rejected = rejected ?? new Dictionary<string, string>();
     this.diagnosticConstructors = diagnosticConstructors ?? new HashSet<string>();
-    goalFunction = goal.FunctionFromWhichThisIsByMethodDecl;
-    reachable = DiagnosticReachable(program, goal, generator).ToHashSet();
+    goalFunction = nativeGoal as Function;
+    var diagnosticDependencies = new HashSet<Declaration>();
+    reachable = DiagnosticReachable(program, nativeGoal,
+      generator, diagnosticDependencies).ToHashSet();
+    reachableIterators = diagnosticDependencies.OfType<IteratorDecl>()
+      .Concat(reachable.Select(callable => callable.EnclosingClass).OfType<IteratorDecl>()).ToHashSet();
     fields = reachable.Where(c => !this.diagnosticConstructors.Contains(c.FullDafnyName))
       .SelectMany(c => c.Descendants()).OfType<MemberSelectExpr>()
       .Select(select => select.Member).OfType<Field>().ToHashSet();
@@ -112,20 +121,50 @@ public sealed class ContractRuntimeObligationTransformer {
   public static IEnumerable<MemberDecl> Members(Program program) => program.RawModules()
     .SelectMany(module => module.TopLevelDecls).OfType<TopLevelDeclWithMembers>().SelectMany(type => type.Members);
   private IEnumerable<MemberDecl> Members() => Members(program).Where(m => m.EnclosingClass.EnclosingModuleDefinition.Name is not ("PbtRuntime" or "PbtRandom") && sources.Any(s => ContractSourceSnapshot.UriFor(s.Path) == m.Origin.Uri));
+  private IEnumerable<IteratorDecl> Iterators() => program.RawModules()
+    .Where(module => module.Name is not ("PbtRuntime" or "PbtRandom"))
+    .SelectMany(module => module.TopLevelDecls).OfType<IteratorDecl>()
+    .Where(iterator => sources.Any(source => ContractSourceSnapshot.UriFor(source.Path) == iterator.Origin.Uri));
   public static IEnumerable<ICallable> Reachable(Program program, MethodOrFunction goal) => ContractHarnessBuilder.ReachableCallables(program, goal);
-  public static IEnumerable<MethodOrFunction> DiagnosticReachable(Program program, Method goal) =>
-    DiagnosticReachable(program, goal.FunctionFromWhichThisIsByMethodDecl ?? (MethodOrFunction)goal,
-      goal.EnclosingClass.EnclosingModuleDefinition);
+  public static IEnumerable<MethodOrFunction> DiagnosticReachable(Program program, Method goal) {
+    var nativeGoal = ContractCallableSelector.NativeCallable(program, goal);
+    return DiagnosticReachable(program, nativeGoal, nativeGoal.EnclosingClass.EnclosingModuleDefinition);
+  }
 
   /// <summary>Execution reachability from a goal callable and one exact generator.</summary>
   public static IEnumerable<MethodOrFunction> DiagnosticReachable(Program program, Method goal, Method generator) =>
-    DiagnosticReachable(program, goal.FunctionFromWhichThisIsByMethodDecl ?? (MethodOrFunction)goal, generator);
+    DiagnosticReachable(program, ContractCallableSelector.NativeCallable(program, goal), generator, null);
 
   /// <summary>Execution reachability from a goal callable and the generator inserted at its module's top level.</summary>
   public static IEnumerable<MethodOrFunction> DiagnosticReachable(Program program, MethodOrFunction goal, Method generator) {
+    return DiagnosticReachable(program, goal, generator, null);
+  }
+
+  private static IEnumerable<MethodOrFunction> DiagnosticReachable(Program program, MethodOrFunction goal,
+    Method generator, ISet<Declaration>? declarationDependencies) {
     IEnumerable<MethodOrFunction> roots = [generator];
     return ExecutionReachable(program, goal is Lemma ? roots : roots.Prepend(goal),
+      goal is Lemma ? goal.Ins.Select(formal => formal.Type) : null, declarationDependencies);
+  }
+
+  /// <summary>Returns why runtime execution through a structurally reached iterator is unsupported.</summary>
+  public static string? UnsupportedRuntimeIterator(Program program, Method goal, Method? generator = null) {
+    var root = ContractCallableSelector.NativeCallable(program, goal);
+    IEnumerable<MethodOrFunction> initialRoots = Enumerable.Empty<MethodOrFunction>();
+    if (goal is not Lemma) {
+      initialRoots = new[] { root };
+    }
+    IEnumerable<MethodOrFunction> roots = generator == null
+      ? initialRoots
+      : goal is Lemma ? new MethodOrFunction[] { generator } : new[] { root, generator };
+    var reachable = RuntimeExecutionReachable(program, roots,
       goal is Lemma ? goal.Ins.Select(formal => formal.Type) : null);
+    var iterator = reachable
+      .Select(callable => callable is MemberDecl { EnclosingClass: IteratorDecl declaration } ? declaration : null)
+      .OfType<IteratorDecl>().OrderBy(declaration => declaration.FullDafnyName, StringComparer.Ordinal).FirstOrDefault();
+    return iterator == null ? null :
+      "Runtime execution through iterator '" + iterator.FullDafnyName +
+      "' is not supported; choose a goal and generator that do not construct or advance an iterator.";
   }
 
   /// <summary>Execution reachability using the legacy Generate member in a supplied goal module.</summary>
@@ -152,6 +191,19 @@ public sealed class ContractRuntimeObligationTransformer {
   public static IReadOnlyList<MethodOrFunction> ExecutionReachable(Program program, IEnumerable<MethodOrFunction> roots,
     IEnumerable<Type>? additionalTypes = null, ISet<Declaration>? declarationDependencies = null,
     IEnumerable<ConstantField>? constantRoots = null) {
+    return ExecutionReachable(program, roots, additionalTypes, declarationDependencies, constantRoots, true);
+  }
+
+  internal static IReadOnlyList<MethodOrFunction> RuntimeExecutionReachable(Program program,
+    IEnumerable<MethodOrFunction> roots, IEnumerable<Type>? additionalTypes = null,
+    ISet<Declaration>? declarationDependencies = null, IEnumerable<ConstantField>? constantRoots = null) {
+    return ExecutionReachable(program, roots, additionalTypes, declarationDependencies, constantRoots, false);
+  }
+
+  private static IReadOnlyList<MethodOrFunction> ExecutionReachable(Program program,
+    IEnumerable<MethodOrFunction> roots, IEnumerable<Type>? additionalTypes,
+    ISet<Declaration>? declarationDependencies, IEnumerable<ConstantField>? constantRoots,
+    bool includeIteratorTypeEdges) {
     var edges = program.RawModules().SelectMany(module => module.CallGraph.GetVertices().Concat(module.InterModuleCallGraph.GetVertices()))
       .GroupBy(vertex => vertex.N).ToDictionary(group => group.Key, group => group.SelectMany(vertex => vertex.Successors).Select(vertex => vertex.N).Distinct().ToList());
     var overrides = Members(program).Where(member => member.OverriddenMember != null).ToList();
@@ -162,7 +214,11 @@ public sealed class ContractRuntimeObligationTransformer {
     while (pending.TryPop(out var callable)) {
       if (!reachable.Add(callable)) { continue; }
       if (callable is Function { ByMethodDecl: { } byMethod }) { pending.Push(byMethod); }
-      foreach (var target in edges.GetValueOrDefault(callable) ?? []) { pending.Push(target); }
+      foreach (var target in edges.GetValueOrDefault(callable) ?? []) {
+        // The resolver models a mentioned iterator type as a call-graph edge to its declaration.
+        // Capability checks omit that pseudo edge while retaining direct _ctor and MoveNext edges.
+        if (includeIteratorTypeEdges || target is not IteratorDecl) { pending.Push(target); }
+      }
       foreach (var function in callable.Descendants().OfType<Expression>().Select(FunctionReference).OfType<Function>()) {
         pending.Push(function);
       }
@@ -391,6 +447,9 @@ public sealed class ContractRuntimeObligationTransformer {
   }
 
   public ContractRuntimeTransformation Transform() {
+    if (UnsupportedRuntimeIterator(program, goal, generator) is { } iteratorReason) {
+      throw new NotSupportedException(iteratorReason);
+    }
     if (lemmaContract && !ContractCallableSelector.SupportsLemmaContract(goal)) {
       throw new NotSupportedException("Unsupported contract-only lemma signature.");
     }
@@ -473,6 +532,7 @@ public sealed class ContractRuntimeObligationTransformer {
         }
       }
     } while (changed);
+    foreach (var iterator in Iterators()) { EraseUnreachableBody(iterator); }
     foreach (var member in Members()) {
       if (member is Function f && functions.Contains(f)) {
         RemoveKeyword(f, "ghost"); RemoveKeyword(f, "opaque"); RemoveAttribute(f.Attributes, "opaque");
@@ -485,7 +545,8 @@ public sealed class ContractRuntimeObligationTransformer {
         RemoveKeyword(field, "ghost");
         compiledGhostFields.Add(field);
       }
-      EraseUnreachableBody(member);
+      // An iterator's generated members share the iterator's source range; its body is handled on the declaration.
+      if (member.EnclosingClass is not IteratorDecl) { EraseUnreachableBody(member); }
       if (member is MethodOrConstructor { Body: { } body } method && reachable.Contains(method) && (!method.IsGhost || method is Constructor)) {
         if (method is Constructor) { RemoveKeyword(method, "ghost"); }
         foreach (var formal in method.Ins.Concat(method.Outs).Where(f => f.IsGhost && variables.Contains(f))) { RemoveKeyword(formal, "ghost"); }
@@ -562,7 +623,7 @@ public sealed class ContractRuntimeObligationTransformer {
     var transformed = Apply(sources, edits);
     var source = ContractSourceSnapshot.Find(sources, goal.Origin.Uri);
     var prepared = new ContractPreparedProgram(program, goal, source,
-      new(source.Path, goal.Origin.line, goal.Origin.col, goal.FullDafnyName, source.Sha256), OriginalCallable: goal.FunctionFromWhichThisIsByMethodDecl ?? (MethodOrFunction)goal, Sources: sources);
+      new(source.Path, goal.Origin.line, goal.Origin.col, goal.FullDafnyName, source.Sha256), OriginalCallable: nativeGoal, Sources: sources);
     return new(transformed, clauses, exclusions,
       (goal.EnclosingClass.EnclosingModuleDefinition.FullDafnyName is { Length: > 0 } moduleName ? moduleName + "." : "") + mainName, prepared,
       compiledGhostFields) { EntryRequiresOmitted = omitEntryRequires };
@@ -614,6 +675,22 @@ public sealed class ContractRuntimeObligationTransformer {
 
   // Compiled bodies outside the goal/generator call graph are never executed by a sample. Replacing them
   // with traps keeps unrelated native dependencies out of the diagnostic without touching any contract.
+  private void EraseUnreachableBody(IteratorDecl iterator) {
+    var module = iterator.EnclosingModuleDefinition;
+    if (reachableIterators.Contains(iterator) || iterator.SignatureIsOmitted ||
+        module.ModuleKind != ModuleKindEnum.Concrete || !module.ShouldCompile(program.Compilation) ||
+        !ProgramResolver.ShouldCompile(iterator)) {
+      return;
+    }
+    if (iterator.Body is { } body) {
+      Replace(body, "{ " + RuntimeChecks + ".UnreachableBody(); }");
+    } else {
+      var end = iterator.EndToken;
+      Insert(iterator.Origin.Uri, end.pos + Encoding.UTF8.GetByteCount(end.val + end.TrailingTrivia),
+        "\n{ " + RuntimeChecks + ".UnreachableBody(); }\n");
+    }
+  }
+
   private void EraseUnreachableBody(MemberDecl member) {
     if (member is not MethodOrFunction callable || reachable.Contains(callable)) { return; }
     if (callable is Constructor constructor) {
@@ -762,7 +839,7 @@ public sealed class ContractRuntimeObligationTransformer {
     var index = 0;
     var sourceCallables = Members().OfType<MethodOrFunction>().ToHashSet();
     var callables = lemmaContract ? reachable.Where(sourceCallables.Contains) :
-      Reachable(program, goal.FunctionFromWhichThisIsByMethodDecl ?? (MethodOrFunction)goal).OfType<MethodOrFunction>();
+      Reachable(program, nativeGoal).OfType<MethodOrFunction>();
     var bodies = callables
       .Select(c => (Callable: c, Body: c switch { MethodOrConstructor m => (INode?)m.Body, Function f => (INode?)f.ByMethodBody ?? f.Body, _ => null }))
       .Where(c => c.Body != null && (!c.Callable.IsGhost || c.Callable is Function f && functions.Contains(f)))
@@ -900,18 +977,33 @@ public sealed class ContractRuntimeObligationTransformer {
     clauses.Add(new(obligation, evaluated, values, owner, unvalidated, heapPostcondition, typeConstraint, location.Sha256, originalSourceSetHash,
       heapPostcondition != null && kind == ContractRuntimeObligationKind.CalleePostcondition ? owner.FullDafnyName : null));
     var encodedValues = values.Where(v => CompilableType(v.Type) && (!v.IsGhost || variables.Contains(v))).Select(v => SerializeNamed(v.Name, v.Name, v.Type)).ToList();
+    var captures = "";
     string check;
     if (decision == ContractRuntimeDecisionMethod.Runtime) {
+      // Only executable rendering uses snapshots; original clauses and proof bindings retain their formals.
+      var referenced = Expressions(evaluated).OfType<IdentifierExpr>().Select(identifier => identifier.Var).ToHashSet();
+      if (extra is { } additional) {
+        referenced.UnionWith(Expressions(additional.Value).OfType<IdentifierExpr>().Select(identifier => identifier.Var));
+      }
+      Dictionary<IVariable, Expression> outputValues = [];
+      foreach (var formal in owner.Outs.Where(formal => referenced.Contains(formal) &&
+                 CompilableType(formal.Type) && (!formal.IsGhost || variables.Contains(formal)))) {
+        var local = new BoundVar(formal.Origin, outputFamily + nextName++, formal.Type);
+        outputValues.Add(formal, Expression.CreateIdentExpr(local));
+        captures += "var " + local.Name + " := " + formal.Name + ";\n";
+      }
+      var substituteOutputs = new RuntimeSubstituter(node => node is IdentifierExpr identifier
+        ? outputValues.GetValueOrDefault(identifier.Var) : null);
       // Contract expressions follow the same validity boundary as executable bodies.
-      var text = typeTest ?? Printer.ExprToString(program.Options, Render(evaluated, owner.EnclosingClass.EnclosingModuleDefinition, true, definingFunction));
+      var text = typeTest ?? Printer.ExprToString(program.Options, Render(substituteOutputs.Substitute(evaluated), owner.EnclosingClass.EnclosingModuleDefinition, true, definingFunction));
       if (extra is { } named) {
-        encodedValues.Add(SerializeNamed(named.Label, "(" + Printer.ExprToString(program.Options, Render(named.Value, owner.EnclosingClass.EnclosingModuleDefinition, true, definingFunction)) + ")", named.Type));
+        encodedValues.Add(SerializeNamed(named.Label, "(" + Printer.ExprToString(program.Options, Render(substituteOutputs.Substitute(named.Value), owner.EnclosingClass.EnclosingModuleDefinition, true, definingFunction)) + ")", named.Type));
       }
       check = $"{RuntimeChecks}.Check({Quote(id)}, {iteration}, {RuntimeChecks}.Evaluated({RuntimeChecks}.BeginCheck() && ({text})), {EncodeFragments(encodedValues)})";
     } else {
       check = $"{RuntimeChecks}.Checkpoint({Quote(id)}, {iteration}, {EncodeFragments(encodedValues)})";
     }
-    return Location(origin) + (decision == ContractRuntimeDecisionMethod.Runtime &&
+    return Location(origin) + captures + (decision == ContractRuntimeDecisionMethod.Runtime &&
       (kind == ContractRuntimeObligationKind.EntryPrecondition || stopOnFailure)
       ? "if !" + check + (kind == ContractRuntimeObligationKind.EntryPrecondition
         ? " { " + RuntimeChecks + ".Stop(); }" : " { " + RuntimeChecks + ".Unreachable(); }")

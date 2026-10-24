@@ -1,7 +1,10 @@
+#nullable enable
 using System;
+using System.Collections.Generic;
 using System.CommandLine;
 using System.CommandLine.Invocation;
 using System.ComponentModel;
+using System.Globalization;
 using System.IO;
 using System.Text.Json;
 using System.Threading;
@@ -13,10 +16,19 @@ namespace Microsoft.Dafny;
 public static class TestContractsCommand {
   private static readonly Argument<FileInfo> Request = new("request", "Versioned contract test JSON request.");
   private static readonly Option<bool> RuntimeCheck = new("--runtime-check", "Check concrete runtime obligations using a supplied generator.");
+  private static readonly Option<uint> VerificationSeed = new("--verification-seed", () => 0U,
+    "Set the Boogie verification random seed (0 through 2147483647).");
   private static readonly Option<string> RuntimeWorker = new("--runtime-check-worker") { IsHidden = true };
 
   static TestContractsCommand() {
     OptionRegistry.RegisterOption(RuntimeCheck, OptionScope.Cli);
+    OptionRegistry.RegisterOption(VerificationSeed, OptionScope.Cli);
+    VerificationSeed.AddValidator(result => {
+      if (result.GetValueOrDefault<uint>() > int.MaxValue) {
+        result.ErrorMessage = "Verification seed must be at most 2147483647.";
+      }
+    });
+    DafnyOptions.RegisterLegacyBinding(VerificationSeed, (options, seed) => options.RandomSeed = checked((int)seed));
     OptionRegistry.RegisterOption(RuntimeWorker, OptionScope.Cli);
   }
 
@@ -24,6 +36,7 @@ public static class TestContractsCommand {
     var command = new Command("test-contracts", "Check original contracts on concrete runtime observations of a generator-driven campaign.");
     command.AddArgument(Request);
     command.AddOption(RuntimeCheck);
+    command.AddOption(VerificationSeed);
     command.AddOption(RuntimeWorker);
     DafnyNewCli.SetHandlerUsingDafnyOptionsContinuation(command, ExecuteAsync);
     return command;
@@ -50,7 +63,7 @@ public static class TestContractsCommand {
       runtimeProofRequested = request.ProveGeneratorPreconditions;
       result = runtimeResultPath != null
         ? await ContractRuntimeCampaignRunner.RunAsync(request, options, Path.GetDirectoryName(runtimeResultPath)!, cancellationToken)
-        : await SuperviseRuntimeAsync(request, cancellationToken);
+        : await SuperviseRuntimeAsync(request, options, cancellationToken);
     } catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) {
       result = Failure(ContractTestStatus.Cancelled, "Contract testing was cancelled.");
     } catch (ArgumentException error) {
@@ -77,7 +90,7 @@ public static class TestContractsCommand {
   }
 
   private static async Task<ContractRuntimeCampaignResult> SuperviseRuntimeAsync(ContractRuntimeCampaignRequest request,
-    CancellationToken cancellationToken) {
+    DafnyOptions options, CancellationToken cancellationToken) {
     if (request.TimeoutMilliseconds <= 0) { throw new ArgumentException("Runtime checking requires a positive deadline."); }
     var directory = Path.Combine(Path.GetTempPath(), "dafny-runtime-check-" + Guid.NewGuid().ToString("N"));
     Directory.CreateDirectory(directory);
@@ -86,11 +99,18 @@ public static class TestContractsCommand {
     await File.WriteAllTextAsync(requestPath, JsonSerializer.Serialize(request, ContractJson.Options), cancellationToken);
     using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
     timeout.CancelAfter(request.TimeoutMilliseconds);
-    var process = await ContractExecutionProcess.RunAsync("dotnet", [typeof(DafnyNewCli).Assembly.Location,
+    var arguments = new List<string> {
+      typeof(DafnyNewCli).Assembly.Location,
       "test-contracts",
       requestPath,
       "--runtime-check-worker",
-      resultPath], directory, timeout.Token);
+      resultPath
+    };
+    if (options.RandomSeed is { } verificationSeed) {
+      arguments.Add("--verification-seed");
+      arguments.Add(verificationSeed.ToString(CultureInfo.InvariantCulture));
+    }
+    var process = await ContractExecutionProcess.RunAsync("dotnet", arguments, directory, timeout.Token);
     if (process.Cancelled) {
       return ContractRuntimeCampaignRunner.Failure(ContractRuntimeStatus.Inconclusive,
         "Runtime campaign deadline expired or was cancelled; process tree reaped.", request.Seed, request.ProveGeneratorPreconditions);

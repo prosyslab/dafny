@@ -1,15 +1,265 @@
 #nullable enable
+using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DafnyTestGeneration.ContractTesting;
 using Microsoft.Dafny;
+using Microsoft.Dafny.Compilers;
 using Xunit;
 
 namespace DafnyTestGeneration.Test;
 
 public class ContractRuntimeUnreachableBodyTests {
+  // A detached diagnostic gives an unrelated bodyless iterator a compilable trap without changing its authored contract.
+  [Fact]
+  public async Task AddsBodyToUnreachableConcreteIterator() {
+    const string declarations =
+      "  iterator Unused() yields (value: int)\n" +
+      "    yield ensures value >= 0 // 반복 끝\n";
+    var source = Source(declarations);
+    var snapshots = Snapshots(source);
+    var original = await Parse(snapshots);
+    var goal = ContractCallableSelector.SelectMethod(original, new("M.Complete"), requireConcreteReceiver: false);
+    var generator = ContractRuntimeObligationTransformer.Members(original).OfType<Method>()
+      .Single(method => method.Name == "Generate");
+
+    Assert.Null(ContractRuntimeObligationTransformer.UnsupportedRuntimeIterator(original, goal, generator));
+    var transformed = new ContractRuntimeObligationTransformer(original, snapshots, goal).Transform();
+    var transformedSource = transformed.Sources.Single(snapshot => snapshot.Path == "M.dfy").Content;
+    var reparsed = await Parse(transformed.Sources);
+    var iterator = reparsed.RawModules().SelectMany(module => module.TopLevelDecls).OfType<IteratorDecl>()
+      .Single(candidate => candidate.Name == "Unused");
+
+    Assert.Equal(source, snapshots[0].Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(source), snapshots[0].Sha256);
+    Assert.Contains("yield ensures value >= 0 // 반복 끝", transformedSource);
+    Assert.NotNull(iterator.Body);
+    Assert.Contains(iterator.Body.Descendants().OfType<CallStmt>(), call => call.Method.Name == "UnreachableBody");
+    AssertCodeGenerates(reparsed);
+  }
+
+  // An unrelated implemented iterator keeps its clauses while its executable body becomes the diagnostic trap.
+  [Fact]
+  public async Task ReplacesBodyOfUnreachableConcreteIterator() {
+    const string declarations =
+      "  iterator Unused() yields (value: int)\n" +
+      "    yield requires \"시작\" != \"\"\n" +
+      "    yield ensures value >= 0\n" +
+      "  { value := 1; yield; }\n";
+    var source = Source(declarations);
+    var snapshots = Snapshots(source);
+
+    var transformed = await Transform(snapshots);
+    var transformedSource = transformed.Sources.Single(snapshot => snapshot.Path == "M.dfy").Content;
+    var reparsed = await Parse(transformed.Sources);
+    var iterator = reparsed.RawModules().SelectMany(module => module.TopLevelDecls).OfType<IteratorDecl>()
+      .Single(candidate => candidate.Name == "Unused");
+
+    Assert.Equal(source, snapshots[0].Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(source), snapshots[0].Sha256);
+    Assert.Contains("yield requires \"시작\" != \"\"", transformedSource);
+    Assert.Contains("yield ensures value >= 0", transformedSource);
+    Assert.DoesNotContain("value := 1", transformedSource);
+    Assert.Contains(iterator.Body.Descendants().OfType<CallStmt>(), call => call.Method.Name == "UnreachableBody");
+    AssertCodeGenerates(reparsed);
+  }
+
+  // An iterator type mentioned by selected generator code remains intact even when no generated iterator member is called.
+  [Fact]
+  public async Task PreservesTypeReachableIteratorBody() {
+    const string body = "{ value := 1; yield; }";
+    var source = Source(
+      "  iterator Needed() yields (value: int) " + body + "\n",
+      generatorBody: "{ var unused: Needed? := null; x := 0; }");
+    var snapshots = Snapshots(source);
+    var original = await Parse(snapshots);
+    var goal = ContractCallableSelector.SelectMethod(original, new("M.Complete"), requireConcreteReceiver: false);
+    var generator = ContractRuntimeObligationTransformer.Members(original).OfType<Method>()
+      .Single(method => method.Name == "Generate");
+
+    Assert.Null(ContractRuntimeObligationTransformer.UnsupportedRuntimeIterator(original, goal, generator));
+    var transformed = new ContractRuntimeObligationTransformer(original, snapshots, goal).Transform();
+    var transformedSource = transformed.Sources.Single(snapshot => snapshot.Path == "M.dfy").Content;
+    var reparsed = await Parse(transformed.Sources);
+    var iterator = reparsed.RawModules().SelectMany(module => module.TopLevelDecls).OfType<IteratorDecl>()
+      .Single(candidate => candidate.Name == "Needed");
+
+    Assert.Contains(body, transformedSource);
+    Assert.Contains(iterator.Body.Descendants().OfType<YieldStmt>(), _ => true);
+    Assert.DoesNotContain(iterator.Body.Descendants().OfType<CallStmt>(), call => call.Method.Name == "UnreachableBody");
+    AssertCodeGenerates(reparsed);
+  }
+
+  // Calls reachable only through an unused iterator body do not imply runtime execution of either iterator.
+  [Fact]
+  public async Task IgnoresIteratorBodyOnlyConstructorForRuntimeCapability() {
+    var source = Source(
+      "  iterator Nested() yields (value: int)\n" +
+      "    yield ensures value >= 0\n" +
+      "  method Helper() { var nested := new Nested(); }\n" +
+      "  iterator Unused() yields (value: int)\n" +
+      "    yield ensures value == 1\n" +
+      "  { Helper(); value := 1; yield; }\n",
+      generatorBody: "{ var unused: Unused? := null; x := 0; }");
+    var snapshots = Snapshots(source);
+    var original = await Parse(snapshots);
+    var goal = ContractCallableSelector.SelectMethod(original, new("M.Complete"), requireConcreteReceiver: false);
+    var generator = ContractRuntimeObligationTransformer.Members(original).OfType<Method>()
+      .Single(method => method.Name == "Generate");
+
+    Assert.Null(ContractRuntimeObligationTransformer.UnsupportedRuntimeIterator(original, goal, generator));
+    var transformed = new ContractRuntimeObligationTransformer(original, snapshots, goal).Transform();
+    var reparsed = await Parse(transformed.Sources);
+    var iterators = reparsed.RawModules().SelectMany(module => module.TopLevelDecls).OfType<IteratorDecl>()
+      .ToDictionary(iterator => iterator.Name);
+    var helper = ContractRuntimeObligationTransformer.Members(reparsed).OfType<Method>()
+      .Single(method => method.Name == "Helper");
+    var transformedSource = transformed.Sources.Single(snapshot => snapshot.Path == "M.dfy").Content;
+
+    Assert.Contains(iterators["Nested"].Body.Descendants().OfType<CallStmt>(),
+      call => call.Method.Name == "UnreachableBody");
+    Assert.Contains(helper.Body!.Descendants().OfType<CallStmt>(), call => call.Method.Name == "UnreachableBody");
+    Assert.Contains(iterators["Unused"].Body.Descendants().OfType<YieldStmt>(), _ => true);
+    Assert.Contains(iterators["Unused"].Body.Descendants().OfType<CallStmt>(), call => call.Method.Name == "Helper");
+    Assert.Contains("yield ensures value >= 0", transformedSource);
+    Assert.Contains("yield ensures value == 1", transformedSource);
+    Assert.Contains("{ Helper(); value := 1; yield; }", transformedSource);
+    Assert.Equal(source, snapshots[0].Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(source), snapshots[0].Sha256);
+    AssertCodeGenerates(reparsed);
+  }
+
+  // An iterator type mentioned by the selected goal remains supported without implying constructor or advancement execution.
+  [Fact]
+  public async Task PreservesIteratorTypeMentionedOnlyBySelectedGoal() {
+    const string body = "{ value := 1; yield; }";
+    var source = Source(
+      "  iterator Needed() yields (value: int) " + body + "\n",
+      completeBody: "{ var unused: Needed? := null; y := x; }");
+    var snapshots = Snapshots(source);
+    var original = await Parse(snapshots);
+    var goal = ContractCallableSelector.SelectMethod(original, new("M.Complete"), requireConcreteReceiver: false);
+    var generator = ContractRuntimeObligationTransformer.Members(original).OfType<Method>()
+      .Single(method => method.Name == "Generate");
+
+    Assert.Null(ContractRuntimeObligationTransformer.UnsupportedRuntimeIterator(original, goal));
+    Assert.Null(ContractRuntimeObligationTransformer.UnsupportedRuntimeIterator(original, goal, generator));
+    var transformed = new ContractRuntimeObligationTransformer(original, snapshots, goal).Transform();
+    var transformedSource = transformed.Sources.Single(snapshot => snapshot.Path == "M.dfy").Content;
+    var reparsed = await Parse(transformed.Sources);
+    var iterator = reparsed.RawModules().SelectMany(module => module.TopLevelDecls).OfType<IteratorDecl>()
+      .Single(candidate => candidate.Name == "Needed");
+
+    Assert.Contains(body, transformedSource);
+    Assert.Contains(iterator.Body.Descendants().OfType<YieldStmt>(), _ => true);
+    Assert.DoesNotContain(iterator.Body.Descendants().OfType<CallStmt>(), call => call.Method.Name == "UnreachableBody");
+    Assert.Equal(source, snapshots[0].Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(source), snapshots[0].Sha256);
+    AssertCodeGenerates(reparsed);
+  }
+
+  // Executed iterators are rejected structurally after retaining their original body and transitive dispatch closure.
+  [Fact]
+  public async Task RejectsExecutedIteratorAfterPreservingDynamicDependencies() {
+    const string declarations =
+      "  trait Worker { method Step(x: int) returns (y: int) }\n" +
+      "  class Implementation extends Worker {\n" +
+      "    method Step(x: int) returns (y: int) { y := Helper(x); }\n" +
+      "  }\n" +
+      "  method Helper(x: int) returns (y: int) { y := x; }\n" +
+      "  iterator Needed(worker: Worker, input: int) yields (value: int)\n" +
+      "  { value := worker.Step(input); yield; }\n";
+    const string completeBody =
+      "{ var worker: Worker := new Implementation; var iter := new Needed(worker, x); " +
+      "var more := iter.MoveNext(); if more { y := iter.value; } else { y := 0; } }";
+    var source = Source(declarations, completeBody);
+    var snapshots = Snapshots(source);
+    var original = await Parse(snapshots);
+    var goal = ContractCallableSelector.SelectMethod(original, new("M.Complete"), requireConcreteReceiver: false);
+    var generator = ContractRuntimeObligationTransformer.Members(original).OfType<Method>()
+      .Single(method => method.Name == "Generate");
+    var iterator = original.RawModules().SelectMany(module => module.TopLevelDecls).OfType<IteratorDecl>()
+      .Single(candidate => candidate.Name == "Needed");
+    var reachable = ContractRuntimeObligationTransformer.DiagnosticReachable(original, goal, generator).ToHashSet();
+
+    Assert.Contains(iterator.Member_Init, reachable);
+    Assert.Contains(iterator.Member_MoveNext, reachable);
+    Assert.Contains(reachable, callable => callable.FullDafnyName == "M.Worker.Step");
+    Assert.Contains(reachable, callable => callable.FullDafnyName == "M.Implementation.Step");
+    Assert.Contains(reachable, callable => callable.FullDafnyName == "M.Helper");
+    var members = ContractRuntimeObligationTransformer.Members(original).ToList();
+    var implementation = members.OfType<Method>()
+      .Single(method => method.FullDafnyName == "M.Implementation.Step");
+    var helper = members.OfType<Method>().Single(method => method.FullDafnyName == "M.Helper");
+
+    Assert.Contains(iterator.Body.Descendants().OfType<CallStmt>(), call => call.Method.Name == "Step");
+    Assert.Contains(iterator.Body.Descendants().OfType<YieldStmt>(), _ => true);
+    Assert.Contains(implementation.Body!.Descendants().OfType<CallStmt>(), call => call.Method.Name == "Helper");
+    Assert.DoesNotContain(helper.Body!.Descendants().OfType<CallStmt>(), call => call.Method.Name == "UnreachableBody");
+    var reason = Assert.IsType<string>(
+      ContractRuntimeObligationTransformer.UnsupportedRuntimeIterator(original, goal, generator));
+    var exception = Assert.Throws<NotSupportedException>(() =>
+      new ContractRuntimeObligationTransformer(original, snapshots, goal).Transform());
+    Assert.Equal(reason, exception.Message);
+    Assert.Contains("M.Needed", reason, System.StringComparison.Ordinal);
+    Assert.Equal(source, snapshots[0].Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(source), snapshots[0].Sha256);
+  }
+
+  // A generator-only iterator execution is rejected by the same structural closure guard while the ordinary goal remains supported.
+  [Fact]
+  public async Task RejectsIteratorReachedOnlyByGenerator() {
+    var source = Source(
+      "  iterator Generated() yields (value: int) { value := 1; yield; }\n",
+      generatorBody: "{ var iter := new Generated(); var more := iter.MoveNext(); x := 0; }");
+    var snapshots = Snapshots(source);
+    var original = await Parse(snapshots);
+    var goal = ContractCallableSelector.SelectMethod(original, new("M.Complete"), requireConcreteReceiver: false);
+    var generator = ContractRuntimeObligationTransformer.Members(original).OfType<Method>()
+      .Single(method => method.Name == "Generate");
+
+    Assert.Null(ContractRuntimeObligationTransformer.UnsupportedRuntimeIterator(original, goal));
+    var reason = Assert.IsType<string>(
+      ContractRuntimeObligationTransformer.UnsupportedRuntimeIterator(original, goal, generator));
+    var exception = Assert.Throws<NotSupportedException>(() =>
+      new ContractRuntimeObligationTransformer(original, snapshots, goal).Transform());
+
+    Assert.Equal(reason, exception.Message);
+    Assert.Contains("M.Generated", reason, System.StringComparison.Ordinal);
+    Assert.Equal(source, snapshots[0].Content);
+  }
+
+  // A default-module iterator ending in a Unicode comment receives its body strictly after the true source EOF.
+  [Fact]
+  public async Task AddsBodyAfterDefaultModuleIteratorAtSourceEnd() {
+    const string iteratorSource =
+      "iterator Unused() yields (value: int)\n" +
+      "  yield ensures value >= 0 // 실제 파일 끝";
+    var goalSource = Source("");
+    var runtime = ContractRuntimeInstrumentation.DafnySource;
+    ContractSource[] snapshots = [
+      new("M.dfy", goalSource, ContractHarnessBuilder.Hash(goalSource)),
+      new("Unused.dfy", iteratorSource, ContractHarnessBuilder.Hash(iteratorSource)),
+      new("PbtRuntime.dfy", runtime, ContractHarnessBuilder.Hash(runtime))
+    ];
+
+    var transformed = await Transform(snapshots);
+    var transformedSource = transformed.Sources.Single(snapshot => snapshot.Path == "Unused.dfy").Content;
+    var reparsed = await Parse(transformed.Sources);
+    var iterator = reparsed.RawModules().SelectMany(module => module.TopLevelDecls).OfType<IteratorDecl>()
+      .Single(candidate => candidate.Name == "Unused");
+
+    Assert.Equal(iteratorSource, snapshots[1].Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(iteratorSource), snapshots[1].Sha256);
+    Assert.StartsWith(iteratorSource + "\n{ ", transformedSource, System.StringComparison.Ordinal);
+    Assert.EndsWith("UnreachableBody(); }\n", transformedSource, System.StringComparison.Ordinal);
+    Assert.Contains(iterator.Body.Descendants().OfType<CallStmt>(), call => call.Method.Name == "UnreachableBody");
+    AssertCodeGenerates(reparsed);
+  }
+
   // Unrelated concrete declarations receive diagnostic trap bodies without disturbing the selected complete helper.
   [Fact]
   public async Task AddsBodiesToUnreachableConcreteCallables() {
@@ -151,10 +401,12 @@ public class ContractRuntimeUnreachableBodyTests {
       "  method {:extern} NativeMethod()\n" +
       "  function {:extern} NativeFunction(): int\n" +
       "  static method {:synthesize} Synthesized() returns (value: int)\n" +
+      "  iterator {:compile false} DisabledIterator() yields (value: int)\n" +
       "  class NativeBox { constructor {:extern} Create() }\n") +
       "\nabstract module AbstractApi {\n" +
       "  method AbstractMethod()\n" +
       "  function AbstractFunction(): int\n" +
+      "  iterator AbstractIterator() yields (value: int)\n" +
       "}";
 
     var transformed = await Transform(Snapshots(source));
@@ -175,10 +427,17 @@ public class ContractRuntimeUnreachableBodyTests {
     Assert.Null(synthesized.Body);
     Assert.Null(abstractMethod.Body);
     Assert.Null(abstractFunction.Body);
+    var abstractIterator = reparsed.RawModules().SelectMany(module => module.TopLevelDecls).OfType<IteratorDecl>()
+      .Single(iterator => iterator.Name == "AbstractIterator");
+    Assert.Null(abstractIterator.Body);
     Assert.True(Attributes.Contains(nativeMethod.Attributes, "extern"));
     Assert.True(Attributes.Contains(nativeFunction.Attributes, "extern"));
     Assert.True(Attributes.Contains(nativeConstructor.Attributes, "extern"));
     Assert.True(Attributes.Contains(synthesized.Attributes, "synthesize"));
+    var disabledIterator = reparsed.RawModules().SelectMany(module => module.TopLevelDecls).OfType<IteratorDecl>()
+      .Single(iterator => iterator.Name == "DisabledIterator");
+    Assert.Null(disabledIterator.Body);
+    Assert.True(Attributes.Contains(disabledIterator.Attributes, "compile"));
     Assert.All(members.Where(member => member.EnclosingClass is TraitDecl).OfType<MethodOrFunction>(),
       callable => Assert.True(callable switch {
         Method method => method.Body == null,
@@ -261,5 +520,15 @@ public class ContractRuntimeUnreachableBodyTests {
     Assert.True(reporter.ErrorCount == 0,
       string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
     return program;
+  }
+
+  private static void AssertCodeGenerates(Program program) {
+    var backend = new CsharpBackend(program.Options);
+    program.Options.Backend = backend;
+    backend.OnPreCompile(program.Reporter, new ReadOnlyCollection<string>([]));
+    backend.Compile(program, "M.dfy", new ConcreteSyntaxTree());
+    var reporter = Assert.IsType<BatchErrorReporter>(program.Reporter);
+    Assert.True(reporter.ErrorCount == 0,
+      string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
   }
 }

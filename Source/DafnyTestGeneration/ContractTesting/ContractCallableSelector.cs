@@ -59,6 +59,18 @@ public static class ContractCallableSelector {
     return method;
   }
 
+  /// <summary>Finds a selected view's native declaration and authenticates its identity in this program.</summary>
+  internal static MethodOrFunction NativeCallable(Program program, Method goal) {
+    MethodOrFunction native = goal is ContractConcreteMethod concrete ? concrete.OriginalCallable : goal;
+    if (native is Method { FunctionFromWhichThisIsByMethodDecl: { } function }) { native = function; }
+    var declarations = program.RawModules().SelectMany(module => module.TopLevelDecls)
+      .OfType<TopLevelDeclWithMembers>().SelectMany(declaration => declaration.Members).OfType<MethodOrFunction>();
+    if (!declarations.Any(declaration => ReferenceEquals(declaration, native))) {
+      throw new ArgumentException("The selected goal must belong to the supplied program.", nameof(goal));
+    }
+    return native;
+  }
+
   /// <summary>Recognizes ordinary, static, value-only lemma contracts without executable proof semantics.</summary>
   public static bool SupportsLemmaContract(Method method) {
     if (method.EnclosingClass?.EnclosingModuleDefinition == null) { return false; }
@@ -173,8 +185,8 @@ public sealed class ContractConcreteMethod : Method {
       type == null ? null! : type.Subst(substitution);
 
     public override Expression CloneExpr(Expression expression) {
-      if (expression == null) {
-        return null!;
+      if (expression == null || !expression.WasResolved()) {
+        return base.CloneExpr(expression!);
       }
       var clone = base.CloneExpr(expression);
       return new Substituter(null, [], substitution).Substitute(clone);

@@ -87,14 +87,17 @@ public static class ContractRuntimeCampaignRunner {
     if (reporter.ErrorCount > 0) { return CampaignFailure(ContractRuntimeStatus.Error, Diagnostics(reporter)); }
     var goal = ContractCallableSelector.SelectMethod(program, request.Entry, requireConcreteReceiver: false, allowLemmaContract: true);
     var lemmaContract = goal is Lemma;
-    if (!lemmaContract && (goal.FunctionFromWhichThisIsByMethodDecl is { ByMethodBody: null } || goal.Body == null)) {
+    if (!lemmaContract && goal.FunctionFromWhichThisIsByMethodDecl is { ByMethodBody: null }) {
       return CampaignFailure(ContractRuntimeStatus.Unsupported, "Runtime goals require an implemented method or function-by-method.");
+    }
+    if (ContractRuntimeObligationTransformer.UnsupportedRuntimeIterator(program, goal) is { } initialIteratorReason) {
+      return CampaignFailure(ContractRuntimeStatus.Unsupported, initialIteratorReason);
     }
     var originalProgram = program;
     var source = ContractSourceSnapshot.Find(request.Sources, goal.Origin.Uri);
     var originalPrepared = new ContractPreparedProgram(originalProgram, goal, source,
       new(source.Path, goal.Origin.line, goal.Origin.col, goal.FullDafnyName, source.Sha256),
-      OriginalCallable: goal.FunctionFromWhichThisIsByMethodDecl ?? (MethodOrFunction)goal, Sources: request.Sources);
+      OriginalCallable: ContractCallableSelector.NativeCallable(originalProgram, goal), Sources: request.Sources);
     var missing = MissingDrafts(program, request.Sources, goal, request.Drafts ?? []);
     var generator = request.Generator == null ? new ContractRuntimeMissingGenerator(goal.FullDafnyName,
       ContractRuntimeGeneratorSignature.Format(goal)) : null;
@@ -111,8 +114,15 @@ public static class ContractRuntimeCampaignRunner {
       }
     }
     phases.Record("source_preparation", "started");
-    var sourcePreparation = await ContractRuntimeSourcePreparation.PrepareAsync(program, request.Sources, goal,
-      request.Drafts ?? [], request.Generator!, options, cancellationToken);
+    var selectedPreparation = await ContractRuntimeSelectedDraftPreparation.PrepareAsync(program, request.Sources, goal,
+      request.Drafts ?? [], request.Generator!, request.ProveGeneratorPreconditions, options, cancellationToken,
+      (phase, state) => phases.Record("draft_closure:" + phase, state), selectedEntry: request.Entry);
+    var sourcePreparation = selectedPreparation.Preparation;
+    generatorProofReport = selectedPreparation.ProofPreparationFailure;
+    generatorProofElapsedMilliseconds = selectedPreparation.ProofPreparationElapsedMilliseconds;
+    if (generatorProofReport != null) {
+      generatorProofResult = GeneratorProofResult(generatorProofReport, false, generatorProofElapsedMilliseconds);
+    }
     phases.Record("source_preparation", "completed");
     var visibilityReporter = new BatchErrorReporter(options);
     var visibilityProgram = await ContractSourceSnapshot.ParseAsync(visibilityReporter, sourcePreparation.Sources, cancellationToken, resolve: false,
@@ -137,6 +147,9 @@ public static class ContractRuntimeCampaignRunner {
     goal = ContractCallableSelector.SelectMethod(program, request.Entry, requireConcreteReceiver: false, allowLemmaContract: true);
     var generatedMethod = ContractRuntimeGeneratorSignature.Select(
       program, goal, sourcePreparation.GeneratorMethodName);
+    if (ContractRuntimeObligationTransformer.UnsupportedRuntimeIterator(program, goal, generatedMethod) is { } resolvedIteratorReason) {
+      return CampaignFailure(ContractRuntimeStatus.Unsupported, resolvedIteratorReason);
+    }
     ContractDiagnosticConstruction.AuditResolved(program, goal, generatedMethod,
       sourcePreparation.DiagnosticConstructors ?? new HashSet<string>());
     var unresolved = MissingDrafts(program, snapshots, goal, [], sourcePreparation.SourceMap)
@@ -144,7 +157,10 @@ public static class ContractRuntimeCampaignRunner {
     if (unresolved.Count > 0) {
       return CampaignFailure(ContractRuntimeStatus.DraftsRequired, "A draft or generator reaches further missing implementations.") with { MissingDrafts = unresolved };
     }
-    if (request.ProveGeneratorPreconditions) {
+    if (!lemmaContract && goal.Body == null) {
+      return CampaignFailure(ContractRuntimeStatus.Unsupported, "Runtime goals require an implemented method or function-by-method.");
+    }
+    if (request.ProveGeneratorPreconditions && generatorProofReport == null) {
       var proofBudget = GeneratorProofBudgetMilliseconds(request.TimeoutMilliseconds, clock.ElapsedMilliseconds);
       if (proofBudget > 0) {
         var proofClock = Stopwatch.StartNew();
@@ -1133,14 +1149,16 @@ public static class ContractRuntimeCampaignRunner {
     }
   }
 
-  private static IReadOnlyList<ContractRuntimeMissingDraft> MissingDrafts(Program program,
+  internal static IReadOnlyList<ContractRuntimeMissingDraft> MissingDrafts(Program program,
     IReadOnlyList<ContractSource> sources, Method goal, IReadOnlyList<ContractRuntimeDraft> drafts, ContractRuntimeSourceMap? sourceMap = null) {
-    var supplied = drafts.Select(d => d.Symbol).ToHashSet();
-    // A function-by-method descriptor is detached from the call graph; its original function reaches the by-method body.
-    var root = goal.FunctionFromWhichThisIsByMethodDecl ?? (MethodOrFunction)goal;
+    var supplied = ContractRuntimeSourcePreparation.IndexDrafts(program, drafts).Keys.ToHashSet(StringComparer.Ordinal);
+    // Selected views are detached; the native declaration owns graph edges and missing-body state.
+    var root = ContractCallableSelector.NativeCallable(program, goal);
     return (goal is Lemma ? Enumerable.Empty<MethodOrFunction>() :
-        ContractRuntimeObligationTransformer.ExecutionReachable(program, [root]))
-      .Where(c => c != root && c != goal && c != (root as Function)?.ByMethodDecl && (!c.IsGhost || c is Function) &&
+        ContractRuntimeObligationTransformer.RuntimeExecutionReachable(program, [root]))
+      // Bodyless method entries need drafts; concrete entry bodies and function descriptors stay excluded.
+      .Where(c => (c != root || root is Method { Body: null }) &&
+        c != (root as Function)?.ByMethodDecl && (!c.IsGhost || c is Function) &&
         !supplied.Contains(c.FullDafnyName) && c.EnclosingClass.EnclosingModuleDefinition.Name is not ("PbtRuntime" or "PbtRandom") &&
         // Built-in and library declarations outside the supplied snapshot cannot be drafted.
         sources.Any(source => ContractSourceSnapshot.UriFor(source.Path) == c.Origin.Uri))

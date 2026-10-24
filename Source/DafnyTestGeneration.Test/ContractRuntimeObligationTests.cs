@@ -1,3 +1,6 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -115,8 +118,7 @@ public class ContractRuntimeObligationTests {
     var result = await Transform("ghost function Plus(x:int):int { assert true; " +
       "if x>=0 then (assert true; x+1) else (assert true; x-1) } " +
       "method Goal(x:int) ensures Plus(x)==(if x>=0 then x+1 else x-1) {}");
-    var options = new DafnyOptions(DafnyOptions.Default);
-    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    var options = MemoryOptions();
     var reporter = new BatchErrorReporter(options);
     var parsed = await ContractSourceSnapshot.ParseAsync(reporter, result.Sources, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
@@ -135,8 +137,7 @@ public class ContractRuntimeObligationTests {
       "|columns|==|data|+1 && columns[0]==initialColumn && " +
       "forall i :: 0<=i<|data| ==> columns[i+1]==StepColumn(byteMode,data[i],columns[i]) } " +
       "method Goal(x:int) ensures ColumnTraceRelation(true,[],0,[0]) {}");
-    var options = new DafnyOptions(DafnyOptions.Default);
-    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    var options = MemoryOptions();
     var reporter = new BatchErrorReporter(options);
     var parsed = await ContractSourceSnapshot.ParseAsync(reporter, result.Sources, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
@@ -161,11 +162,238 @@ public class ContractRuntimeObligationTests {
     Assert.Equal("M.Step", clause.CallHeapScope);
   }
 
-  private static async Task<ContractRuntimeTransformation> Transform(string text) {
-    var options = new DafnyOptions(DafnyOptions.Default);
+  // Match checks use post-call output snapshots while evidence remains bound to the original formals.
+  [Fact]
+  public async Task MatchPostconditionCapturesOutputsAndPreservesEvidence() {
+    var result = await Transform("datatype Choice = Left | Right " +
+      "method Goal(c:Choice) returns (x:int,y:int) " +
+      "ensures (match c case Left => x == 0 case Right => y == 1) { x:=0; y:=1; }", ChoiceGenerator);
+    var clause = Assert.Single(result.Clauses.Where(item => item.Obligation.Kind == ContractRuntimeObligationKind.Postcondition));
+    var original = result.Prepared.Method;
+    Assert.Same(original, clause.Owner);
+    Assert.Equal(new IVariable[] { original.Ins[0], original.Outs[0], original.Outs[1] }, clause.Variables);
+    Assert.Equal(result.Prepared.Source.Sha256, clause.OriginalSourceHash);
+    Assert.Equal(result.Prepared.Source.Path, clause.Obligation.Path);
+    Assert.Equal(original.Ens[0].E.Origin.line, clause.Obligation.Line);
+    Assert.Equal(original.Ens[0].E.Origin.col, clause.Obligation.Column);
+    Assert.Equal(ContractRuntimeDecisionMethod.Runtime, clause.Obligation.DecisionMethod);
+    Assert.All(Identifiers(clause.Expression).Where(identifier => identifier.Var is Formal),
+      identifier => Assert.Contains(identifier.Var, original.Ins.Concat(original.Outs)));
+    Assert.All(original.Outs, output => Assert.Contains(Identifiers(clause.Expression), identifier => identifier.Var == output));
+
+    var parsed = await ParseMemory(result.Sources);
+    var wrapper = MethodNamed(parsed, "Goal__pbt_goal");
+    var captures = OutputCaptures(wrapper);
+    Assert.Equal(2, captures.Count);
+    var check = RuntimeCheck(wrapper, clause);
+    var property = RuntimeProperty(check);
+    var invocation = Assert.Single(wrapper.Body!.Descendants().OfType<CallStmt>().Distinct().Where(call => call.Method.Name == "Goal"));
+    foreach (var capture in captures) {
+      Assert.Contains(Identifiers(property), identifier => identifier.Var == capture.Local);
+      Assert.DoesNotContain(Identifiers(property), identifier => identifier.Var == capture.Output);
+      Assert.True(invocation.Origin.pos < capture.Assignment.Origin.pos);
+      Assert.True(capture.Assignment.Origin.pos < check.Origin.pos);
+    }
+  }
+
+  // Method-call postconditions capture their own outputs and retain the original callee identity.
+  [Fact]
+  public async Task CalleeMatchCapturesCalleeOutputs() {
+    var result = await Transform("datatype Choice = Left | Right " +
+      "method Step(c:Choice) returns (x:int,y:int) " +
+      "ensures (match c case Left => x == 0 case Right => y == 1) { x:=0; y:=1; } " +
+      "method Goal(c:Choice) { var x,y := Step(c); }", ChoiceGenerator);
+    var clause = Assert.Single(result.Clauses.Where(item => item.Obligation.Kind == ContractRuntimeObligationKind.CalleePostcondition));
+    Assert.Equal("M.Step", clause.Obligation.Callee);
+    Assert.Equal("Step", clause.Owner.Name);
+    var parsed = await ParseMemory(result.Sources);
+    var wrapper = Assert.Single(ContractRuntimeObligationTransformer.Members(parsed).OfType<Method>()
+      .Where(method => method.Name.StartsWith("Step__pbt_site_", StringComparison.Ordinal)));
+    var captures = OutputCaptures(wrapper);
+    Assert.Equal(2, captures.Count);
+    var property = RuntimeProperty(RuntimeCheck(wrapper, clause));
+    Assert.All(captures, capture => Assert.Contains(Identifiers(property), identifier => identifier.Var == capture.Local));
+    Assert.DoesNotContain(Identifiers(property), identifier => identifier.Var is Formal formal && wrapper.Outs.Contains(formal));
+  }
+
+  // A match binder with an output's name remains its own variable and never becomes an output capture.
+  [Fact]
+  public async Task MatchBinderRetainsItsIdentity() {
+    var result = await Transform("datatype Choice = Left(value:int) | Right " +
+      "method Goal(c:Choice) returns (x:int,y:int) " +
+      "ensures (match c case Left(x) => x == x + y case Right => y == 0) { x:=0; y:=0; }",
+      "method Generate(r:PbtRandom.Source) returns (c:Choice) { c:=Left(0); }");
+    var clause = Assert.Single(result.Clauses.Where(item => item.Obligation.Kind == ContractRuntimeObligationKind.Postcondition));
+    var parsed = await ParseMemory(result.Sources);
+    var wrapper = MethodNamed(parsed, "Goal__pbt_goal");
+    var capture = Assert.Single(OutputCaptures(wrapper));
+    Assert.Same(wrapper.Outs[1], capture.Output);
+    var property = RuntimeProperty(RuntimeCheck(wrapper, clause));
+    var binder = Assert.Single(Identifiers(property).Where(identifier => identifier.Var.Name == "x")
+      .Select(identifier => identifier.Var).Distinct());
+    Assert.IsType<BoundVar>(binder);
+    Assert.NotSame(wrapper.Outs[0], binder);
+    Assert.Contains(Identifiers(property), identifier => identifier.Var == capture.Local);
+  }
+
+  // Generated capture declarations cannot shadow an authored input in the preferred name family.
+  [Fact]
+  public async Task OutputCaptureAvoidsAuthoredNameCollision() {
+    var result = await Transform("method Goal(pbtOutput0:int) returns (x:int) " +
+      "ensures x == pbtOutput0 { x:=pbtOutput0; }",
+      "method Generate(r:PbtRandom.Source) returns (pbtOutput0:int) { pbtOutput0:=0; }");
+    var clause = Assert.Single(result.Clauses.Where(item => item.Obligation.Kind == ContractRuntimeObligationKind.Postcondition));
+    var parsed = await ParseMemory(result.Sources);
+    var wrapper = MethodNamed(parsed, "Goal__pbt_goal");
+    var capture = Assert.Single(OutputCaptures(wrapper));
+    Assert.DoesNotContain(wrapper.Ins.Concat(wrapper.Outs), formal => formal.Name == capture.Local.Name);
+    var property = RuntimeProperty(RuntimeCheck(wrapper, clause));
+    Assert.Contains(Identifiers(property), identifier => identifier.Var == wrapper.Ins[0]);
+    Assert.Contains(Identifiers(property), identifier => identifier.Var == capture.Local);
+  }
+
+  // Old heap values are captured before invocation while returned outputs are captured afterward.
+  [Fact]
+  public async Task OldStateCapturePrecedesCallAndOutputCaptureFollowsIt() {
+    var result = await Transform("class Cell { var value:int } " +
+      "method Goal(cell:Cell) returns (x:int) modifies cell ensures x == old(cell.value) " +
+      "{ x:=cell.value; cell.value:=cell.value+1; }",
+      "method Generate(r:PbtRandom.Source) returns (cell:Cell) { cell:=new Cell; cell.value:=0; }");
+    var clause = Assert.Single(result.Clauses.Where(item => item.Obligation.Kind == ContractRuntimeObligationKind.Postcondition && !item.TypeConstraint));
+    var parsed = await ParseMemory(result.Sources);
+    var wrapper = MethodNamed(parsed, "Goal__pbt_goal");
+    var oldCapture = Assert.Single(wrapper.Body!.Descendants().OfType<SingleAssignStmt>().Distinct().Where(assignment =>
+      assignment.Lhs.Resolved is IdentifierExpr { Var: LocalVariable } &&
+      assignment.Rhs is ExprRhs { Expr.Resolved: MemberSelectExpr { Member.Name: "value" } }));
+    var oldLocal = Assert.IsType<LocalVariable>(Assert.IsAssignableFrom<IdentifierExpr>(oldCapture.Lhs.Resolved).Var);
+    var outputCapture = Assert.Single(OutputCaptures(wrapper));
+    var invocation = Assert.Single(wrapper.Body.Descendants().OfType<CallStmt>().Distinct().Where(call => call.Method.Name == "Goal"));
+    var check = RuntimeCheck(wrapper, clause);
+    Assert.True(oldCapture.Origin.pos < invocation.Origin.pos);
+    Assert.True(invocation.Origin.pos < outputCapture.Assignment.Origin.pos);
+    Assert.True(outputCapture.Assignment.Origin.pos < check.Origin.pos);
+    var property = RuntimeProperty(check);
+    Assert.Contains(Identifiers(property), identifier => identifier.Var == oldLocal);
+    Assert.Contains(Identifiers(property), identifier => identifier.Var == outputCapture.Local);
+    Assert.Contains(result.Prepared.Method.Outs[0], clause.Variables);
+  }
+
+  // An unavailable infinite-set output stays unchecked and never gains a compiled capture.
+  [Fact]
+  public async Task UnavailableOutputRemainsUncheckedWithoutCapture() {
+    var result = await Transform("method Goal(x:int) returns (ghost hidden:iset<int>) " +
+      "ensures x in hidden { hidden := iset n:int | n >= x; }");
+    var clause = Assert.Single(result.Clauses.Where(item => item.Obligation.Kind == ContractRuntimeObligationKind.Postcondition));
+    Assert.Equal(ContractRuntimeDecisionMethod.Unchecked, clause.Obligation.DecisionMethod);
+    Assert.Equal("value_unavailable", clause.Obligation.UncheckedReason);
+    Assert.Contains(result.Prepared.Method.Outs[0], clause.Variables);
+    var parsed = await ParseMemory(result.Sources);
+    var wrapper = MethodNamed(parsed, "Goal__pbt_goal");
+    Assert.Empty(OutputCaptures(wrapper));
+    var checkpoint = Assert.Single(wrapper.Body!.Descendants().OfType<FunctionCallExpr>().Distinct().Where(call =>
+      call.Function.Name == "Checkpoint" && call.Args[0].Resolved is StringLiteralExpr literal &&
+      Equals(literal.Value, clause.Obligation.Id)));
+    Assert.DoesNotContain(checkpoint.Args.SelectMany(Identifiers), identifier => identifier.Var is Formal formal && wrapper.Outs.Contains(formal));
+  }
+
+  // A check before an unused output is assigned reads only its already assigned output.
+  [Fact]
+  public async Task AssertionDoesNotCaptureUnassignedUnusedOutput() {
+    var result = await Transform("method Goal(x:int) returns (used:int,unused:int) " +
+      "{ used:=x; assert used == x; unused:=0; }");
+    var clause = Assert.Single(result.Clauses.Where(item => item.Obligation.Kind == ContractRuntimeObligationKind.Assertion));
+    var parsed = await ParseMemory(result.Sources);
+    var goal = MethodNamed(parsed, "Goal");
+    var capture = Assert.Single(OutputCaptures(goal));
+    Assert.Same(goal.Outs[0], capture.Output);
+    var unusedAssignment = Assert.Single(goal.Body!.Descendants().OfType<SingleAssignStmt>().Distinct().Where(assignment =>
+      assignment.Lhs.Resolved is IdentifierExpr identifier && identifier.Var == goal.Outs[1]));
+    var check = RuntimeCheck(goal, clause);
+    Assert.True(capture.Assignment.Origin.pos < check.Origin.pos);
+    Assert.True(check.Origin.pos < unusedAssignment.Origin.pos);
+    Assert.Contains(Identifiers(RuntimeProperty(check)), identifier => identifier.Var == capture.Local);
+  }
+
+  private const string ChoiceGenerator = "method Generate(r:PbtRandom.Source) returns (c:Choice) { c:=Left; }";
+
+  private static DafnyOptions MemoryOptions() {
+    var options = new DafnyOptions(TextReader.Null, TextWriter.Null, TextWriter.Null) {
+      TheProverFactory = new NoProverFactory()
+    };
     options.ApplyDefaultOptionsWithoutSettingsDefault();
+    Assert.False(options.Trace);
+    Assert.Null(options.XmlSink);
+    Assert.Null(options.DafnyPrintFile);
+    Assert.Null(options.DafnyPrintResolvedFile);
+    Assert.Null(options.AutoReqPrintFile);
+    options.XmlSink = null;
+    options.DafnyPrintFile = null;
+    options.DafnyPrintResolvedFile = null;
+    options.AutoReqPrintFile = null;
+    options.DafnyPrintExportedViews = [];
+    options.AdditionalPlugins = [];
+    options.AdditionalPluginArguments = [];
+    options.PrintIncludesMode = DafnyOptions.IncludesModes.None;
+    options.PrintStats = false;
+    options.PrintFunctionCallGraph = false;
+    return options;
+  }
+
+  private sealed class NoProverFactory : Microsoft.Boogie.ProverFactory {
+    public override Microsoft.Boogie.ProverInterface SpawnProver(Microsoft.Boogie.SMTLibOptions libOptions,
+      Microsoft.Boogie.ProverOptions options, object ctxt) => throw new InvalidOperationException("Memory tests must not spawn a prover.");
+
+    public override Microsoft.Boogie.ProverContext NewProverContext(Microsoft.Boogie.ProverOptions options) =>
+      throw new InvalidOperationException("Memory tests must not create a prover context.");
+  }
+
+  private static async Task<Program> ParseMemory(IReadOnlyList<ContractSource> sources) {
+    var reporter = new BatchErrorReporter(MemoryOptions());
+    var parsed = await ContractSourceSnapshot.ParseAsync(reporter, sources, CancellationToken.None);
+    Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
+    return parsed;
+  }
+
+  private static Method MethodNamed(Program program, string name) =>
+    Assert.Single(ContractRuntimeObligationTransformer.Members(program).OfType<Method>().Where(method => method.Name == name));
+
+  private static List<(Formal Output, LocalVariable Local, SingleAssignStmt Assignment)> OutputCaptures(Method method) {
+    List<(Formal Output, LocalVariable Local, SingleAssignStmt Assignment)> captures = [];
+    foreach (var assignment in method.Body!.Descendants().OfType<SingleAssignStmt>().Distinct()) {
+      if (assignment.Lhs.Resolved is IdentifierExpr { Var: LocalVariable local } &&
+          assignment.Rhs is ExprRhs { Expr.Resolved: IdentifierExpr { Var: Formal formal } } && method.Outs.Contains(formal)) {
+        captures.Add((formal, local, assignment));
+      }
+    }
+    return captures;
+  }
+
+  private static IEnumerable<IdentifierExpr> Identifiers(Expression expression) {
+    expression = expression.Resolved;
+    if (expression is IdentifierExpr identifier) { yield return identifier; }
+    foreach (var child in expression.SubExpressions) {
+      foreach (var descendant in Identifiers(child)) { yield return descendant; }
+    }
+  }
+
+  private static FunctionCallExpr RuntimeCheck(Method method, ContractRuntimeClause clause) =>
+    Assert.Single(method.Body!.Descendants().OfType<FunctionCallExpr>().Distinct().Where(call =>
+      call.Function.Name == "Check" && call.Args[0].Resolved is StringLiteralExpr literal &&
+      Equals(literal.Value, clause.Obligation.Id)));
+
+  private static Expression RuntimeProperty(FunctionCallExpr check) {
+    var evaluated = Assert.IsType<FunctionCallExpr>(check.Args[2].Resolved);
+    Assert.Equal("Evaluated", evaluated.Function.Name);
+    var guarded = Assert.IsType<BinaryExpr>(Assert.Single(evaluated.Args).Resolved);
+    Assert.Equal(BinaryExpr.Opcode.And, guarded.Op);
+    return guarded.E1.Resolved;
+  }
+
+  private static async Task<ContractRuntimeTransformation> Transform(string text,
+    string generator = "method Generate(r: PbtRandom.Source) returns (x: int) { x := 0; }") {
+    var options = MemoryOptions();
     // The transformer builds the harness main around the generator that the runner always inserts.
-    var source = "module M { import PbtRandom " + text + " method Generate(r: PbtRandom.Source) returns (x: int) { x := 0; } }";
+    var source = "module M { import PbtRandom " + text + " " + generator + " }";
     var runtime = ContractRuntimeInstrumentation.DafnySource;
     ContractSource[] sources = [new("M.dfy", source, ContractHarnessBuilder.Hash(source)), new("PbtRuntime.dfy", runtime, ContractHarnessBuilder.Hash(runtime))];
     var reporter = new BatchErrorReporter(options);

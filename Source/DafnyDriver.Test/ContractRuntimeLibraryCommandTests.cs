@@ -7,7 +7,7 @@ namespace DafnyDriver.Test;
 
 public class ContractRuntimeLibraryCommandTests {
   // Hash of the Dafny text without its final line feed, equal to the pin in ContractRuntimeLibraryTests.
-  private const string DafnySourceSha256 = "b858e89cca9f646e394eb5049cc3b1e481a6c4a07ca8bbfc269cfbbfa335aaa0";
+  private const string DafnySourceSha256 = "adcd11f333a7086255e3736b212dbd613737f7b6af084f64f86545cf76d5425e";
 
   // The command writes the embedded runtime library byte-for-byte and exits successfully.
   [Fact]

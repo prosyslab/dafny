@@ -170,16 +170,37 @@ public static class ContractGeneratorProof {
     IReadOnlyList<ContractSource> sources, Method goal, Method generator, Method admission, string randomSource) {
     var audit = ContractGeneratorProofAudit.BindResolved(program, sources, null, randomSource);
     var checker = new ContractSpecificationChecker(program, sources, program.Options);
+    var roots = ProofRoots(program, sources, goal, audit);
+    return [
+      checker.AuditedProofScope(ContractSpecificationRole.Execution, [generator, admission], roots.InputTypes, roots.Constants, audit),
+      checker.AuditedProofScope(ContractSpecificationRole.Logical, roots.Functions, roots.LogicalTypes, roots.Constants, audit)
+    ];
+  }
+
+  // Discovery uses the same roots before a missing body can make an audited scope unavailable.
+  internal static IReadOnlyList<MethodOrFunction> DraftDependencies(Program program,
+    IReadOnlyList<ContractSource> sources, Method goal, Method generator, Method admission, string randomSource) {
+    var audit = ContractGeneratorProofAudit.BindResolved(program, sources, null, randomSource);
+    var roots = ProofRoots(program, sources, goal, audit);
+    return ContractRuntimeObligationTransformer.ExecutionReachable(program, [generator, admission],
+        roots.InputTypes, constantRoots: roots.Constants)
+      .Concat(ContractRuntimeObligationTransformer.LogicalReachable(program, roots.Functions,
+        roots.LogicalTypes, constantRoots: roots.Constants)).Distinct().ToArray();
+  }
+
+  private sealed record GeneratorProofRoots(IReadOnlyList<MethodOrFunction> Functions,
+    IReadOnlyList<Type> InputTypes, IReadOnlyList<Type> LogicalTypes, IReadOnlyList<ConstantField> Constants);
+
+  private static GeneratorProofRoots ProofRoots(Program program, IReadOnlyList<ContractSource> sources,
+    Method goal, ContractGeneratorProofAudit audit) {
     var declarations = SourceDeclarations(program, sources, audit).ToList();
-    var functions = declarations.OfType<Function>().Cast<MethodOrFunction>();
+    var functions = declarations.OfType<Function>().Cast<MethodOrFunction>().ToArray();
     var types = declarations.OfType<TopLevelDecl>()
       .Where(declaration => declaration is SubsetTypeDecl or NewtypeDecl && declaration is not NonNullTypeDecl)
       .Select(declaration => (Type)UserDefinedType.FromTopLevelDecl(declaration.Origin, declaration));
-    var constants = declarations.OfType<ConstantField>().Where(constant => constant.Rhs != null).ToList();
-    return [
-      checker.AuditedProofScope(ContractSpecificationRole.Execution, [generator, admission], goal.Ins.Select(formal => formal.Type), constants, audit),
-      checker.AuditedProofScope(ContractSpecificationRole.Logical, functions, types.Concat(goal.Ins.Select(formal => formal.Type)), constants, audit)
-    ];
+    var inputTypes = goal.Ins.Select(formal => formal.Type).ToArray();
+    var constants = declarations.OfType<ConstantField>().Where(constant => constant.Rhs != null).ToArray();
+    return new(functions, inputTypes, types.Concat(inputTypes).ToArray(), constants);
   }
 
   internal static bool AcceptCoverage(ContractGeneratorProofCoverage coverage) => coverage.Complete;
@@ -253,9 +274,11 @@ public static class ContractGeneratorProof {
         (IVariable)pair.formal, pair => (Expression)new IdentifierExpr(pair.formal.Origin, formals[pair.index]));
       foreach (var clause in expressions) {
         ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
-        var copied = new Substituter(null, substitution, new Dictionary<TypeParameter, Type>()).Substitute(clause.E);
+        var copied = new AdmissionClauseSubstituter(substitution, renderCallSyntax: false).Substitute(clause.E);
         var qualified = ContractQueryBuilder.QualifyExpression(program, scope, copied);
-        lemma.Append("  ").Append(keyword).Append(' ').Append(Printer.ExprToString(program.Options, qualified)).Append('\n');
+        var printable = new AdmissionClauseSubstituter(new Dictionary<IVariable, Expression>(), renderCallSyntax: true)
+          .Substitute(qualified);
+        lemma.Append("  ").Append(keyword).Append(" (").Append(Printer.ExprToString(program.Options, printable)).Append(")\n");
         if (StrictUtf8.GetByteCount(lemma.ToString()) > maximumPreparedSourceBytes) {
           failure = "The generated implication lemma exceeds the bounded source policy.";
           return null;
@@ -279,6 +302,47 @@ public static class ContractGeneratorProof {
     } catch (NotSupportedException error) {
       failure = error.Message;
       return null;
+    }
+  }
+
+  // Keep resolved call bindings through substitution and qualification, then rebuild their printable syntax.
+  private sealed class AdmissionClauseSubstituter(Dictionary<IVariable, Expression> substitution, bool renderCallSyntax)
+    : Substituter(null, substitution, new Dictionary<TypeParameter, Type>()) {
+    protected override Statement SubstStmt(Statement statement) {
+      var syntax = statement as AssignStatement;
+      var call = statement as CallStmt;
+      if (syntax?.ResolvedStatements is { Count: 1 } resolved && resolved[0] is CallStmt resolvedCall) {
+        call = resolvedCall;
+      }
+      if (call == null) { return base.SubstStmt(statement); }
+      var copied = (CallStmt)base.SubstStmt(call);
+      if (syntax != null) {
+        // A source call can carry attributes on its RHS as well as on the resolved statement.
+        // Shared attribute nodes are aliases, so copy each original node only once.
+        var seen = new HashSet<Attributes>(ReferenceEqualityComparer.Instance);
+        Attributes? attributes = null;
+        foreach (var group in new[] { call.Attributes, syntax.Attributes, syntax.Rhss.Single().Attributes }) {
+          foreach (var attribute in group.AsEnumerable().Reverse()) {
+            if (seen.Add(attribute)) {
+              var copiedAttribute = attribute.CloneAfter(attributes);
+              copiedAttribute.Args = attribute.Args.ConvertAll(Substitute);
+              attributes = copiedAttribute;
+            }
+          }
+        }
+        copied.Attributes = attributes;
+      }
+      if (!renderCallSyntax) { return copied; }
+      var selection = copied.MethodSelect;
+      var typeArguments = selection.TypeApplicationJustMember.Count == 0 ? null : selection.TypeApplicationJustMember;
+      Expression callee = selection.Obj.IsImplicit
+        ? new NameSegment(selection.Origin, selection.MemberName, typeArguments)
+        : new ExprDotName(selection.Origin, selection.Obj, selection.MemberNameNode, typeArguments);
+      var application = new ApplySuffix(copied.Origin, null, callee, copied.Bindings, null);
+      var rhs = new ExprRhs(application, copied.Attributes);
+      return new AssignStatement(copied.Origin, copied.Lhs, new List<AssignmentRhs> { rhs }) {
+        IsGhost = copied.IsGhost
+      };
     }
   }
 
