@@ -4,6 +4,7 @@ Status: done
 Date: 2026-10-25
 Owner: native Dafny repository
 Related: [Cosyn delivery](../../plan/2026-10-25-pbt-reviewed-main-delivery.md), [native reconciliation](2026-10-24-pbt-agent-experience-delivery.md)
+Knowledge: [native PBT delivery and validation boundaries](../wiki/pbt-main-delivery.md)
 
 ## Objective and acceptance
 
