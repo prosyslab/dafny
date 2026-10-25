@@ -2,6 +2,13 @@
 
 - [Land reviewed PBT changes](2026-10-25-pbt-reviewed-main-delivery.md) — done; two focused native commits, excluded unused DTOs and explicit matching-source/canonical-build limits.
 
+
+- [Keep iterator types out of PBT draft discovery](2026-10-23-pbt-iterator-draft-discovery.md) — done source/local scope; independent3builds/4real memory cases, effect/copy audits and complete five-source freeze218055B accepted. Root authenticates reviewa60e53f9..., exact independently built4payloads and unchanged dependency metadata; R08 root image/registered controls remain separate, R07 failure preserved.
+
+
+
+- [Isolate unrelated iterators in PBT diagnostics](2026-10-23-pbt-iterator-diagnostic-isolation.md) — done source/local scope; unrelated iterator traps and type-only preservation, honest early executed-iterator unsupported boundary, unchanged public proof/fingerprint closure and corrected library pin. Independent71memory cases/four builds/style/bindings accepted; actual image/tool controls remain parent work, live cohort unchanged.
+
 - [Substitute nested statement matches in proof expressions](2026-10-21-nested-match-substitution.md) — done; independent build, in-memory binding/scope regression, formatting and direct positive/strict-negative weekly-policy proofs pass; focused delivery on expecto.
 
 - [Deliver the latest compiler changes on expecto](2026-10-21-expecto-native-latest.md) — done; original five commits preserved, four focused source commits delivered, independent build/195 memory tests/format/direct positive-negative proofs pass; operational limits retained.
@@ -13,6 +20,7 @@
 - [Bind PBT trusted source snapshots](2026-10-19-pbt-trusted-sources.md) — done; combined base `29da48b6` preserves visibility metadata; independent source acceptance and focused tests15/15.
 
 # Native Dafny plans
+
 
 - [Compile selected PBT helpers in unfinished workspaces](2026-10-21-pbt-unreachable-bodyless.md) — done source/local scope; plain bodyless methods/functions/constructors/overrides receive diagnostic traps, legal null declarations and exact proof gates remain. Independent initialized-constant finding corrected;119memory tests/two builds/style/diff accepted. Actual generated-program/image validation remains parent-owned.
 
