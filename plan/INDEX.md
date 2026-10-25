@@ -23,6 +23,7 @@
 
 # Native Dafny plans
 
+- [Build the repaired PBT library in an isolated native context](2026-10-21-pbt-isolated-overlay-build.md) — done actual isolated native-build scope; all four r05 phases and fresh independent191path/48adverse-case accounting accepted. Exact837632-byte TG DLLdc3bddf9.../review957da34e... may feed separately gated root controls. Source-child unknowns and rejected pre-auth CLI remain recorded; no image/PBT/paid/stability claim.
 
 - [Compile selected PBT helpers in unfinished workspaces](2026-10-21-pbt-unreachable-bodyless.md) — done source/local scope; plain bodyless methods/functions/constructors/overrides receive diagnostic traps, legal null declarations and exact proof gates remain. Independent initialized-constant finding corrected;119memory tests/two builds/style/diff accepted. Actual generated-program/image validation remains parent-owned.
 
