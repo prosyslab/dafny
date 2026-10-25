@@ -16,6 +16,8 @@ namespace Microsoft.Dafny;
 public static class TestContractsCommand {
   private static readonly Argument<FileInfo> Request = new("request", "Versioned contract test JSON request.");
   private static readonly Option<bool> RuntimeCheck = new("--runtime-check", "Check concrete runtime obligations using a supplied generator.");
+  private static readonly Option<bool> RuntimeAuthoring = new("--runtime-authoring",
+    "Prepare or extract a bounded full-context runtime authoring source view.");
   private static readonly Option<bool> ScreenContract = new("--screen-contract", "Inspect or screen a proposed child contract on explicit typed inputs.");
   private static readonly Option<uint> VerificationSeed = new("--verification-seed", () => 0U,
     "Set the Boogie verification random seed (0 through 2147483647).");
@@ -23,6 +25,7 @@ public static class TestContractsCommand {
 
   static TestContractsCommand() {
     OptionRegistry.RegisterOption(RuntimeCheck, OptionScope.Cli);
+    OptionRegistry.RegisterOption(RuntimeAuthoring, OptionScope.Cli);
     OptionRegistry.RegisterOption(ScreenContract, OptionScope.Cli);
     OptionRegistry.RegisterOption(VerificationSeed, OptionScope.Cli);
     VerificationSeed.AddValidator(result => {
@@ -38,6 +41,7 @@ public static class TestContractsCommand {
     var command = new Command("test-contracts", "Check original contracts on concrete runtime observations of a generator-driven campaign.");
     command.AddArgument(Request);
     command.AddOption(RuntimeCheck);
+    command.AddOption(RuntimeAuthoring);
     command.AddOption(ScreenContract);
     command.AddOption(VerificationSeed);
     command.AddOption(RuntimeWorker);
@@ -52,6 +56,11 @@ public static class TestContractsCommand {
     var file = context.ParseResult.GetValueForArgument(Request);
     var runtimeResultPath = context.ParseResult.GetValueForOption(RuntimeWorker);
     var runtimeRequested = context.ParseResult.GetValueForOption(RuntimeCheck) || runtimeResultPath != null;
+    var authoringRequested = context.ParseResult.GetValueForOption(RuntimeAuthoring);
+    if (authoringRequested) {
+      return await ExecuteAuthoringAsync(options, file,
+        runtimeRequested || context.ParseResult.GetValueForOption(ScreenContract), cancellationToken);
+    }
     if (context.ParseResult.GetValueForOption(ScreenContract)) {
       return await ExecuteScreenAsync(options, file, runtimeRequested, cancellationToken);
     }
@@ -93,6 +102,54 @@ public static class TestContractsCommand {
 
     object Failure(ContractTestStatus status, string reason) =>
       ContractRuntimeCampaignRunner.Failure(status == ContractTestStatus.Unsupported ? ContractRuntimeStatus.Unsupported : ContractRuntimeStatus.Error, reason, runtimeSeed, runtimeProofRequested);
+  }
+
+  private static async Task<int> ExecuteAuthoringAsync(DafnyOptions options, FileInfo file, bool conflictingMode,
+    CancellationToken cancellationToken) {
+    ContractRuntimeAuthoringRequest? request = null;
+    ContractRuntimeAuthoringResult result;
+    try {
+      if (conflictingMode) {
+        throw new ArgumentException("runtime_authoring_is_mutually_exclusive_with_runtime_check_and_screen_contract");
+      }
+      using var stream = File.OpenRead(file.FullName);
+      var buffer = new byte[ContractRuntimeSourceAuthoring.MaximumRequestBytes + 1];
+      var length = 0;
+      while (length < buffer.Length) {
+        var read = await stream.ReadAsync(buffer.AsMemory(length), cancellationToken);
+        if (read == 0) { break; }
+        length += read;
+      }
+      if (length > ContractRuntimeSourceAuthoring.MaximumRequestBytes) {
+        throw new ArgumentException("runtime_authoring_request_too_large");
+      }
+      request = JsonSerializer.Deserialize<ContractRuntimeAuthoringRequest>(
+        buffer.AsSpan(0, length), ContractJson.Options)
+        ?? throw new JsonException("null_runtime_authoring_request");
+      using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+      timeout.CancelAfter(request.TimeoutMilliseconds);
+      options.DisableScopes = true;
+      result = await ContractRuntimeSourceAuthoring.RunAsync(request, options, timeout.Token);
+    } catch (OperationCanceledException) {
+      var status = cancellationToken.IsCancellationRequested
+        ? ContractRuntimeAuthoringStatus.Cancelled : ContractRuntimeAuthoringStatus.Timeout;
+      result = Failure(status, status == ContractRuntimeAuthoringStatus.Cancelled
+        ? "Runtime authoring was cancelled." : "Runtime authoring deadline expired.");
+    } catch (ArgumentException error) {
+      result = Failure(ContractRuntimeAuthoringStatus.Error, error.Message);
+    } catch (NotSupportedException error) {
+      result = Failure(ContractRuntimeAuthoringStatus.Unsupported, error.Message);
+    } catch (IOException error) {
+      result = Failure(ContractRuntimeAuthoringStatus.Error, error.Message);
+    } catch (JsonException error) {
+      result = Failure(ContractRuntimeAuthoringStatus.Error, error.Message);
+    }
+    await options.OutputWriter.Code(JsonSerializer.Serialize(result, ContractJson.Options) + "\n");
+    return 0;
+
+    ContractRuntimeAuthoringResult Failure(ContractRuntimeAuthoringStatus status, string reason) =>
+      new(ContractRuntimeSourceAuthoring.SchemaVersion,
+        request?.Action ?? ContractRuntimeAuthoringAction.Prepare, status, reason);
   }
 
   private static async Task<int> ExecuteScreenAsync(DafnyOptions options, FileInfo file, bool conflictingMode,

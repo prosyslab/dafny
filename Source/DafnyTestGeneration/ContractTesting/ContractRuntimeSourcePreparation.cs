@@ -269,7 +269,7 @@ public static class ContractRuntimeSourcePreparation {
     }
   }
 
-  private static IEnumerable<MemberDecl> Members(Program program) => program.RawModules()
+  internal static IEnumerable<MemberDecl> Members(Program program) => program.RawModules()
     .SelectMany(module => module.TopLevelDecls).OfType<TopLevelDeclWithMembers>()
     .SelectMany(declaration => declaration.Members);
 
@@ -309,7 +309,7 @@ public static class ContractRuntimeSourcePreparation {
   }
 
   // A bodyless trait member is implemented by class overrides and dispatched at run time; it is never drafted.
-  private static bool NeedsDraft(MethodOrFunction target) => !(target.EnclosingClass is TraitDecl && !target.IsStatic) && target switch {
+  internal static bool NeedsDraft(MethodOrFunction target) => !(target.EnclosingClass is TraitDecl && !target.IsStatic) && target switch {
     Method { Body: null } => true,
     Method { Body.Body: [AssertStmt { Expr.Resolved: LiteralExpr { Value: false } }] } => true,
     Function { Body: null } => true,
