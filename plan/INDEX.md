@@ -2,10 +2,12 @@
 
 - [Land reviewed PBT changes](2026-10-25-pbt-reviewed-main-delivery.md) — done; two focused native commits, excluded unused DTOs and explicit matching-source/canonical-build limits.
 
+- [Reconcile reviewed PBT repairs for focused delivery](2026-10-24-pbt-agent-experience-delivery.md) — done; superseded by the reviewed main delivery (`6f24e6046`, `b531cdc0f`, `fff2a462c`); frontend DTO excluded and later removed.
 
 - [Keep iterator types out of PBT draft discovery](2026-10-23-pbt-iterator-draft-discovery.md) — done source/local scope; independent3builds/4real memory cases, effect/copy audits and complete five-source freeze218055B accepted. Root authenticates reviewa60e53f9..., exact independently built4payloads and unchanged dependency metadata; R08 root image/registered controls remain separate, R07 failure preserved.
 
 
+- [Screen child contracts with native logical queries](2026-10-23-pbt-child-contract-screening.md) — done; delivered on expecto in `b531cdc0f`/`fff2a462c`; image/runtime acceptance root-owned.
 
 - [Isolate unrelated iterators in PBT diagnostics](2026-10-23-pbt-iterator-diagnostic-isolation.md) — done source/local scope; unrelated iterator traps and type-only preservation, honest early executed-iterator unsupported boundary, unchanged public proof/fingerprint closure and corrected library pin. Independent71memory cases/four builds/style/bindings accepted; actual image/tool controls remain parent work, live cohort unchanged.
 
