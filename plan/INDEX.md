@@ -64,3 +64,4 @@
 - [Resolved verification target facts](2026-10-18-verification-target-facts.md) — done; opt-in actual native inventory and authored attributes, locally and independently accepted; parent owns commit/landing.
 
 - [Emit optional translated definition proof inputs](2026-10-15-definition-proof-inputs.md) — done; historical 2026-10-15 native gate accepted: Core21/21, Driver6/6, API8/8,30distinct CLI assertions and5PDB bindings pass; all16owner manifest entries match. Parent solver/benchmark/image/paid gates remain separate. Command-test receipts predate their removal.
+- [Extend generator proof value domains](2026-10-25-pbt-supported-value-domains.md) — done; empty explicit premises, finite collections and immutable/refined-map projections; matching-source127 and independent69 bounded memory checks pass, strict proof/heap boundaries retained.

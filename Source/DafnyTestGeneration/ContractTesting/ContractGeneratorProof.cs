@@ -594,7 +594,7 @@ public static class ContractGeneratorProof {
       return false;
     }
     if (goal.Ins.Any(formal => formal.IsGhost || !SupportedValueType(formal.Type, new HashSet<string>()))) {
-      failure = "A goal input is ghost or outside the supported scalar, sequence and inductive datatype value domain.";
+      failure = "A goal input is ghost or outside the supported scalar, finite collection and inductive datatype value domain.";
       return false;
     }
     var canonicalGeneratorName = ContractRuntimeGeneratorSignature.Names(goal, generator).MethodName;
@@ -631,10 +631,6 @@ public static class ContractGeneratorProof {
       failure = "Generate must receive the Source type from the exact embedded PbtRandom module.";
       return false;
     }
-    if (goal.Req.Count == 0) {
-      failure = "At least one original goal requires clause is needed for positive direct-generator coverage.";
-      return false;
-    }
     return true;
   }
 
@@ -647,6 +643,12 @@ public static class ContractGeneratorProof {
     type = type.NormalizeExpandKeepConstraints();
     if (type.IsIntegerType || type.IsBoolType || type.IsCharType || type.IsBitVectorType) { return true; }
     if (type is SeqType sequence) { return SupportedValueType(sequence.Arg, visiting, depth + 1); }
+    if (type is SetType { Finite: true } set) { return SupportedValueType(set.Arg, visiting, depth + 1); }
+    if (type is MultiSetType multiset) { return SupportedValueType(multiset.Arg, visiting, depth + 1); }
+    if (type is MapType { Finite: true } map) {
+      return SupportedValueType(map.Domain, visiting, depth + 1) &&
+        SupportedValueType(map.Range, visiting, depth + 1);
+    }
     if (type is not UserDefinedType userType || userType.ResolvedClass == null) { return false; }
     if (userType.TypeArgs.Any(argument => !SupportedValueType(argument, visiting, depth + 1))) { return false; }
     var declaration = userType.ResolvedClass;
@@ -692,8 +694,7 @@ public static class ContractGeneratorProof {
         failure = "Old-state and receiver-dependent goal requirements need a separate heap-aware proof capability.";
         return false;
       }
-      if (expression.DescendantsAndSelf.OfType<MemberSelectExpr>().Any(select => select.Member is Field field &&
-            (field.IsMutable || field is not ConstantField { Rhs: not null, HasStaticKeyword: true }))) {
+      if (expression.DescendantsAndSelf.OfType<MemberSelectExpr>().Any(ReadsUnsupportedField)) {
         failure = "Goal requirements that read mutable heap fields or instance state are outside the value-only proof scope.";
         return false;
       }
@@ -704,12 +705,26 @@ public static class ContractGeneratorProof {
       var directFunctions = ContractRuntimeObligationTransformer.FunctionReferences(expression).ToList();
       var reachableFunctions = ContractRuntimeObligationTransformer.ExecutionReachable(program, directFunctions).OfType<Function>();
       if (reachableFunctions.Any(function => function.ReadsHeap || function.Body?.DescendantsAndSelf.OfType<MemberSelectExpr>()
-            .Any(select => select.Member is Field field && (field.IsMutable || field is not ConstantField { Rhs: not null, HasStaticKeyword: true })) == true)) {
+            .Any(ReadsUnsupportedField) == true)) {
         failure = "Goal requirement functions that read mutable or instance heap state are outside the value-only proof scope.";
         return false;
       }
     }
     return true;
+  }
+
+  private static bool ReadsUnsupportedField(MemberSelectExpr select) {
+    if (select.Member is not Field field) { return false; }
+    if (field is DatatypeDestructor or DatatypeDiscriminator) {
+      return !SupportedValueType(select.Obj.Type, new HashSet<string>());
+    }
+    if (field is SpecialField {
+      SpecialId: SpecialField.ID.Keys or SpecialField.ID.Values or SpecialField.ID.Items
+    } && select.Obj.Type.AsMapType is { Finite: true } &&
+        SupportedValueType(select.Obj.Type, new HashSet<string>())) {
+      return false;
+    }
+    return field.IsMutable || field is not ConstantField { Rhs: not null, HasStaticKeyword: true };
   }
 
   private static IEnumerable<Declaration> SourceDeclarations(Program program, IReadOnlyList<ContractSource> sources,

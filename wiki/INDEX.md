@@ -34,3 +34,4 @@
 2026-10-18: [Resolved verification target facts](verification-target-facts.md) — opt-in actual compiler target inventory and authored declaration attributes; build, seven in-memory tests, generic native proof/attribute controls and fresh independent review accepted; baseline style limitations recorded.
 
 2026-10-15: [Modern native verification logging](verification-json-logging.md) — reporting removal independently accepted; solver limits/outcomes retained, implementation25unique LIT and independent33focused checks pass. Standalone probe limits and historical overflow/campaign receipts preserved; no image or experiment claim.
+- [Generator proof value domain](pbt-generator-value-domain.md) — independently accepted2026-10-25; empty premises, finite collections and immutable/refined-map projections, native127/independent69 memory checks and formatting pass; actual solver/sample/image efficacy remains separate.
