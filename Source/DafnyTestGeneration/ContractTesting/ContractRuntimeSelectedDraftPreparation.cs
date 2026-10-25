@@ -62,11 +62,8 @@ internal static class ContractRuntimeSelectedDraftPreparation {
       var proofGoal = SelectGoal(proofProgram);
       var proofGenerator = ContractRuntimeGeneratorSignature.Select(proofProgram, proofGoal,
         candidate.GeneratorMethodName);
-      var admission = ContractRuntimeObligationTransformer.Members(proofProgram).OfType<Method>()
-        .Single(method => method.Name == build.AdmissionName && method.Origin.Uri == proofGenerator.Origin.Uri &&
-          method.EnclosingClass.EnclosingModuleDefinition == proofGenerator.EnclosingClass.EnclosingModuleDefinition);
       var dependencies = ContractGeneratorProof.DraftDependencies(proofProgram, build.Sources, proofGoal,
-        proofGenerator, admission, randomSource);
+        proofGenerator, randomSource);
       if (!Select(dependencies, selected, includeGhostMethods: true)) {
         // The ordinary proof and executable diagnostic will authenticate this one final source set.
         return new(candidate);
@@ -150,7 +147,7 @@ internal static class ContractRuntimeSelectedDraftPreparation {
           return location.Path + ":" + location.Line + ":" + location.Column + ": " + message.Message;
         }
       } catch (ArgumentException) {
-        // The embedded runtime and generated admission text have no authored source segment.
+        // The embedded runtime and generated proof clauses have no authored source segment.
       }
       return token.Uri + ":" + token.line + ":" + token.col + ": " + message.Message;
     }));

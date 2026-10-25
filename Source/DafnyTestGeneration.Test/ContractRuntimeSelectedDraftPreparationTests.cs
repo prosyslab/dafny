@@ -72,7 +72,7 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
     return (await Parse(sources), sources);
   }
 
-  private static async Task<(Program Program, Method Admission, IReadOnlyList<ContractSource> Sources)> Admission(
+  private static async Task<(Program Program, Method Generator, IReadOnlyList<ContractSource> Sources)> DirectProof(
     ContractRuntimePreparedSources preparation) {
     var sources = WithRuntime(preparation.Sources);
     var authored = await Parse(sources);
@@ -83,7 +83,7 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
     Assert.Null(failure);
     Assert.NotNull(build);
     var proof = await Parse(build!.Sources);
-    return (proof, Method(proof, "M." + build.AdmissionName), build.Sources);
+    return (proof, Method(proof, "M.Generate"), build.Sources);
   }
 
   // A syntactically broken unrelated registered packet never reaches the selected source parser.
@@ -386,9 +386,9 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
       ContractRuntimeTypeEvidence.SourceSetHash(authenticated!));
   }
 
-  // A proof statement directly in the goal contract is retained through the real generated implication lemma.
+  // A proof statement directly in the goal contract is retained in the generator's installed postcondition.
   [Fact]
-  public async Task DiscoversAdmissionContractProofDependency() {
+  public async Task DiscoversTargetContractProofDependency() {
     const string source = "module M { lemma ContractProof(x: int) " +
       "method Goal(x: int) requires (ContractProof(x); x >= 0) {} }";
     var prepared = await Prepare(source, [
@@ -397,14 +397,14 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
 
     Assert.Null(prepared.ProofPreparationFailure);
     Assert.Equal(new[] { "M.ContractProof" }, prepared.Preparation.InstalledDraftSymbols);
-    var proof = await Admission(prepared.Preparation);
-    var call = Assert.Single(proof.Admission.Ens.SelectMany(clause => clause.E.Descendants().OfType<CallStmt>()));
+    var proof = await DirectProof(prepared.Preparation);
+    var call = Assert.Single(proof.Generator.Ens.SelectMany(clause => clause.E.Descendants().OfType<CallStmt>()));
     Assert.Same(Method(proof.Program, "M.ContractProof"), call.Method);
     var argument = Assert.IsType<IdentifierExpr>(Assert.Single(call.Args).Resolved);
-    Assert.Same(Assert.Single(proof.Admission.Ins), argument.Var);
+    Assert.Same(Assert.Single(proof.Generator.Outs), argument.Var);
   }
 
-  // A valid generator postcondition proof call retains its admission-formal binding inside the ordinary audited scope.
+  // A valid authored postcondition proof call retains its generator-output binding inside the ordinary audited scope.
   [Fact]
   public async Task DiscoversGeneratorEnsuresContractProofDependency() {
     const string source = "module M { lemma ContractProof(x: int) method Goal(x: int) requires x >= 0 {} }";
@@ -416,10 +416,10 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
 
     Assert.Null(prepared.ProofPreparationFailure);
     Assert.Equal(new[] { "M.ContractProof" }, prepared.Preparation.InstalledDraftSymbols);
-    var proof = await Admission(prepared.Preparation);
-    var call = Assert.Single(proof.Admission.Req.SelectMany(clause => clause.E.Descendants().OfType<CallStmt>()));
+    var proof = await DirectProof(prepared.Preparation);
+    var call = Assert.Single(proof.Generator.Ens.SelectMany(clause => clause.E.Descendants().OfType<CallStmt>()));
     Assert.Same(Method(proof.Program, "M.ContractProof"), call.Method);
-    var formal = Assert.Single(proof.Admission.Ins);
+    var formal = Assert.Single(proof.Generator.Outs);
     Assert.Same(formal, Assert.IsType<IdentifierExpr>(Assert.Single(call.Args).Resolved).Var);
     var proofGenerator = Method(proof.Program, "M.Generate");
     var raw = await Parse(proof.Sources, resolve: false);
@@ -427,7 +427,7 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
     Assert.Null(ContractGeneratorProofAudit.AuditRawProgram(raw, proof.Sources, proofGenerator.Origin.Uri,
       proofGenerator.Name, Method(proof.Program, "M.Goal").FullDafnyName, random));
     var scopes = ContractGeneratorProof.ProofScopes(proof.Program, proof.Sources, Method(proof.Program, "M.Goal"),
-      proofGenerator, proof.Admission, random);
+      proofGenerator, random);
     Assert.All(scopes, scope => Assert.Null(scope.Failure));
     Assert.Contains(scopes, scope => scope.ContainsDeclaration(call.Method));
   }
@@ -444,11 +444,11 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
 
     Assert.Null(prepared.ProofPreparationFailure);
     Assert.Equal(new[] { "M.ContractProof" }, prepared.Preparation.InstalledDraftSymbols);
-    var proof = await Admission(prepared.Preparation);
-    var call = Assert.Single(proof.Admission.Req.SelectMany(clause => clause.E.Descendants().OfType<CallStmt>()));
+    var proof = await DirectProof(prepared.Preparation);
+    var call = Assert.Single(proof.Generator.Ens.SelectMany(clause => clause.E.Descendants().OfType<CallStmt>()));
     Assert.Same(Method(proof.Program, "M.ContractProof"), call.Method);
     Assert.True(Assert.Single(call.MethodSelect.TypeApplicationJustMember).IsBoolType);
-    Assert.Same(Assert.Single(proof.Admission.Ins), Assert.IsType<IdentifierExpr>(Assert.Single(call.Args).Resolved).Var);
+    Assert.Same(Assert.Single(proof.Generator.Outs), Assert.IsType<IdentifierExpr>(Assert.Single(call.Args).Resolved).Var);
     var proofGenerator = Method(proof.Program, "M.Generate");
     var raw = await Parse(proof.Sources, resolve: false);
     var random = ContractGeneratorProof.ExtractPinnedPbtRandomSource();
@@ -483,7 +483,7 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
     Assert.NotNull(build);
     var proofProgram = await Parse(build!.Sources);
     var scopes = ContractGeneratorProof.ProofScopes(proofProgram, build.Sources, Method(proofProgram, "M.Goal"),
-      Method(proofProgram, "M.Generate"), Method(proofProgram, "M." + build.AdmissionName), random);
+      Method(proofProgram, "M.Generate"), random);
     Assert.Contains(scopes, scope => scope.ContainsDeclaration(Method(proofProgram, "M.AmbientProof")));
   }
 

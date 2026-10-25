@@ -46,7 +46,7 @@ public sealed class ContractGeneratorProofHelperTests {
     ContractRuntimePreparedSources Preparation, IReadOnlyList<ContractSource> Sources, IReadOnlyList<ContractSource> RuntimeSources,
     Method Goal, Method Generator, string RandomSource);
 
-  private sealed record Proof(Program Program, Method Admission, ContractSpecificationScope Scope);
+  private sealed record Proof(Program Program, ContractSpecificationScope Scope);
 
   private sealed class UnusedVerifier : IProgramVerifier {
     public Task<IReadOnlyList<Microsoft.Boogie.IVerificationTask>> GetVerificationTasksAsync(Microsoft.Boogie.ExecutionEngine engine,
@@ -106,22 +106,20 @@ public sealed class ContractGeneratorProofHelperTests {
     var program = await Parse(build!.Sources, prepared.Options);
     var audit = ContractGeneratorProofAudit.BindResolved(program, build.Sources, null, prepared.RandomSource);
     Assert.Null(audit.Failure);
-    var admission = Method(program, build.AdmissionName);
     var generator = Method(program, "Generate");
     var checker = new ContractSpecificationChecker(program, build.Sources, prepared.Options);
-    var scope = checker.AuditedProofScope(ContractSpecificationRole.Execution, [admission, generator],
+    var scope = checker.AuditedProofScope(ContractSpecificationRole.Execution, [generator],
       Method(program, "Goal").Ins.Select(formal => formal.Type), [], audit);
-    return new(program, admission, scope);
+    return new(program, scope);
   }
 
   private static string Check(Declaration declaration, ContractNativeProofRole role) =>
     new ContractSpecificationCheck(declaration, role).VerboseName;
 
   private static ContractGeneratorProofCoverage Coverage(Proof proof, IReadOnlySet<string> covered, bool failed = false) {
-    var admission = Check(proof.Admission, ContractNativeProofRole.Correctness);
     return new(proof.Scope.RequiredNativeChecks.ToHashSet(StringComparer.Ordinal), covered,
-      proof.Scope.Failure == null, admission, "M.Generate (correctness)",
-      new HashSet<string>([admission, "M.Generate (correctness)"], StringComparer.Ordinal), failed);
+      proof.Scope.Failure == null, "M.Generate (correctness)",
+      new HashSet<string>(["M.Generate (correctness)"], StringComparer.Ordinal), failed);
   }
 
   // Sibling helpers retain their authored identity and location while the original target contract remains intact.
@@ -167,7 +165,7 @@ public sealed class ContractGeneratorProofHelperTests {
     Assert.True(ContractGeneratorProof.AcceptCoverage(Coverage(proof, covered)));
   }
 
-  // Positive admission evidence cannot hide a missing correctness check for the actual called sibling lemma.
+  // Positive generator evidence cannot hide a missing correctness check for the actual called sibling lemma.
   [Fact]
   public async Task MissingSiblingLemmaCoverageCannotCertifyGenerator() {
     var proof = await PrepareProof(await Prepare());
@@ -177,7 +175,7 @@ public sealed class ContractGeneratorProofHelperTests {
     Assert.False(ContractGeneratorProof.AcceptCoverage(Coverage(proof, covered)));
   }
 
-  // A false helper stays in the checked closure and simulated failed native evidence cannot certify admission.
+  // A false helper stays in the checked closure and simulated failed native evidence cannot certify the generator.
   [Fact]
   public async Task FailedSiblingLemmaEvidenceCannotCertifyGenerator() {
     var prepared = await Prepare(GeneratorSource.Replace("ensures Twice(value) >= 0", "ensures false", StringComparison.Ordinal));

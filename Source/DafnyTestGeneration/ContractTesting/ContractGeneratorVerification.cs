@@ -17,15 +17,14 @@ internal sealed record ContractGeneratorVerificationPart(string Check, int Index
 internal sealed record ContractGeneratorVerificationResult(ContractGeneratorProofCoverage Coverage, string Diagnostics,
   bool TimedOut = false);
 
-/// <summary>Runs complete ordinary Dafny verification tasks for an audited generator and implication scope.</summary>
+/// <summary>Runs complete ordinary Dafny verification tasks for an audited direct generator scope.</summary>
 internal static class ContractGeneratorVerification {
   internal static async Task<ContractGeneratorVerificationResult> VerifyAsync(Program program, IProgramVerifier verifier,
-    IReadOnlyList<ContractSpecificationScope> scopes, Method generator, Method bridge, long deadline,
+    IReadOnlyList<ContractSpecificationScope> scopes, Method generator, long deadline,
     CancellationToken cancellationToken) {
     var checks = scopes.SelectMany(scope => scope.Checks).ToHashSet();
     var required = checks.Select(check => check.VerboseName).ToHashSet(StringComparer.Ordinal);
     var generatorCheck = new ContractSpecificationCheck(generator, ContractNativeProofRole.Correctness).VerboseName;
-    var bridgeCheck = new ContractSpecificationCheck(bridge, ContractNativeProofRole.Correctness).VerboseName;
     var expected = new List<ContractGeneratorVerificationPart>();
     var completed = new Dictionary<ContractGeneratorVerificationPart, SolverOutcome>();
     var diagnostics = new List<string>();
@@ -66,7 +65,7 @@ internal static class ContractGeneratorVerification {
         }
       }
     }
-    return new(Account(required, expected, completed, generatorCheck, bridgeCheck, accepted),
+    return new(Account(required, expected, completed, generatorCheck, accepted),
       string.Join("\n", diagnostics), completed.Values.Contains(SolverOutcome.TimeOut));
   }
 
@@ -88,11 +87,11 @@ internal static class ContractGeneratorVerification {
   }
 
   // A complete trusted task enumeration can have assertion-free roles. A missing result for an enumerated
-  // part is never assertion-free, and both proof roots require positive native correctness results.
+  // part is never assertion-free, and the generator root requires a positive native correctness result.
   internal static ContractGeneratorProofCoverage Account(IReadOnlySet<string> required,
     IReadOnlyList<ContractGeneratorVerificationPart> expected,
     IReadOnlyDictionary<ContractGeneratorVerificationPart, SolverOutcome> completed,
-    string generatorCheck, string bridgeCheck, bool completeEnumeration = true) {
+    string generatorCheck, bool completeEnumeration = true) {
     var covered = new HashSet<string>(StringComparer.Ordinal);
     var positive = new HashSet<string>(StringComparer.Ordinal);
     var validEnumeration = completeEnumeration && expected.Distinct().Count() == expected.Count &&
@@ -106,7 +105,7 @@ internal static class ContractGeneratorVerification {
         }
       }
     }
-    return new(required, covered, validEnumeration, bridgeCheck, generatorCheck, positive,
+    return new(required, covered, validEnumeration, generatorCheck, positive,
       !validEnumeration || completed.Values.Any(outcome => outcome != SolverOutcome.Valid));
   }
 

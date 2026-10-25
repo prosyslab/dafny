@@ -59,7 +59,7 @@ public sealed class ContractGeneratorProofTests {
     return new(program, options, sources, Method(program, "Goal"), Method(program, "Generate"));
   }
 
-  internal static async Task<(ContractGeneratorProofSourceBuild Build, Program Program)> Bridge(Fixture fixture) {
+  internal static async Task<(ContractGeneratorProofSourceBuild Build, Program Program)> DirectProof(Fixture fixture) {
     var build = ContractGeneratorProof.PrepareProofSources(fixture.Program, fixture.Sources, fixture.Goal, fixture.Generator,
       ContractGeneratorProof.ExtractPinnedPbtRandomSource(), out var failure);
     Assert.Null(failure);
@@ -70,48 +70,44 @@ public sealed class ContractGeneratorProofTests {
   private static DafnyProofInputs FakeInputs(Program program, IReadOnlySet<Uri> sources) =>
     new(1, new string('a', 64), new string('b', 64), [new(UserPath, "M.Generate", new string('c', 64))]);
 
-  // Authored ensures and body survive the proof copy while the generated lemma has each contract in its own role.
+  // The proof copy preserves authored obligations and adds every original requirement directly to the generator.
   [Fact]
-  public async Task BridgePreservesAuthoredGeneratorAndEveryClause() {
+  public async Task DirectProofPreservesGeneratorAndAddsEveryTargetRequirement() {
     var fixture = await Prepare();
-    var (build, program) = await Bridge(fixture);
+    var (_, program) = await DirectProof(fixture);
     var generator = Method(program, "Generate");
-    var bridge = Assert.IsType<Lemma>(Method(program, build.AdmissionName));
-    Assert.Equal(fixture.Generator.Ens.Select(ensure => Printer.ExprToString(fixture.Options, ensure.E)),
-      generator.Ens.Select(ensure => Printer.ExprToString(fixture.Options, ensure.E)));
+    Assert.Equal(fixture.Generator.Ens.Select(ensure => Printer.ExprToString(fixture.Options, ensure.E)), generator.Ens.Take(2)
+      .Select(ensure => Printer.ExprToString(fixture.Options, ensure.E)));
+    Assert.Equal(fixture.Goal.Req.Select(requirement => Printer.ExprToString(fixture.Options, requirement.E)), generator.Ens.Skip(2)
+      .Select(ensure => Printer.ExprToString(fixture.Options, ensure.E)));
     Assert.Equal(fixture.Generator.Body!.EntireRange.PrintOriginal(), generator.Body!.EntireRange.PrintOriginal());
-    Assert.Equal(2, bridge.Req.Count);
-    Assert.Equal(2, bridge.Ens.Count);
-    Assert.Empty(bridge.Body!.Body);
-    Assert.Empty(bridge.Descendants().OfType<CallStmt>());
-    Assert.Single(bridge.Ins);
+    Assert.DoesNotContain(program.Descendants().OfType<Method>(),
+      method => method.Name.StartsWith("PbtGeneratorAdmission", StringComparison.Ordinal));
   }
 
-  // A false authored generator ensure is retained for body verification even if it makes the implication trivial.
+  // A false authored generator ensure remains a required direct body obligation.
   [Fact]
   public async Task WrongGeneratorEnsureRemainsARequiredBodyObligation() {
     var fixture = await Prepare(Source.Replace("ensures x % 2 == 0", "ensures false", StringComparison.Ordinal));
-    var (build, program) = await Bridge(fixture);
+    var (build, program) = await DirectProof(fixture);
     var generator = Method(program, "Generate");
     Assert.Contains(generator.Ens, ensure => ensure.E.Resolved is LiteralExpr { Value: false });
     var scopes = ContractGeneratorProof.ProofScopes(program, build.Sources, Method(program, "Goal"), generator,
-      Method(program, build.AdmissionName), ContractGeneratorProof.ExtractPinnedPbtRandomSource());
+      ContractGeneratorProof.ExtractPinnedPbtRandomSource());
     Assert.Contains("M.Generate (correctness)", scopes.SelectMany(scope => scope.RequiredNativeChecks));
   }
 
-  // A weak authored contract does not acquire the target's missing condition in the private proof source.
+  // A weak authored contract cannot replace the target requirements installed in the private proof source.
   [Fact]
-  public async Task WeakEnsureLeavesIndependentBridgeObligation() {
+  public async Task WeakEnsureStillReceivesEveryTargetRequirement() {
     var fixture = await Prepare(Source.Replace("ensures x % 2 == 0", "", StringComparison.Ordinal));
-    var (build, program) = await Bridge(fixture);
-    Assert.Single(Method(program, "Generate").Ens);
-    Assert.Single(Method(program, build.AdmissionName).Req);
-    Assert.Equal(2, Method(program, build.AdmissionName).Ens.Count);
+    var (_, program) = await DirectProof(fixture);
+    Assert.Equal(3, Method(program, "Generate").Ens.Count);
   }
 
-  // Prior requirements retain their order so later index expressions remain well-formed in the bridge.
+  // Prior requirements retain their order so later index expressions remain well-formed as generator postconditions.
   [Fact]
-  public async Task BridgePreservesDependentRequirementOrder() {
+  public async Task DirectProofPreservesDependentRequirementOrder() {
     const string source = """
       module M {
         import PbtRandom
@@ -120,49 +116,50 @@ public sealed class ContractGeneratorProofTests {
           ensures |xs| > 0 ensures xs[0] >= 0 { xs := [0]; }
       }
       """;
-    var (build, program) = await Bridge(await Prepare(source));
-    var bridge = Method(program, build.AdmissionName);
-    Assert.Equal(2, bridge.Req.Count);
-    Assert.Equal(2, bridge.Ens.Count);
-    Assert.Contains(bridge.Ens[1].E.DescendantsAndSelf, expression => expression is SeqSelectExpr);
+    var (_, program) = await DirectProof(await Prepare(source));
+    var generated = Method(program, "Generate");
+    Assert.Equal(4, generated.Ens.Count);
+    Assert.Contains(generated.Ens[3].E.DescendantsAndSelf, expression => expression is SeqSelectExpr);
   }
 
   // Generated output names stay distinct from quantified binders when the clause is printed and resolved again.
   [Fact]
   public async Task QuantifiedBinderCannotCaptureGeneratedOutput() {
     var fixture = await Prepare(Source.Replace("ensures x >= 0",
-      "ensures forall PbtGeneratorAdmissionOutput0: int :: 0 <= PbtGeneratorAdmissionOutput0 < 3 ==> x >= PbtGeneratorAdmissionOutput0"));
-    var (build, program) = await Bridge(fixture);
-    var bridge = Method(program, build.AdmissionName);
-    var quantifier = Assert.IsType<ForallExpr>(bridge.Req[0].E.Resolved);
-    Assert.NotEqual(Assert.Single(quantifier.BoundVars).Name, Assert.Single(bridge.Ins).Name);
-    Assert.Contains(quantifier.DescendantsAndSelf.OfType<IdentifierExpr>(), identifier => ReferenceEquals(identifier.Var, bridge.Ins[0]));
+      "ensures forall candidate: int :: 0 <= candidate < 3 ==> x >= candidate"));
+    var (_, program) = await DirectProof(fixture);
+    var generated = Method(program, "Generate");
+    var quantifier = Assert.IsType<ForallExpr>(generated.Ens[0].E.Resolved);
+    Assert.NotEqual(Assert.Single(quantifier.BoundVars).Name, Assert.Single(generated.Outs).Name);
+    Assert.Contains(quantifier.DescendantsAndSelf.OfType<IdentifierExpr>(),
+      identifier => ReferenceEquals(identifier.Var, generated.Outs[0]));
   }
 
-  // RNG-dependent ensures cannot be approximated by an output-only implication lemma.
+  // RNG-dependent authored ensures stay ordinary generator body obligations in the direct proof.
   [Fact]
-  public async Task RandomSourcePostconditionIsUnsupported() {
+  public async Task RandomSourcePostconditionRemainsAProofObligation() {
     var fixture = await Prepare(Source.Replace("ensures x >= 0", "ensures r == r", StringComparison.Ordinal));
-    Assert.Null(ContractGeneratorProof.PrepareProofSources(fixture.Program, fixture.Sources, fixture.Goal, fixture.Generator,
-      ContractGeneratorProof.ExtractPinnedPbtRandomSource(), out var failure));
-    Assert.Contains("random-source", failure, StringComparison.Ordinal);
+    var (_, program) = await DirectProof(fixture);
+    var generated = Method(program, "Generate");
+    Assert.Contains(generated.Ens[0].E.DescendantsAndSelf.OfType<IdentifierExpr>(),
+      identifier => ReferenceEquals(identifier.Var, generated.Ins[0]));
   }
 
-  // Old-state postconditions are outside the ordinary value-only bridge capability.
+  // Old-state authored ensures remain direct generator body obligations.
   [Fact]
-  public async Task OldPostconditionIsUnsupported() {
+  public async Task OldPostconditionRemainsAProofObligation() {
     var fixture = await Prepare(Source.Replace("ensures x >= 0", "ensures old(r) == r", StringComparison.Ordinal));
-    Assert.Null(ContractGeneratorProof.PrepareProofSources(fixture.Program, fixture.Sources, fixture.Goal, fixture.Generator,
-      ContractGeneratorProof.ExtractPinnedPbtRandomSource(), out _));
+    var (_, program) = await DirectProof(fixture);
+    Assert.Contains(Method(program, "Generate").Ens[0].E.DescendantsAndSelf, expression => expression is OldExpr);
   }
 
   // Bodyless ghost helpers are rejected as proof dependencies without executing or compiling the generator.
   [Fact]
   public async Task BodylessLemmaRejectsProofScope() {
     var source = Source.Replace("{ x := 2; }", "{ x := 2; Missing(x); }\n lemma Missing(x: int) ensures x >= 0", StringComparison.Ordinal);
-    var (build, program) = await Bridge(await Prepare(source));
+    var (build, program) = await DirectProof(await Prepare(source));
     var scopes = ContractGeneratorProof.ProofScopes(program, build.Sources, Method(program, "Goal"), Method(program, "Generate"),
-      Method(program, build.AdmissionName), ContractGeneratorProof.ExtractPinnedPbtRandomSource());
+      ContractGeneratorProof.ExtractPinnedPbtRandomSource());
     Assert.Contains(scopes, scope => scope.Failure?.Contains("bodyless_contract", StringComparison.Ordinal) == true);
   }
 
@@ -170,10 +167,10 @@ public sealed class ContractGeneratorProofTests {
   [Fact]
   public async Task AmbientLogicalBodyIsRequiredButTargetBodyIsNot() {
     var source = Source.Replace("method Goal", "function Ambient(): int ensures false { 0 }\n method Goal", StringComparison.Ordinal);
-    var (build, program) = await Bridge(await Prepare(source));
+    var (build, program) = await DirectProof(await Prepare(source));
     var goal = Method(program, "Goal");
     var scopes = ContractGeneratorProof.ProofScopes(program, build.Sources, goal, Method(program, "Generate"),
-      Method(program, build.AdmissionName), ContractGeneratorProof.ExtractPinnedPbtRandomSource());
+      ContractGeneratorProof.ExtractPinnedPbtRandomSource());
     Assert.All(scopes, scope => Assert.False(scope.ContainsDeclaration(goal)));
     Assert.Contains("M.Ambient (well-formedness)", scopes.SelectMany(scope => scope.RequiredNativeChecks));
   }
@@ -189,6 +186,24 @@ public sealed class ContractGeneratorProofTests {
       ? Snapshot(source.Path, source.Content.Replace("x := 2", "x := 4", StringComparison.Ordinal)) : source).ToArray();
     Assert.False(binding!.Matches(fixture.Program, changed, FakeInputs));
     Assert.Equal("Source fingerprint changed.", binding.Mismatch(fixture.Program, changed, FakeInputs));
+  }
+
+  // Runtime and strengthened proof generators retain one identity but require separate exact source bindings.
+  [Fact]
+  public async Task DirectProofStrengtheningHasASeparateExactBinding() {
+    var fixture = await Prepare();
+    var (build, proofProgram) = await DirectProof(fixture);
+    var runtimeRequired = new[] { ContractGeneratorDefinitionIdentity.For(fixture.Generator) };
+    var proofGenerator = Method(proofProgram, "Generate");
+    var proofRequired = new[] { ContractGeneratorDefinitionIdentity.For(proofGenerator) };
+    Assert.Equal(runtimeRequired, proofRequired);
+    var runtimeBinding = ContractGeneratorInputBinding.Capture(fixture.Program, fixture.Sources, runtimeRequired, FakeInputs)!;
+    var proofBinding = ContractGeneratorInputBinding.Capture(proofProgram, build.Sources, proofRequired, FakeInputs)!;
+    Assert.NotEqual(runtimeBinding.Sources, proofBinding.Sources);
+    Assert.True(runtimeBinding.Matches(fixture.Program, fixture.Sources, FakeInputs));
+    Assert.True(proofBinding.Matches(proofProgram, build.Sources, FakeInputs));
+    Assert.False(runtimeBinding.Matches(proofProgram, build.Sources, FakeInputs));
+    Assert.False(proofBinding.Matches(fixture.Program, fixture.Sources, FakeInputs));
   }
 
   // A changed resolved proof identity invalidates evidence even when the source snapshots are identical.
@@ -214,11 +229,10 @@ public sealed class ContractGeneratorProofTests {
   // Every required callable body needs its own row even when unrelated translated definitions remain available.
   [Theory]
   [InlineData("M.Generate")]
-  [InlineData("M.PbtGeneratorAdmission")]
   [InlineData("M.Helper")]
   public async Task MissingRequiredAnalyzerDefinitionCannotBind(string missing) {
     var fixture = await Prepare();
-    ContractGeneratorDefinitionIdentity[] required = [new(UserPath, "M.Generate"), new(UserPath, "M.PbtGeneratorAdmission"), new(UserPath, "M.Helper")];
+    ContractGeneratorDefinitionIdentity[] required = [new(UserPath, "M.Generate"), new(UserPath, "M.Helper")];
     var rows = required.Append(new(UserPath, "M.Unrelated"))
       .Select(identity => new DafnyDefinitionProofInput(identity.SourcePath, identity.FullName, new string('c', 64))).ToArray();
     var inputs = FakeInputs(fixture.Program, new HashSet<Uri>()) with { Definitions = rows };

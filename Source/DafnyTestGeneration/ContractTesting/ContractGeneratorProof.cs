@@ -18,30 +18,29 @@ namespace DafnyTestGeneration.ContractTesting;
 /// <summary>Classifies the outcome of one bounded proof attempt.</summary>
 public enum ContractGeneratorProofStatus { Verified, Unsupported, Failed, Cancelled, TimedOut }
 
-/// <summary>Reports generator and implication verification without exposing omission authority.</summary>
+/// <summary>Reports direct generator verification without exposing omission authority.</summary>
 public sealed record ContractGeneratorProofReport(ContractGeneratorProofStatus Status, string Diagnostics,
   IReadOnlyList<string> RequiredNativeChecks, IReadOnlyList<string> CoveredNativeChecks) {
   internal ContractGeneratorProof.Certificate? VerifiedCertificate { get; init; }
 }
 
 internal sealed record ContractGeneratorProofCoverage(IReadOnlySet<string> RequiredChecks,
-  IReadOnlySet<string> CoveredChecks, bool ScopesAccepted, string AdmissionCorrectnessCheck,
-  string GeneratorCorrectnessCheck, IReadOnlySet<string> VerifiedImplementationChecks, bool Failed) {
+  IReadOnlySet<string> CoveredChecks, bool ScopesAccepted, string GeneratorCorrectnessCheck,
+  IReadOnlySet<string> VerifiedImplementationChecks, bool Failed) {
   internal bool Complete => !Failed && ScopesAccepted && RequiredChecks.Count != 0 &&
     RequiredChecks.SetEquals(CoveredChecks) &&
-    new[] { AdmissionCorrectnessCheck, GeneratorCorrectnessCheck }.All(check =>
-      RequiredChecks.Contains(check) && VerifiedImplementationChecks.Contains(check));
+    RequiredChecks.Contains(GeneratorCorrectnessCheck) &&
+    VerifiedImplementationChecks.Contains(GeneratorCorrectnessCheck);
 }
 
-internal sealed record ContractGeneratorProofSourceBuild(IReadOnlyList<ContractSource> Sources, string AdmissionName);
+internal sealed record ContractGeneratorProofSourceBuild(IReadOnlyList<ContractSource> Sources);
 
-/// <summary>Proves the authored generator contract and its implication of the selected input requirements.</summary>
+/// <summary>Proves a generator after adding the selected input requirements as postconditions.</summary>
 public static class ContractGeneratorProof {
   private const int MaximumTimeoutMilliseconds = 600_000;
   private const long MaximumProofSourceBytes = 64L * 1024 * 1024;
   private static readonly UTF8Encoding StrictUtf8 = new(false, true);
   private static readonly Lazy<DafnyOptions> DefaultBoogieSettings = new(CreateDefaultBoogieSettings);
-  private const string AdmissionBaseName = "PbtGeneratorAdmission";
 
   // Only the native host can supply the ordinary verifier. Public reports cannot supply a backend or a certificate.
   internal static async Task<ContractGeneratorProofReport> TryProveAsync(
@@ -85,8 +84,7 @@ public static class ContractGeneratorProof {
       var generator = ContractRuntimeGeneratorSignature.Select(authoredProgram, goal, generatorName);
       var runtimeGoal = ContractCallableSelector.SelectMethod(runtimeProgram, new(goalName), requireConcreteReceiver: false, allowLemmaContract: true);
       var runtimeGenerator = ContractRuntimeGeneratorSignature.Select(runtimeProgram, runtimeGoal, generatorName);
-      if (!SupportedSelectedGoal(authoredProgram, goal, generator, out var capabilityFailure) ||
-          !ContractsAreValueOnly(authoredProgram, goal, generator, out capabilityFailure)) {
+      if (!SupportsRequiredPostconditions(authoredProgram, goal, generator, out var capabilityFailure)) {
         return Report(ContractGeneratorProofStatus.Unsupported, capabilityFailure);
       }
       ContractQueryDeadline.Check(deadline, token);
@@ -118,11 +116,11 @@ public static class ContractGeneratorProof {
       using var reporting = reporter.Updates.Subscribe(diagnostic => diagnostics.Add(diagnostic.Diagnostic.Message));
       var proofProgram = await ContractSourceSnapshot.ParseAsync(reporter, build.Sources, token);
       if (reporter.ErrorCount != 0) { return Report(ContractGeneratorProofStatus.Failed, string.Join("\n", diagnostics)); }
-      if (!TryFindProofTargets(proofProgram, sourceSnapshot, goal, generator, build.AdmissionName,
-            out var proofGoal, out var proofGenerator, out var admission, out failure)) {
+      if (!TryFindProofTargets(proofProgram, goal, generator,
+            out var proofGoal, out var proofGenerator, out failure)) {
         return Report(ContractGeneratorProofStatus.Unsupported, failure);
       }
-      var scopes = ProofScopes(proofProgram, build.Sources, proofGoal, proofGenerator, admission, randomSource);
+      var scopes = ProofScopes(proofProgram, build.Sources, proofGoal, proofGenerator, randomSource);
       if (scopes.Any(scope => scope.Failure != null)) {
         return Report(ContractGeneratorProofStatus.Unsupported, string.Join("\n", scopes.Select(scope => scope.Failure).OfType<string>()));
       }
@@ -131,18 +129,17 @@ public static class ContractGeneratorProof {
       }
       var requiredDefinitions = scopes.SelectMany(scope => scope.Checks).Select(check => check.Declaration)
         .OfType<MethodOrFunction>().Distinct().Select(ContractGeneratorDefinitionIdentity.For).ToArray();
-      var originalDefinitions = requiredDefinitions.Where(identity => identity != ContractGeneratorDefinitionIdentity.For(admission)).ToArray();
-      var originalBinding = ContractGeneratorInputBinding.Capture(runtimeProgram, sourceSnapshot, originalDefinitions, analyze);
+      var originalBinding = ContractGeneratorInputBinding.Capture(runtimeProgram, sourceSnapshot, requiredDefinitions, analyze);
       if (originalBinding == null) {
         return Report(ContractGeneratorProofStatus.Unsupported, "The analyzer could not bind every required original callable body.");
       }
       proofOptions.ProcessSolverOptions(reporter, generator.Origin);
       if (reporter.ErrorCount != 0) { return Report(ContractGeneratorProofStatus.Failed, string.Join("\n", diagnostics)); }
       var proofBinding = ContractGeneratorInputBinding.Capture(proofProgram, build.Sources, requiredDefinitions, analyze);
-      if (proofBinding == null) { return Report(ContractGeneratorProofStatus.Unsupported, "The analyzer could not identify the implication proof inputs."); }
+      if (proofBinding == null) { return Report(ContractGeneratorProofStatus.Unsupported, "The analyzer could not identify the direct generator proof inputs."); }
       ContractQueryDeadline.Check(deadline, token);
       var checkedProof = await ContractGeneratorVerification.VerifyAsync(proofProgram, verifier, scopes,
-        proofGenerator, admission, deadline, token);
+        proofGenerator, deadline, token);
       diagnostics.Add(checkedProof.Diagnostics);
       if (!checkedProof.Coverage.Complete) {
         return new(checkedProof.TimedOut ? ContractGeneratorProofStatus.TimedOut : ContractGeneratorProofStatus.Failed, string.Join("\n", diagnostics),
@@ -167,22 +164,22 @@ public static class ContractGeneratorProof {
   }
 
   internal static IReadOnlyList<ContractSpecificationScope> ProofScopes(Program program,
-    IReadOnlyList<ContractSource> sources, Method goal, Method generator, Method admission, string randomSource) {
+    IReadOnlyList<ContractSource> sources, Method goal, Method generator, string randomSource) {
     var audit = ContractGeneratorProofAudit.BindResolved(program, sources, null, randomSource);
     var checker = new ContractSpecificationChecker(program, sources, program.Options);
     var roots = ProofRoots(program, sources, goal, audit);
     return [
-      checker.AuditedProofScope(ContractSpecificationRole.Execution, [generator, admission], roots.InputTypes, roots.Constants, audit),
+      checker.AuditedProofScope(ContractSpecificationRole.Execution, [generator], roots.InputTypes, roots.Constants, audit),
       checker.AuditedProofScope(ContractSpecificationRole.Logical, roots.Functions, roots.LogicalTypes, roots.Constants, audit)
     ];
   }
 
   // Discovery uses the same roots before a missing body can make an audited scope unavailable.
   internal static IReadOnlyList<MethodOrFunction> DraftDependencies(Program program,
-    IReadOnlyList<ContractSource> sources, Method goal, Method generator, Method admission, string randomSource) {
+    IReadOnlyList<ContractSource> sources, Method goal, Method generator, string randomSource) {
     var audit = ContractGeneratorProofAudit.BindResolved(program, sources, null, randomSource);
     var roots = ProofRoots(program, sources, goal, audit);
-    return ContractRuntimeObligationTransformer.ExecutionReachable(program, [generator, admission],
+    return ContractRuntimeObligationTransformer.ExecutionReachable(program, [generator],
         roots.InputTypes, constantRoots: roots.Constants)
       .Concat(ContractRuntimeObligationTransformer.LogicalReachable(program, roots.Functions,
         roots.LogicalTypes, constantRoots: roots.Constants)).Distinct().ToArray();
@@ -257,36 +254,10 @@ public static class ContractGeneratorProof {
       failure = "The prepared proof sources exceed the bounded source policy.";
       return null;
     }
-    if (!ContractsAreValueOnly(program, goal, generator, out var contractFailure)) {
-      failure = contractFailure;
-      return null;
-    }
-    var name = ContractBodyNames.Family(program, AdmissionBaseName);
-    var scope = generator.EnclosingClass.EnclosingModuleDefinition;
-    var formals = generator.Outs.Select((formal, index) => new Formal(formal.Origin, name + "Output" + index,
-      formal.Type, true, false, null)).ToList();
-    var lemma = new StringBuilder("\nlemma ").Append(name).Append('(')
-      .Append(string.Join(", ", formals.Select(formal => formal.Name + ": " + ContractQueryBuilder.QualifiedType(program, scope, formal.Type))))
-      .Append(")\n");
-    foreach (var (keyword, originalFormals, expressions) in new[] {
-               ("requires", generator.Outs, generator.Ens), ("ensures", goal.Ins, goal.Req) }) {
-      var substitution = originalFormals.Select((formal, index) => (formal, index)).ToDictionary(pair =>
-        (IVariable)pair.formal, pair => (Expression)new IdentifierExpr(pair.formal.Origin, formals[pair.index]));
-      foreach (var clause in expressions) {
-        ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
-        var copied = new AdmissionClauseSubstituter(substitution, renderCallSyntax: false).Substitute(clause.E);
-        var qualified = ContractQueryBuilder.QualifyExpression(program, scope, copied);
-        var printable = new AdmissionClauseSubstituter(new Dictionary<IVariable, Expression>(), renderCallSyntax: true)
-          .Substitute(qualified);
-        lemma.Append("  ").Append(keyword).Append(" (").Append(Printer.ExprToString(program.Options, printable)).Append(")\n");
-        if (StrictUtf8.GetByteCount(lemma.ToString()) > maximumPreparedSourceBytes) {
-          failure = "The generated implication lemma exceeds the bounded source policy.";
-          return null;
-        }
-      }
-    }
-    lemma.Append("{}\n");
-    var edits = new List<ByteEdit> { new(generator.Origin.Uri, generator.StartToken.pos, lemma.ToString()) };
+    var postconditions = RequiredPostconditions(program, goal, generator, out failure,
+      deadlineTimestamp, cancellationToken, maximumPreparedSourceBytes);
+    if (postconditions == null) { return null; }
+    var edits = new List<ByteEdit> { new(generator.Body!.StartToken.Uri, generator.Body.StartToken.pos, postconditions) };
     var runtime = sources.Where(source => source.Content == ContractRuntimeInstrumentation.DafnySource).ToList();
     var random = sources.Where(source => source.Content == randomModuleSource).ToList();
     if (runtime.Count > 1 || random.Count > 1) {
@@ -298,16 +269,49 @@ public static class ContractGeneratorProof {
     try {
       var prepared = ApplyByteEdits(sources, edits, append ? sources[0].Path + ".pbt-generator-rng-proof.dfy" : null,
         append ? randomModuleSource : null, maximumPreparedSourceBytes, deadlineTimestamp, cancellationToken);
-      return new(prepared, name);
+      return new(prepared);
     } catch (NotSupportedException error) {
       failure = error.Message;
       return null;
     }
   }
 
+  // Source authoring and proof strengthening share this exact resolved target-requirement renderer.
+  internal static string? RequiredPostconditions(Program program, Method goal, Method generator, out string? failure,
+    long? deadlineTimestamp = null, CancellationToken cancellationToken = default,
+    long maximumPostconditionBytes = MaximumProofSourceBytes) {
+    failure = null;
+    if (!SupportsRequiredPostconditions(program, goal, generator, out var capabilityFailure)) {
+      failure = capabilityFailure;
+      return null;
+    }
+    if (maximumPostconditionBytes < 0 || maximumPostconditionBytes > MaximumProofSourceBytes) {
+      failure = "The generated target-requirement postcondition budget is outside the bounded source policy.";
+      return null;
+    }
+    var scope = generator.EnclosingClass.EnclosingModuleDefinition;
+    var substitution = goal.Ins.Select((formal, index) => (formal, index)).ToDictionary(pair =>
+      (IVariable)pair.formal, pair => (Expression)new IdentifierExpr(pair.formal.Origin, generator.Outs[pair.index]));
+    var postconditions = new StringBuilder();
+    foreach (var clause in goal.Req) {
+      ContractQueryDeadline.Check(deadlineTimestamp, cancellationToken);
+      var copied = new ProofClauseSubstituter(null, substitution, renderCallSyntax: false).Substitute(clause.E);
+      var qualified = ContractQueryBuilder.QualifyExpression(program, scope, copied);
+      var printable = new ProofClauseSubstituter(null, new Dictionary<IVariable, Expression>(), renderCallSyntax: true)
+        .Substitute(qualified);
+      postconditions.Append("\n  ensures (").Append(Printer.ExprToString(program.Options, printable)).Append(')');
+      if (StrictUtf8.GetByteCount(postconditions.ToString()) > maximumPostconditionBytes) {
+        failure = "The generated target-requirement postconditions exceed the bounded source policy.";
+        return null;
+      }
+    }
+    postconditions.Append('\n');
+    return postconditions.ToString();
+  }
+
   // Keep resolved call bindings through substitution and qualification, then rebuild their printable syntax.
-  private sealed class AdmissionClauseSubstituter(Dictionary<IVariable, Expression> substitution, bool renderCallSyntax)
-    : Substituter(null, substitution, new Dictionary<TypeParameter, Type>()) {
+  private sealed class ProofClauseSubstituter(Expression? receiver, Dictionary<IVariable, Expression> substitution,
+    bool renderCallSyntax) : Substituter(receiver, substitution, new Dictionary<TypeParameter, Type>()) {
     protected override Statement SubstStmt(Statement statement) {
       var syntax = statement as AssignStatement;
       var call = statement as CallStmt;
@@ -628,11 +632,15 @@ public static class ContractGeneratorProof {
       return false;
     }
     if (goal.Req.Count == 0) {
-      failure = "At least one original goal requires clause is needed for positive admission-correctness coverage.";
+      failure = "At least one original goal requires clause is needed for positive direct-generator coverage.";
       return false;
     }
     return true;
   }
+
+  internal static bool SupportsRequiredPostconditions(Program program, Method goal, Method generator,
+    out string failure) => SupportedSelectedGoal(program, goal, generator, out failure) &&
+    TargetRequiresAreValueOnly(program, goal, out failure);
 
   internal static bool SupportedValueType(Type type, HashSet<string> visiting, int depth = 0) {
     if (depth > 96) { return false; }
@@ -677,13 +685,9 @@ public static class ContractGeneratorProof {
     };
   }
 
-  private static bool ContractsAreValueOnly(Program program, Method goal, Method generator, out string failure) {
+  private static bool TargetRequiresAreValueOnly(Program program, Method goal, out string failure) {
     failure = "";
-    foreach (var expression in goal.Req.Select(requirement => requirement.E).Concat(generator.Ens.Select(ensure => ensure.E))) {
-      if (expression.DescendantsAndSelf.OfType<IdentifierExpr>().Any(identifier => generator.Ins.Contains(identifier.Var))) {
-        failure = "Generator postconditions depending on the random-source input are outside the value-only bridge scope.";
-        return false;
-      }
+    foreach (var expression in goal.Req.Select(requirement => requirement.E)) {
       if (expression.DescendantsAndSelf.OfType<OldExpr>().Any() || expression.DescendantsAndSelf.OfType<ThisExpr>().Any()) {
         failure = "Old-state and receiver-dependent goal requirements need a separate heap-aware proof capability.";
         return false;
@@ -717,26 +721,21 @@ public static class ContractGeneratorProof {
     }
   }
 
-  private static bool TryFindProofTargets(Program program, IReadOnlyList<ContractSource> originalSources,
-    Method originalGoal, Method originalGenerator, string admissionName, out Method proofGoal,
-    out Method proofGenerator, out Method admission, out string failure) {
+  private static bool TryFindProofTargets(Program program, Method originalGoal, Method originalGenerator,
+    out Method proofGoal, out Method proofGenerator, out string failure) {
     var goalCandidates = program.RawModules().SelectMany(module => module.TopLevelDecls)
       .OfType<TopLevelDeclWithMembers>().SelectMany(declaration => declaration.Members).OfType<Method>()
       .Where(method => method.FullDafnyName == originalGoal.FullDafnyName && method.Origin.Uri == originalGoal.Origin.Uri).ToList();
     var generatorCandidates = program.RawModules().SelectMany(module => module.TopLevelDecls)
       .OfType<TopLevelDeclWithMembers>().SelectMany(declaration => declaration.Members).OfType<Method>()
       .Where(method => method.FullDafnyName == originalGenerator.FullDafnyName && method.Origin.Uri == originalGenerator.Origin.Uri).ToList();
-    var admissionCandidates = program.RawModules().SelectMany(module => module.TopLevelDecls)
-      .OfType<TopLevelDeclWithMembers>().SelectMany(declaration => declaration.Members).OfType<Method>()
-      .Where(method => method.Name == admissionName && method.Origin.Uri == originalGenerator.Origin.Uri).ToList();
-    if (goalCandidates.Count != 1 || generatorCandidates.Count != 1 || admissionCandidates.Count != 1) {
-      proofGoal = proofGenerator = admission = null!;
-      failure = "The exact goal, generator or generated admission method was not uniquely found in the proof snapshots.";
+    if (goalCandidates.Count != 1 || generatorCandidates.Count != 1) {
+      proofGoal = proofGenerator = null!;
+      failure = "The exact goal or generator was not uniquely found in the proof snapshots.";
       return false;
     }
     proofGoal = goalCandidates[0];
     proofGenerator = generatorCandidates[0];
-    admission = admissionCandidates[0];
     failure = "";
     return true;
   }

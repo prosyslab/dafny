@@ -10,7 +10,7 @@ namespace DafnyTestGeneration.ContractTesting;
 
 /// <summary>Records the source audit that permits one exact embedded RNG module inside a proof scope.</summary>
 internal sealed class ContractGeneratorProofAudit {
-  internal const string PolicyVersion = "pbt-authored-generator-proof-v3";
+  internal const string PolicyVersion = "pbt-direct-generator-proof-v4";
   internal const string PbtRandomModuleName = "PbtRandom";
   internal const string PbtRandomSourceSha256 = "f565ca5d86962c87a6b64f860fb7ba8450dbe5573f6980eb6b5751f577df8f72";
 
