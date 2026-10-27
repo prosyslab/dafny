@@ -104,20 +104,27 @@ public class InitialAdmissionTests : IClassFixture<InitialAdmissionTests.Fixture
     Assert.All(run.AssertCalleeViolated(1), violation => Assert.Equal("Store.Cell.ReadWrong", violation.Callee));
   }
 
-  // Scalar callee checks use original sources even when another module contains a ghost-backed draft.
-  [Theory]
-  [InlineData(2, false)]
-  [InlineData(3, true)]
-  public async Task ScalarClosedCalleeUsesOriginalSources(int bucket, bool invalidCallee) {
+  // An invalid scalar callee is refuted by its closed query over original sources next to a ghost-backed draft.
+  [Fact]
+  public async Task ScalarClosedCalleeUsesOriginalSources() {
     var run = await Campaign.RunAsync(Store);
-    if (invalidCallee) {
-      Assert.All(run.AssertCalleeViolated(bucket), violation => Assert.Equal("Store.Cell.ReadOdd", violation.Callee));
-    } else {
-      run.AssertViolated(bucket, "tag >= 2 ==> false", Postcondition);
-      Assert.Empty(run.CalleeViolations(bucket));
-    }
+    Assert.All(run.AssertCalleeViolated(3), violation => Assert.Equal("Store.Cell.ReadOdd", violation.Callee));
     Assert.Contains(run.Result.Obligations, obligation => obligation.Kind == CalleePostcondition &&
-      obligation.Callee == (invalidCallee ? "Store.Cell.ReadOdd" : "Store.Cell.ReadEven") && obligation.Evaluations.ClosedSmt > 0);
+      obligation.Callee == "Store.Cell.ReadOdd" && obligation.Evaluations.ClosedSmt > 0);
+  }
+
+  // With the bundled solver the existential closed query of a valid callee times out, so its clause stays unchecked and indicts nothing.
+  [Fact]
+  public async Task ScalarClosedCalleeTimeoutLeavesClauseUnchecked() {
+    var run = await Campaign.RunAsync(Store);
+    Assert.Empty(run.Violations(2));
+    Assert.Empty(run.CalleeViolations(2));
+    var obligation = Assert.Single(run.Result.Obligations, obligation => obligation.Kind == CalleePostcondition &&
+      obligation.Callee == "Store.Cell.ReadEven");
+    Assert.Equal(0, obligation.Evaluations.ClosedSmt);
+    Assert.Equal(CampaignSpec.BucketSize, obligation.Evaluations.Unchecked);
+    Assert.Equal("closed_query_timeout", obligation.UncheckedReason);
+    Assert.Equal(0, obligation.Violations);
   }
 
   // A draft cannot make a ghost field relevant after the initial omission audit accepted it.

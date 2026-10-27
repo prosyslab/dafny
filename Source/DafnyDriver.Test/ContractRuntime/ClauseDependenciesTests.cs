@@ -33,13 +33,13 @@ public class ClauseDependenciesTests : IClassFixture<ClauseDependenciesTests.Fix
     run.Artifacts("specification-query-*.result.json").Select(path =>
       JsonSerializer.Deserialize<ContractSpecificationResult>(System.IO.File.ReadAllText(path), ContractJson.Options)!);
 
-  // Only the certified dependency bucket is valid; every other dependency leaves its callee clause unchecked.
+  // Only the certified bucket is valid; invalid and trusted dependencies stay unchecked and the opaque one violates its callee clause.
   [Fact]
   public async Task ClassifiesEveryBucket() {
     var run = await Campaign.RunAsync(Main);
     Assert.True(run.Population == new ContractRuntimePopulation(Generated: Main.SampleCount, Executed: Main.SampleCount,
-      Valid: CampaignSpec.BucketSize, CalleeContractUnchecked: 3 * CampaignSpec.BucketSize,
-      ViolatingSamples: CampaignSpec.BucketSize), run.Detail());
+      Valid: CampaignSpec.BucketSize, CalleeContractViolations: CampaignSpec.BucketSize,
+      CalleeContractUnchecked: 2 * CampaignSpec.BucketSize, ViolatingSamples: CampaignSpec.BucketSize), run.Detail());
   }
 
   // A proven original dependency admits a positive callee clause and exposes the actual goal failure.
@@ -52,11 +52,10 @@ public class ClauseDependenciesTests : IClassFixture<ClauseDependenciesTests.Fix
       proof.Implementations.Any(name => name.Contains("IdentityValid", StringComparison.Ordinal)));
   }
 
-  // A dependency that is invalid, trusted or opaque never certifies its closed callee clause.
+  // A dependency that is invalid or trusted never certifies its closed callee clause.
   [Theory]
   [InlineData(1, "IdentityInvalid(x) == x", "invalid original function contract")]
   [InlineData(2, "IdentityTrusted(x) == x", "trust assumption in the original definition")]
-  [InlineData(3, "IdentityOpaque(x) == x", "hidden definition with an insufficient exported contract")]
   public async Task UncertifiedDependencyKeepsCalleeClauseUnchecked(int bucket, string clause, string dependency) {
     var run = await Campaign.RunAsync(Main);
     Assert.True(run.Violations(bucket).Count == 0, dependency);
@@ -64,6 +63,18 @@ public class ClauseDependenciesTests : IClassFixture<ClauseDependenciesTests.Fix
     var obligation = run.Obligation(clause, CalleePostcondition);
     Assert.Equal(0, obligation.Evaluations.ClosedSmt);
     Assert.Equal(CampaignSpec.BucketSize, obligation.Evaluations.Unchecked);
+  }
+
+  // With the bundled solver the opaque dependency's closed callee clause is refuted for every sample of its bucket.
+  [Fact]
+  public async Task OpaqueDependencyViolatesCalleeClause() {
+    var run = await Campaign.RunAsync(Main);
+    Assert.Empty(run.Violations(3));
+    Assert.Equal(CampaignRun.Ordinals(3), run.CalleeViolations(3).Select(violation => violation.SampleOrdinal).Order());
+    var obligation = run.Obligation("IdentityOpaque(x) == x", CalleePostcondition);
+    Assert.Equal(CampaignSpec.BucketSize, obligation.Evaluations.ClosedSmt);
+    Assert.Equal(0, obligation.Evaluations.Unchecked);
+    Assert.Equal(CampaignSpec.BucketSize, obligation.Violations);
   }
 
   // A bodyless logical dependency cannot be certified from its declared contract alone; it is requested as a draft.
