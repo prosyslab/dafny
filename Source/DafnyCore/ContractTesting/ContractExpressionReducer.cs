@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 
 namespace Microsoft.Dafny;
@@ -19,6 +20,37 @@ public sealed class ContractExpressionReducer {
   /// <summary>Recognizes concrete resolved values while checking each recursive traversal step.</summary>
   public static bool IsConcreteValue(Expression expression, Action? cancellationCheck) =>
     PartialEvaluatorEngine.IsContractConcreteValue(expression, cancellationCheck);
+
+  /// <summary>Folds a resolved tree made only from integer literals and total integer arithmetic.</summary>
+  public static bool TryFoldTotalIntegerArithmetic(Expression expression, out BigInteger value) {
+    ArgumentNullException.ThrowIfNull(expression);
+    value = default;
+    if (!IsTotalIntegerArithmetic(expression)) {
+      return false;
+    }
+    var folded = ConstantFolder.TryFoldInteger(expression);
+    if (folded == null) {
+      return false;
+    }
+    value = folded.Value;
+    return true;
+  }
+
+  private static bool IsTotalIntegerArithmetic(Expression expression) {
+    expression = expression.Resolved;
+    if (!expression.Type.IsIntegerType) {
+      return false;
+    }
+    return expression switch {
+      LiteralExpr { Value: BigInteger } => true,
+      BinaryExpr {
+        ResolvedOp: BinaryExpr.ResolvedOpcode.Add or BinaryExpr.ResolvedOpcode.Sub or
+        BinaryExpr.ResolvedOpcode.Mul
+      } binary =>
+        IsTotalIntegerArithmetic(binary.E0) && IsTotalIntegerArithmetic(binary.E1),
+      _ => false
+    };
+  }
 
   private readonly DafnyOptions options;
   private readonly ModuleDefinition module;

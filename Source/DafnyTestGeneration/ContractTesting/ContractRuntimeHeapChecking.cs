@@ -126,9 +126,13 @@ public static class ContractRuntimeHeapChecking {
       }
       if (expected is UserDefinedType { ResolvedClass: SubsetTypeDecl subset }) {
         return subset == program.SystemModuleManager.NatDecl &&
-          expression is LiteralExpr { Value: BigInteger integer } && integer >= 0;
+          ContractExpressionReducer.TryFoldTotalIntegerArithmetic(expression, out var integer) && integer >= 0;
       }
       if (expected is UserDefinedType { ResolvedClass: NewtypeDecl }) { return false; }
+      if (expected.IsIntegerType &&
+          ContractExpressionReducer.TryFoldTotalIntegerArithmetic(expression, out _)) {
+        return true;
+      }
       if (expression is ConversionExpr conversion && conversion.E.Resolved is LiteralExpr { Value: BigInteger integerValue }) {
         return expected.IsBitVectorType && conversion.ToType.Equals(expected, keepConstraints: true) &&
           integerValue >= 0 && integerValue < (BigInteger.One << expected.AsBitVectorType.Width);
@@ -340,9 +344,12 @@ public static class ContractRuntimeHeapChecking {
           !active.Add(declaration)) { return false; }
       // A finite logical heap can allocate one fresh object per acyclic field
       // edge. Constructors are not axioms restricting the set of possible heaps.
-      return declaration.Members.OfType<Field>().Where(field => !field.IsStatic).All(field =>
-        field is not ConstantField { Rhs: not null } && HasStructuralInhabitant(program, field.Type,
-          witnesses, new HashSet<TopLevelDecl>(active), specifications, freshReferences: true));
+      var fields = declaration.Members.OfType<Field>().Where(field => !field.IsStatic).ToList();
+      return fields.All(field =>
+        field is ConstantField { Rhs: not null } initialized
+          ? IsOwnBodylessConstantAlias(declaration, fields, initialized)
+          : HasStructuralInhabitant(program, field.Type, witnesses,
+            new HashSet<TopLevelDecl>(active), specifications, freshReferences: true));
     }
     // A constant pure lambda inhabits every built-in arrow flavor if its codomain has an inhabitant.
     if (type.IsBuiltinArrowType) {
@@ -371,6 +378,24 @@ public static class ContractRuntimeHeapChecking {
     return datatype.Ctors.Any(constructor => constructor.Formals.All(formal =>
       HasStructuralInhabitant(program, formal.Type.Subst(substitution), witnesses, new HashSet<TopLevelDecl>(active), specifications, freshReferences)));
   }
+
+  private static bool IsOwnBodylessConstantAlias(ClassDecl declaration, IReadOnlyCollection<Field> fields,
+    ConstantField alias) {
+    if (alias.IsStatic || !ReferenceEquals(alias.EnclosingClass, declaration) ||
+        alias.Rhs?.Resolved is not MemberSelectExpr {
+          AtLabel: null,
+          Obj: var receiver,
+          Member: ConstantField target
+        } selection || receiver.Resolved is not ThisExpr || receiver.Resolved is ImplicitThisExprConstructorCall ||
+        ReferenceEquals(alias, target) || target.IsStatic || target.Rhs != null ||
+        !ReferenceEquals(target.EnclosingClass, declaration) || !fields.Contains(target)) {
+      return false;
+    }
+    return alias.Type.Equals(selection.Type, keepConstraints: true) &&
+      alias.Type.Equals(target.Type, keepConstraints: true) &&
+      selection.Type.Equals(target.Type, keepConstraints: true);
+  }
+
   private static bool OmittedNeedsQuery(Program originalProgram, Microsoft.Dafny.Type type, HashSet<TopLevelDecl> seen,
     ContractSpecificationChecker? specifications) {
     type = type.NormalizeExpandKeepConstraints();
