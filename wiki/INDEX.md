@@ -6,11 +6,13 @@
 
 - [Exact generator admission proof boundary](pbt-generator-proof-integrity.md) — authored contracts, analyzer identities and ordinary verifier tasks; accepted public diagnostic identifies helper definition-input drift. Core memory regression reproduces repeat-translation drift; scoped naming repair retains exact evidence gates, with fresh review and operational acceptance pending.
 
-2026-10-19: [PBT trusted source snapshots](pbt-trusted-sources.md) records exact source/digest trust binding and retained runtime/type/heap admission; combined-tree source independently accepted on base `29da48b6`, focused tests15/15; see the [owner plan](../plan/2026-10-19-pbt-trusted-sources.md).
+2026-10-19: [PBT trusted source snapshots](pbt-trusted-sources.md) records exact source/digest trust binding and retained runtime/type/heap admission; combined-tree source independently accepted on base `29da48b6`, focused tests15/15; see the [owner plan](../plan/2026-10-19-pbt-trusted-sources.md). The [2026-10-26 arithmetic follow-up](pbt-trusted-sources.md#ambient-integer-constants-2026-10-26) preserves that trust policy and admits closed total integer arithmetic; independent28memory cases and formatting pass, image/live adoption pending.
 
 # Native Dafny knowledge
 
 - [Diagnostic treatment of unrelated bodyless declarations](pbt-unreachable-bodyless.md) — method/constructor and iterator transformation accepted locally; actual R07 exposes generated Valid draft before transformation. [Execution-only draft correction](pbt-unreachable-bodyless.md#iterator-types-and-implementation-draft-discovery-2026-10-23) independently accepts3builds/4real memory cases and exact5source/4payload bindings. Public proof/fingerprint closure and conservative iterator capability remain; full new image/tool acceptance is unmet.
+- [Binary PBT feasibility before authoring](pbt-trusted-sources.md#binary-feasibility-before-authoring-2026-10-26) — independently verified; shared source-only binary analysis before templates, exact binding and operational errors preserved;109 memory checks and three project builds pass.
+
 
 
 - [PBT random source bounds and Unicode scalar intervals](pbt-random-api.md) — size contract, deterministic constructor seam and scalar-gap mapping; 23 selected pure-memory cases and fresh independent review pass on 2026-10-20; exact normalized resource pin updated.
@@ -35,3 +37,12 @@
 
 2026-10-15: [Modern native verification logging](verification-json-logging.md) — reporting removal independently accepted; solver limits/outcomes retained, implementation25unique LIT and independent33focused checks pass. Standalone probe limits and historical overflow/campaign receipts preserved; no image or experiment claim.
 - [Generator proof value domain](pbt-generator-value-domain.md) — independently accepted2026-10-25; empty premises, finite collections and immutable/refined-map projections, native127/independent69 memory checks and formatting pass; actual solver/sample/image efficacy remains separate.
+
+2026-10-26: [Immutable field identity aliases](pbt-trusted-sources.md#immutable-field-identity-aliases-2026-10-26) adds exact finite fresh-class construction with unchanged trust, scope and concrete-heap checks; independent40memory cases pass. Full-public/image adoption remains separate.
+
+2026-10-26: [Post-preparation sampling budget](pbt-trusted-sources.md#post-preparation-sampling-budget-2026-10-26) assigns half of the remaining post-compilation campaign budget to one fixed sampling cutoff; independent review, bounded build, 9/9 pure tests and scoped format/diff checks pass. CLI/image/live campaign effects remain separate.
+
+2026-10-26: [Preparation and compilation reuse](pbt-trusted-sources.md#preparation-and-compilation-reuse-2026-10-26) records cohesive resolved-program reuse, source-edit/default semantics, a smaller PBT-only C# backend, typed terminal feedback and unchanged admission/deadlines. Independent111 memory cases and pinned CLI publication pass; latest exact-input compiler worker51.380→21.339s; valid-sample/counterexample efficacy remains unestablished.
+
+2026-10-26: [Old-state capture admission](pbt-trusted-sources.md#old-state-capture-admission-2026-10-26) defers capture emission until the final consuming decision and validates inputs first; independent44 memory cases and scoped formatting pass. Exact-input r03 reaches64 target calls, then external ghost-state errors and classification timeout; no valid classified sample or counterexample.
+- [Bounded contract models](pbt-trusted-sources.md#bounded-contract-models-2026-10-26) — explicit generator policy, finite bool/int state and joint extern transition search, preserved checks and no-evidence exhaustion; independent145 memory checks and three project builds pass. No Csplit or real native IO correctness claim.

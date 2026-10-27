@@ -65,3 +65,17 @@
 
 - [Emit optional translated definition proof inputs](2026-10-15-definition-proof-inputs.md) — done; historical 2026-10-15 native gate accepted: Core21/21, Driver6/6, API8/8,30distinct CLI assertions and5PDB bindings pass; all16owner manifest entries match. Parent solver/benchmark/image/paid gates remain separate. Command-test receipts predate their removal.
 - [Extend generator proof value domains](2026-10-25-pbt-supported-value-domains.md) — done; empty explicit premises, finite collections and immutable/refined-map projections; matching-source127 and independent69 bounded memory checks pass, strict proof/heap boundaries retained.
+- [Admit closed integer arithmetic in PBT global construction](2026-10-26-pbt-constant-arithmetic-admission.md) — done for arithmetic repair; 28 memory cases, scoped formatting, CLI publication and installed product identity pass. R11 full-support admission exposes a separate immutable field-alias limitation.
+
+
+- [Construct immutable field aliases during PBT initial admission](2026-10-26-pbt-immutable-alias-admission.md) — done; unchanged trust/scope, independent40memory cases and exact-current-public old/new construction comparison pass; image/live sampling remains with parent plan.
+- [Preserve sampling time after PBT preparation](2026-10-26-pbt-post-preparation-budget.md) — done for source/local scope; fixed post-compilation cutoff, independent review, bounded build, 9/9 pure tests and format/diff checks pass. CLI publication, image adoption and campaign evidence remain parent-owned.
+# Active preparation performance repair
+
+- [Repair PBT preparation and compilation bottlenecks](2026-10-26-pbt-preparation-bottleneck.md) — done for scoped repairs; compiler/preparation reuse, defaults, smaller backend and terminal metadata pass111 memory cases/publication. Latest exact-input compiler worker51.380→21.339s; external ghost-state/classification limits remain.
+
+- [Commit PBT old-state captures only when consumed](2026-10-26-pbt-old-capture-admission.md) — done; independent44 memory cases and formatting pass. Exact-input r03 reaches64 target calls, removing the pre-entry crash; subsequent external ghost-state errors/classification timeout remain.
+- [Use one authoring schema for both extern policies](2026-10-26-pbt-canonical-authoring-schema.md) — done; explicit draft/native schema2 parity, fresh independent26 memory tests, scoped build and formatting pass; proof/runtime publication unrun.
+
+- [Execute bounded logical contracts as explicit PBT models](../../plan/2026-10-26-pbt-bounded-contract-models.md) — done; independently accepted native implementation,145 memory checks and three project builds. No sampled native/Csplit efficacy claim.
+- [Gate PBT authoring with binary native feasibility](../../plan/2026-10-26-pbt-binary-feasibility.md) — done; shared source-only binary gate,109 native memory cases and three builds pass; runtime/benchmark efficacy remains separate.
