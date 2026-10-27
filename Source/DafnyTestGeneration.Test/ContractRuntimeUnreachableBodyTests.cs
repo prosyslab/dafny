@@ -326,6 +326,83 @@ public class ContractRuntimeUnreachableBodyTests {
     Assert.Equal("UnreachableValue", Assert.IsType<FunctionCallExpr>(function.Body!.Resolved).Function.Name);
   }
 
+  // Unused implemented overrides cannot retain calls to unavailable native hosts in diagnostic code.
+  [Fact]
+  public async Task ReplacesBodiesOfUnreachableConcreteOverrides() {
+    var source = Source(
+      "  method {:extern \"MissingHost\", \"Call\"} NativeMethod()\n" +
+      "  function {:extern \"MissingHost\", \"Read\"} NativeFunction(): int\n" +
+      "  trait Contract {\n" +
+      "    method Run()\n" +
+      "    function Read(): int\n" +
+      "  }\n" +
+      "  class Implementation extends Contract {\n" +
+      "    method Run() ensures true { NativeMethod(); }\n" +
+      "    function Read(): int ensures true { NativeFunction() }\n" +
+      "  }\n");
+    var snapshots = Snapshots(source);
+
+    var transformed = await Transform(snapshots);
+    var reparsed = await Parse(transformed.Sources);
+    var members = ContractRuntimeObligationTransformer.Members(reparsed).ToList();
+    var trait = members.Where(member => member.EnclosingClass is TraitDecl).ToList();
+    var implementation = members.Where(member => member.EnclosingClass.Name == "Implementation").ToList();
+
+    Assert.Equal(source, snapshots[0].Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(source), snapshots[0].Sha256);
+    Assert.Null(trait.OfType<Method>().Single(method => method.Name == "Run").Body);
+    Assert.Null(trait.OfType<Function>().Single(function => function.Name == "Read").Body);
+    var method = implementation.OfType<Method>().Single(candidate => candidate.Name == "Run");
+    var function = implementation.OfType<Function>().Single(candidate => candidate.Name == "Read");
+    Assert.Single(method.Ens);
+    Assert.Single(function.Ens);
+    Assert.Contains(method.Body!.Descendants().OfType<CallStmt>(), call => call.Method.Name == "UnreachableBody");
+    Assert.DoesNotContain(method.Body.Descendants().OfType<CallStmt>(), call => call.Method.Name == "NativeMethod");
+    Assert.Equal("UnreachableValue", Assert.IsType<FunctionCallExpr>(function.Body!.Resolved).Function.Name);
+    AssertCodeGenerates(reparsed);
+  }
+
+  // Selected trait dispatch preserves concrete override bodies and their native dependencies.
+  [Fact]
+  public async Task PreservesReachableConcreteOverridesAndDependencies() {
+    var source = Source(
+      "  method {:extern \"MissingHost\", \"Call\"} NativeMethod()\n" +
+      "  function {:extern \"MissingHost\", \"Read\"} NativeFunction(): int\n" +
+      "  trait Contract {\n" +
+      "    method Run()\n" +
+      "    function Read(): int\n" +
+      "  }\n" +
+      "  class Implementation extends Contract {\n" +
+      "    method Run() ensures true { NativeMethod(); }\n" +
+      "    function Read(): int ensures true { NativeFunction() }\n" +
+      "  }\n",
+      completeBody: "{ var contract: Contract := new Implementation; contract.Run(); y := contract.Read(); }");
+    var snapshots = Snapshots(source);
+    var original = await Parse(snapshots);
+    var goal = ContractCallableSelector.SelectMethod(original, new("M.Complete"), requireConcreteReceiver: false);
+    var reachable = ContractRuntimeObligationTransformer.RuntimeExecutionReachable(original, [goal]);
+
+    Assert.Contains(reachable, callable => callable.FullDafnyName == "M.Implementation.Run");
+    Assert.Contains(reachable, callable => callable.FullDafnyName == "M.Implementation.Read");
+    Assert.Contains(reachable, callable => callable.FullDafnyName == "M.NativeMethod");
+    Assert.Contains(reachable, callable => callable.FullDafnyName == "M.NativeFunction");
+    var transformed = new ContractRuntimeObligationTransformer(original, snapshots, goal).Transform();
+    var reparsed = await Parse(transformed.Sources);
+    var implementation = ContractRuntimeObligationTransformer.Members(reparsed)
+      .Where(member => member.EnclosingClass.Name == "Implementation").ToList();
+    var method = implementation.OfType<Method>().Single(candidate => candidate.Name == "Run");
+    var function = implementation.OfType<Function>().Single(candidate => candidate.Name == "Read");
+
+    Assert.Equal(source, snapshots[0].Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(source), snapshots[0].Sha256);
+    Assert.Single(method.Ens);
+    Assert.Single(function.Ens);
+    Assert.Contains(method.Body!.Descendants().OfType<CallStmt>(),
+      call => call.Method.Name.StartsWith("NativeMethod", StringComparison.Ordinal));
+    Assert.StartsWith("NativeFunction", Assert.IsType<FunctionCallExpr>(function.Body!.Resolved).Function.Name,
+      StringComparison.Ordinal);
+  }
+
   // A bodyless concrete constructor initializes every source field before entering its diagnostic trap.
   [Fact]
   public async Task AddsBodyToUnreachableConcreteConstructor() {

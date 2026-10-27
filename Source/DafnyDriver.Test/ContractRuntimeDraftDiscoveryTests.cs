@@ -78,6 +78,60 @@ public class ContractRuntimeDraftDiscoveryTests {
     Assert.Equal(["M.SelectedBody", "M.SelectedSpec"], missing);
   }
 
+  // Native extern discovery omits only executable bodyless externs while retaining ordinary, ghost and scaffold drafts.
+  [Fact]
+  public async Task NativeExternModeKeepsOtherMissingImplementations() {
+    const string source = """
+      module M {
+        method {:extern} NativeMethod(x: int) returns (y: int)
+        function {:extern} NativeFunction(x: int): int
+        ghost function {:extern} GhostNativeFunction(x: int): bool
+        method Missing(x: int) returns (y: int)
+        method Scaffold(x: int) returns (y: int) { assert false; }
+        method Goal(x: int) returns (y: int)
+          ensures GhostNativeFunction(y)
+        {
+          var first := NativeMethod(x);
+          var second := Missing(first);
+          var third := Scaffold(second);
+          y := NativeFunction(third);
+        }
+      }
+      """;
+    var request = Request(source, "M.Goal");
+    var (program, goal, _) = await ParseRequest(request);
+
+    var drafted = ContractRuntimeCampaignRunner.MissingDrafts(program, request.Sources, goal, [])
+      .Select(item => item.Symbol).OrderBy(symbol => symbol, StringComparer.Ordinal).ToArray();
+    var native = ContractRuntimeCampaignRunner.MissingDrafts(program, request.Sources, goal, [],
+        externExecution: ContractRuntimeExternExecution.Native)
+      .Select(item => item.Symbol).OrderBy(symbol => symbol, StringComparer.Ordinal).ToArray();
+
+    Assert.Equal(["M.GhostNativeFunction", "M.Missing", "M.NativeFunction", "M.NativeMethod", "M.Scaffold"], drafted);
+    Assert.Equal(["M.GhostNativeFunction", "M.Missing", "M.Scaffold"], native);
+  }
+
+  // Native extern mode rejects even an unreachable supplied extern draft before reachability can filter it.
+  [Fact]
+  public async Task RejectsUnreachableNativeExternDraft() {
+    const string source = """
+      module M {
+        method {:extern} Unused(x: int) returns (y: int)
+        method Goal(x: int) returns (y: int) { y := x; }
+      }
+      """;
+    const string content = "method {:pbt_draft \"M.Unused\"} Unused(x: int) returns (y: int) { y := x; }";
+    var request = Request(source, "M.Goal");
+    var (program, goal, _) = await ParseRequest(request);
+    var draft = new ContractRuntimeDraft("M.Unused", "Unused.dfy", content,
+      ContractHarnessBuilder.Hash(content));
+
+    var error = Assert.Throws<NotSupportedException>(() => ContractRuntimeCampaignRunner.MissingDrafts(
+      program, request.Sources, goal, [draft], externExecution: ContractRuntimeExternExecution.Native));
+
+    Assert.Contains("Native extern execution", error.Message);
+  }
+
   // Constructor and advancement calls retain the existing early unsupported iterator boundary.
   [Fact]
   public async Task RejectsConstructedAndAdvancedIterator() {

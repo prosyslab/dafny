@@ -18,6 +18,8 @@ public static class TestContractsCommand {
   private static readonly Option<bool> RuntimeCheck = new("--runtime-check", "Check concrete runtime obligations using a supplied generator.");
   private static readonly Option<bool> RuntimeAuthoring = new("--runtime-authoring",
     "Prepare or extract a bounded full-context runtime authoring source view.");
+  private static readonly Option<bool> RuntimeFeasibility = new("--runtime-feasibility",
+    "Check source-only runtime authoring support without a generator, compiler or solver.");
   private static readonly Option<bool> ScreenContract = new("--screen-contract", "Inspect or screen a proposed child contract on explicit typed inputs.");
   private static readonly Option<uint> VerificationSeed = new("--verification-seed", () => 0U,
     "Set the Boogie verification random seed (0 through 2147483647).");
@@ -26,6 +28,7 @@ public static class TestContractsCommand {
   static TestContractsCommand() {
     OptionRegistry.RegisterOption(RuntimeCheck, OptionScope.Cli);
     OptionRegistry.RegisterOption(RuntimeAuthoring, OptionScope.Cli);
+    OptionRegistry.RegisterOption(RuntimeFeasibility, OptionScope.Cli);
     OptionRegistry.RegisterOption(ScreenContract, OptionScope.Cli);
     OptionRegistry.RegisterOption(VerificationSeed, OptionScope.Cli);
     VerificationSeed.AddValidator(result => {
@@ -42,6 +45,7 @@ public static class TestContractsCommand {
     command.AddArgument(Request);
     command.AddOption(RuntimeCheck);
     command.AddOption(RuntimeAuthoring);
+    command.AddOption(RuntimeFeasibility);
     command.AddOption(ScreenContract);
     command.AddOption(VerificationSeed);
     command.AddOption(RuntimeWorker);
@@ -57,6 +61,10 @@ public static class TestContractsCommand {
     var runtimeResultPath = context.ParseResult.GetValueForOption(RuntimeWorker);
     var runtimeRequested = context.ParseResult.GetValueForOption(RuntimeCheck) || runtimeResultPath != null;
     var authoringRequested = context.ParseResult.GetValueForOption(RuntimeAuthoring);
+    if (context.ParseResult.GetValueForOption(RuntimeFeasibility)) {
+      return await ExecuteFeasibilityAsync(options, file,
+        runtimeRequested || authoringRequested || context.ParseResult.GetValueForOption(ScreenContract), cancellationToken);
+    }
     if (authoringRequested) {
       return await ExecuteAuthoringAsync(options, file,
         runtimeRequested || context.ParseResult.GetValueForOption(ScreenContract), cancellationToken);
@@ -66,6 +74,8 @@ public static class TestContractsCommand {
     }
     string runtimeSeed = "";
     var runtimeProofRequested = false;
+    ContractRuntimeCampaignRequest? runtimeRequest = null;
+    var runtimeRequestValidated = false;
     object result;
     try {
       if (!runtimeRequested) {
@@ -74,8 +84,11 @@ public static class TestContractsCommand {
       var json = await File.ReadAllTextAsync(file.FullName, cancellationToken);
       var request = JsonSerializer.Deserialize<ContractRuntimeCampaignRequest>(json, ContractJson.Options)
         ?? throw new JsonException("Null runtime campaign request.");
+      runtimeRequest = request;
       runtimeSeed = request.Seed;
       runtimeProofRequested = request.ProveGeneratorPreconditions;
+      ContractRuntimeCampaignRunner.ValidateRequest(request);
+      runtimeRequestValidated = true;
       result = runtimeResultPath != null
         ? await ContractRuntimeCampaignRunner.RunAsync(request, options, Path.GetDirectoryName(runtimeResultPath)!, cancellationToken)
         : await SuperviseRuntimeAsync(request, options, cancellationToken);
@@ -100,8 +113,55 @@ public static class TestContractsCommand {
     }
     return 0;
 
-    object Failure(ContractTestStatus status, string reason) =>
-      ContractRuntimeCampaignRunner.Failure(status == ContractTestStatus.Unsupported ? ContractRuntimeStatus.Unsupported : ContractRuntimeStatus.Error, reason, runtimeSeed, runtimeProofRequested);
+    object Failure(ContractTestStatus status, string reason) {
+      var runtimeStatus = status == ContractTestStatus.Unsupported
+        ? ContractRuntimeStatus.Unsupported : ContractRuntimeStatus.Error;
+      if (runtimeRequest != null &&
+          ContractRuntimeCampaignSchema.IsKnownRequestVersion(runtimeRequest.SchemaVersion)) {
+        var cancelled = status == ContractTestStatus.Cancelled;
+        return ContractRuntimeCampaignRunner.Failure(runtimeRequest, runtimeStatus, reason,
+          runtimeRequestValidated ? ContractRuntimeTerminalStage.Supervision : ContractRuntimeTerminalStage.Input,
+          cancelled ? ContractRuntimeNoValidSampleReason.Cancelled : runtimeRequestValidated
+            ? ContractRuntimeNoValidSampleReason.WorkerResultUnavailable
+            : ContractRuntimeNoValidSampleReason.PipelineNotReached);
+      }
+      return ContractRuntimeCampaignRunner.Failure(runtimeStatus, reason, runtimeSeed, runtimeProofRequested);
+    }
+  }
+
+  private static async Task<int> ExecuteFeasibilityAsync(DafnyOptions options, FileInfo file, bool conflictingMode,
+    CancellationToken cancellationToken) {
+    try {
+      if (conflictingMode) { throw new ArgumentException("runtime_feasibility_requires_an_exclusive_operation"); }
+      using var stream = File.OpenRead(file.FullName);
+      var buffer = new byte[ContractRuntimeFeasibility.MaximumRequestBytes + 1];
+      var length = 0;
+      while (length < buffer.Length) {
+        var read = await stream.ReadAsync(buffer.AsMemory(length), cancellationToken);
+        if (read == 0) { break; }
+        length += read;
+      }
+      if (length > ContractRuntimeFeasibility.MaximumRequestBytes) {
+        throw new ArgumentException("runtime_feasibility_request_too_large");
+      }
+      var request = JsonSerializer.Deserialize<ContractRuntimeFeasibilityRequest>(
+        buffer.AsSpan(0, length), ContractJson.Options) ?? throw new JsonException("null_runtime_feasibility_request");
+      var result = await ContractRuntimeFeasibility.RunAsync(request, options, cancellationToken);
+      await options.OutputWriter.Code(JsonSerializer.Serialize(result, ContractJson.Options) + "\n");
+      return 0;
+    } catch (OperationCanceledException) {
+      return await Fail(cancellationToken.IsCancellationRequested
+        ? "Runtime feasibility was cancelled." : "Runtime feasibility deadline expired.");
+    } catch (Exception error) when (error is ArgumentException or IOException or JsonException or NotSupportedException) {
+      return await Fail(error.Message);
+    }
+
+    async Task<int> Fail(string message) {
+      // Operational failures have no support verdict and must not be cached as false.
+      await options.ErrorWriter.WriteLineAsync(message.Length <= ContractRuntimeFeasibility.MaximumDiagnosticCharacters
+        ? message : message[..ContractRuntimeFeasibility.MaximumDiagnosticCharacters]);
+      return 1;
+    }
   }
 
   private static async Task<int> ExecuteAuthoringAsync(DafnyOptions options, FileInfo file, bool conflictingMode,
@@ -148,7 +208,8 @@ public static class TestContractsCommand {
     return 0;
 
     ContractRuntimeAuthoringResult Failure(ContractRuntimeAuthoringStatus status, string reason) =>
-      new(ContractRuntimeSourceAuthoring.SchemaVersion,
+      new(request?.SchemaVersion == ContractRuntimeSourceAuthoring.NativeSchemaVersion
+          ? ContractRuntimeSourceAuthoring.NativeSchemaVersion : ContractRuntimeSourceAuthoring.LegacySchemaVersion,
         request?.Action ?? ContractRuntimeAuthoringAction.Prepare, status, reason);
   }
 
@@ -214,14 +275,23 @@ public static class TestContractsCommand {
     }
     var process = await ContractExecutionProcess.RunAsync("dotnet", arguments, directory, timeout.Token);
     if (process.Cancelled) {
-      return ContractRuntimeCampaignRunner.Failure(ContractRuntimeStatus.Inconclusive,
-        "Runtime campaign deadline expired or was cancelled; process tree reaped.", request.Seed, request.ProveGeneratorPreconditions);
+      return ContractRuntimeCampaignRunner.Failure(request, ContractRuntimeStatus.Inconclusive,
+        "Runtime campaign deadline expired or was cancelled; process tree reaped.",
+        ContractRuntimeTerminalStage.Supervision, cancellationToken.IsCancellationRequested
+          ? ContractRuntimeNoValidSampleReason.Cancelled
+          : ContractRuntimeNoValidSampleReason.CampaignDeadline);
     }
     if (process.ExitCode != 0 || !File.Exists(resultPath)) {
-      return ContractRuntimeCampaignRunner.Failure(ContractRuntimeStatus.Error,
-        "Runtime worker returned no structured result. " + process.StandardError, request.Seed, request.ProveGeneratorPreconditions);
+      return ContractRuntimeCampaignRunner.Failure(request, ContractRuntimeStatus.Error,
+        "Runtime worker returned no structured result. " + process.StandardError,
+        ContractRuntimeTerminalStage.Supervision, ContractRuntimeNoValidSampleReason.WorkerResultUnavailable);
     }
-    return JsonSerializer.Deserialize<ContractRuntimeCampaignResult>(await File.ReadAllTextAsync(resultPath, cancellationToken), ContractJson.Options)
+    var result = JsonSerializer.Deserialize<ContractRuntimeCampaignResult>(
+      await File.ReadAllTextAsync(resultPath, cancellationToken), ContractJson.Options)
       ?? throw new JsonException("Runtime worker returned null.");
+    if (!ContractRuntimeCampaignSchema.IsCompatibleResult(request, result)) {
+      throw new JsonException("Runtime worker returned an incompatible result schema.");
+    }
+    return result;
   }
 }

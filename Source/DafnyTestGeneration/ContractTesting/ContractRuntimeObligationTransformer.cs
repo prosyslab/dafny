@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using Microsoft.Dafny;
 using Type = Microsoft.Dafny.Type;
 
@@ -26,6 +27,7 @@ public sealed class ContractRuntimeObligationTransformer {
   private readonly Method goal;
   private readonly MethodOrFunction nativeGoal;
   private readonly Method generator;
+  private readonly ContractRuntimeContractModelPlan? contractModels;
   private readonly ContractRuntimeSourceMap? sourceMap;
   private readonly IReadOnlyDictionary<string, string> rejected;
   private readonly IReadOnlySet<string> diagnosticConstructors;
@@ -34,12 +36,13 @@ public sealed class ContractRuntimeObligationTransformer {
   private readonly List<ContractRuntimeDeghostExclusion> exclusions = [];
   private readonly HashSet<Function> functions;
   private readonly HashSet<MethodOrFunction> reachable;
+  private readonly HashSet<DatatypeCtor> reachableDatatypeConstructors = [];
   private readonly HashSet<IteratorDecl> reachableIterators;
   private readonly HashSet<Field> fields;
   private readonly HashSet<Field> compiledGhostFields = [];
   private readonly HashSet<IVariable> variables = [];
   private readonly Dictionary<Method, string> oldDeclarations = [];
-  private readonly Dictionary<Expression, IVariable> oldNames = [];
+  private readonly Dictionary<Method, Dictionary<Expression, IVariable>> oldNames = [];
   private readonly Dictionary<Function, string> specWrappers = [];
   private readonly Function? goalFunction;
   private readonly bool lemmaContract;
@@ -55,13 +58,38 @@ public sealed class ContractRuntimeObligationTransformer {
   private readonly string outputFamily;
   private readonly string runtimeAlias;
   private readonly string runtimeBridge;
+  private readonly Dictionary<Uri, SourceText> sourceTextCache = [];
   private int nextName;
-  private sealed record Edit(Uri Uri, int Start, int Length, string Text);
+  private sealed record PendingOldCapture(Expression Key, Expression Value, IVariable Variable);
+  internal sealed record Edit(Uri Uri, int Start, int Length, string Text);
+  private sealed class SourceText(ContractSource source) {
+    private readonly byte[] bytes = Encoding.UTF8.GetBytes(source.Content);
+    private readonly Dictionary<int, int> indices = new() { [0] = 0 };
+
+    internal string Content => source.Content;
+
+    internal int Index(int byteOffset) {
+      if (byteOffset < 0 || byteOffset > bytes.Length) {
+        throw new ArgumentException("Invalid source token offset.");
+      }
+      if (!indices.TryGetValue(byteOffset, out var index)) {
+        index = Encoding.UTF8.GetCharCount(bytes, 0, byteOffset);
+        indices.Add(byteOffset, index);
+      }
+      return index;
+    }
+
+    internal string Slice(int start, int length) {
+      var first = Index(start);
+      return Content.Substring(first, Index(start + length) - first);
+    }
+  }
 
   /// <summary>Prepares runtime obligations, accepting proof omission only through a matching internal certificate.</summary>
   public ContractRuntimeObligationTransformer(Program program, IReadOnlyList<ContractSource> sources, Method goal, ContractRuntimeSourceMap? sourceMap = null, IReadOnlyDictionary<string, string>? rejected = null,
     IReadOnlyDictionary<string, ContractRuntimeDecisionMethod>? decisionCaps = null, IReadOnlySet<string>? diagnosticConstructors = null, string? originalSourceSetHash = null,
-    ContractGeneratorProofReport? generatorProof = null, Method? selectedGenerator = null) {
+    ContractGeneratorProofReport? generatorProof = null, Method? selectedGenerator = null,
+    ContractRuntimeContractModelPolicy? contractModelPolicy = null) {
     this.program = program;
     nativeGoal = ContractCallableSelector.NativeCallable(program, goal);
     var generator = selectedGenerator ?? LegacyGenerator(program, goal);
@@ -85,6 +113,8 @@ public sealed class ContractRuntimeObligationTransformer {
     this.sources = sources;
     this.goal = goal;
     this.generator = generator;
+    contractModels = ContractRuntimeContractModels.Create(program, goal, contractModelPolicy);
+    contractModels?.ValidateGenerator(generator);
     lemmaContract = goal is Lemma;
     var verifiedCertificate = generatorProof is {
       Status: ContractGeneratorProofStatus.Verified,
@@ -93,7 +123,7 @@ public sealed class ContractRuntimeObligationTransformer {
     var requiredProofChecks = generatorProof?.RequiredNativeChecks?.ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>(StringComparer.Ordinal);
     var coveredProofChecks = generatorProof?.CoveredNativeChecks?.ToHashSet(StringComparer.Ordinal) ?? new HashSet<string>(StringComparer.Ordinal);
     var proofSelectedGenerator = verifiedCertificate != null && !lemmaContract ? generator : null;
-    omitEntryRequires = proofSelectedGenerator != null && requiredProofChecks.Count > 0 &&
+    omitEntryRequires = contractModels == null && proofSelectedGenerator != null && requiredProofChecks.Count > 0 &&
       requiredProofChecks.SetEquals(coveredProofChecks) && verifiedCertificate!.Matches(
       program, sources, goal, proofSelectedGenerator, program.Options, requiredProofChecks);
 
@@ -109,6 +139,7 @@ public sealed class ContractRuntimeObligationTransformer {
     fields = reachable.Where(c => !this.diagnosticConstructors.Contains(c.FullDafnyName))
       .SelectMany(c => c.Descendants()).OfType<MemberSelectExpr>()
       .Select(select => select.Member).OfType<Field>().ToHashSet();
+    if (contractModels != null) { fields.UnionWith(contractModels.Fields); }
     foreach (var constructor in reachable.OfType<Constructor>().Where(c => this.diagnosticConstructors.Contains(c.FullDafnyName))) {
       var supplied = ContractDiagnosticConstruction.SuppliedFieldNames(constructor);
       fields.UnionWith(((TopLevelDeclWithMembers)constructor.EnclosingClass).Members.OfType<Field>()
@@ -148,7 +179,8 @@ public sealed class ContractRuntimeObligationTransformer {
   }
 
   /// <summary>Returns why runtime execution through a structurally reached iterator is unsupported.</summary>
-  public static string? UnsupportedRuntimeIterator(Program program, Method goal, Method? generator = null) {
+  public static string? UnsupportedRuntimeIterator(Program program, Method goal, Method? generator = null,
+    CancellationToken cancellationToken = default) {
     var root = ContractCallableSelector.NativeCallable(program, goal);
     IEnumerable<MethodOrFunction> initialRoots = Enumerable.Empty<MethodOrFunction>();
     if (goal is not Lemma) {
@@ -158,7 +190,7 @@ public sealed class ContractRuntimeObligationTransformer {
       ? initialRoots
       : goal is Lemma ? new MethodOrFunction[] { generator } : new[] { root, generator };
     var reachable = RuntimeExecutionReachable(program, roots,
-      goal is Lemma ? goal.Ins.Select(formal => formal.Type) : null);
+      goal is Lemma ? goal.Ins.Select(formal => formal.Type) : null, cancellationToken: cancellationToken);
     var iterator = reachable
       .Select(callable => callable is MemberDecl { EnclosingClass: IteratorDecl declaration } ? declaration : null)
       .OfType<IteratorDecl>().OrderBy(declaration => declaration.FullDafnyName, StringComparer.Ordinal).FirstOrDefault();
@@ -190,20 +222,22 @@ public sealed class ContractRuntimeObligationTransformer {
   /// </summary>
   public static IReadOnlyList<MethodOrFunction> ExecutionReachable(Program program, IEnumerable<MethodOrFunction> roots,
     IEnumerable<Type>? additionalTypes = null, ISet<Declaration>? declarationDependencies = null,
-    IEnumerable<ConstantField>? constantRoots = null) {
-    return ExecutionReachable(program, roots, additionalTypes, declarationDependencies, constantRoots, true);
+    IEnumerable<ConstantField>? constantRoots = null, CancellationToken cancellationToken = default) {
+    return ExecutionReachable(program, roots, additionalTypes, declarationDependencies, constantRoots, true, cancellationToken);
   }
 
   internal static IReadOnlyList<MethodOrFunction> RuntimeExecutionReachable(Program program,
     IEnumerable<MethodOrFunction> roots, IEnumerable<Type>? additionalTypes = null,
-    ISet<Declaration>? declarationDependencies = null, IEnumerable<ConstantField>? constantRoots = null) {
-    return ExecutionReachable(program, roots, additionalTypes, declarationDependencies, constantRoots, false);
+    ISet<Declaration>? declarationDependencies = null, IEnumerable<ConstantField>? constantRoots = null,
+    CancellationToken cancellationToken = default) {
+    return ExecutionReachable(program, roots, additionalTypes, declarationDependencies, constantRoots, false, cancellationToken);
   }
 
   private static IReadOnlyList<MethodOrFunction> ExecutionReachable(Program program,
     IEnumerable<MethodOrFunction> roots, IEnumerable<Type>? additionalTypes,
     ISet<Declaration>? declarationDependencies, IEnumerable<ConstantField>? constantRoots,
-    bool includeIteratorTypeEdges) {
+    bool includeIteratorTypeEdges, CancellationToken cancellationToken) {
+    cancellationToken.ThrowIfCancellationRequested();
     var edges = program.RawModules().SelectMany(module => module.CallGraph.GetVertices().Concat(module.InterModuleCallGraph.GetVertices()))
       .GroupBy(vertex => vertex.N).ToDictionary(group => group.Key, group => group.SelectMany(vertex => vertex.Successors).Select(vertex => vertex.N).Distinct().ToList());
     var overrides = Members(program).Where(member => member.OverriddenMember != null).ToList();
@@ -212,14 +246,17 @@ public sealed class ContractRuntimeObligationTransformer {
     var pending = new Stack<ICallable>(roots.Cast<ICallable>().Concat(constantRoots ?? []));
     foreach (var dependency in (additionalTypes ?? []).SelectMany(type => TypeDependencies(type, types))) { pending.Push(dependency); }
     while (pending.TryPop(out var callable)) {
+      cancellationToken.ThrowIfCancellationRequested();
       if (!reachable.Add(callable)) { continue; }
       if (callable is Function { ByMethodDecl: { } byMethod }) { pending.Push(byMethod); }
       foreach (var target in edges.GetValueOrDefault(callable) ?? []) {
+        cancellationToken.ThrowIfCancellationRequested();
         // The resolver models a mentioned iterator type as a call-graph edge to its declaration.
         // Capability checks omit that pseudo edge while retaining direct _ctor and MoveNext edges.
         if (includeIteratorTypeEdges || target is not IteratorDecl) { pending.Push(target); }
       }
       foreach (var function in callable.Descendants().OfType<Expression>().Select(FunctionReference).OfType<Function>()) {
+        cancellationToken.ThrowIfCancellationRequested();
         pending.Push(function);
       }
       if (callable is MemberDecl member) {
@@ -230,7 +267,7 @@ public sealed class ContractRuntimeObligationTransformer {
     declarationDependencies?.UnionWith(reachable.OfType<Declaration>().Concat(types));
     return reachable.OfType<MethodOrFunction>().ToList();
 
-    static IEnumerable<Type> TypesOf(ICallable callable) {
+    IEnumerable<Type> TypesOf(ICallable callable) {
       if (callable is MethodOrFunction signature) {
         foreach (var formal in signature.Ins) { yield return formal.Type; }
         if (signature is MethodOrConstructor method) {
@@ -241,19 +278,22 @@ public sealed class ContractRuntimeObligationTransformer {
       if (callable is ConstantField constant) { yield return constant.Type; }
       if (callable is not INode node) { yield break; }
       foreach (var descendant in node.Descendants()) {
+        cancellationToken.ThrowIfCancellationRequested();
         if (descendant is Expression { Type: { } type }) { yield return type; }
         if (descendant is VarDeclStmt declaration) {
           foreach (var local in declaration.Locals) { yield return local.Type; }
         }
       }
     }
-    static IEnumerable<ICallable> TypeDependencies(Type type, HashSet<TopLevelDecl> seen) {
+    IEnumerable<ICallable> TypeDependencies(Type type, HashSet<TopLevelDecl> seen) {
+      cancellationToken.ThrowIfCancellationRequested();
       type = type.NormalizeExpandKeepConstraints();
       foreach (var argument in type.TypeArgs) {
         foreach (var dependency in TypeDependencies(argument, seen)) { yield return dependency; }
       }
       if (type is not UserDefinedType { ResolvedClass: { } declaration } || !seen.Add(declaration)) { yield break; }
       foreach (var node in TypeConstraintExpressions(declaration).SelectMany(expression => LogicalNodes(expression).Prepend(expression))) {
+        cancellationToken.ThrowIfCancellationRequested();
         if (node is CallStmt call) { yield return call.Method; }
         if (node is not Expression expression) { continue; }
         if (FunctionReference(expression.Resolved) is { } function) { yield return function; }
@@ -265,6 +305,28 @@ public sealed class ContractRuntimeObligationTransformer {
       foreach (var constant in DefinedConstants(declaration)) { yield return constant; }
       foreach (var dependency in RelatedTypes(declaration).SelectMany(t => TypeDependencies(t, seen))) { yield return dependency; }
     }
+  }
+
+  /// <summary>The same diagnostic-name gate applies to selected source dependencies before and after authoring.</summary>
+  public static string? UnsupportedDiagnosticNames(IEnumerable<MethodOrFunction> callables,
+    IReadOnlyList<ContractSource> sources) {
+    var members = callables.Where(member => sources.Any(source => ContractSourceSnapshot.UriFor(source.Path) == member.Origin.Uri))
+      .ToArray();
+    return members.Any(member => !IsRuntimeMainFamily(member.Name) &&
+        (member.Name.StartsWith("Pbt", StringComparison.Ordinal) || member.Name.Contains("__pbt_", StringComparison.Ordinal)) ||
+        member.Name.StartsWith("pbtTypeShape", StringComparison.Ordinal)) ||
+      members.SelectMany(member => member.Descendants()).OfType<IVariable>()
+        .Any(variable => variable.Name.StartsWith("pbtTypeShape", StringComparison.Ordinal))
+      ? "Reserved Pbt diagnostic name collision." : null;
+  }
+
+  /// <summary>Generic callable values cannot carry the diagnostic type-shape parameters.</summary>
+  public static string? UnsupportedGenericReferences(IEnumerable<MethodOrFunction> callables) {
+    var members = callables.ToArray();
+    var generic = members.Where(callable => callable.TypeArgs.Count > 0).ToHashSet();
+    return members.SelectMany(callable => callable.Descendants()).OfType<MemberSelectExpr>()
+      .Any(select => select.Member is Function function && generic.Contains(function))
+      ? "Generic higher-order function references cannot forward diagnostic type shapes." : null;
   }
 
   // Refinement constraints and witnesses are evaluated with every value of the declared type.
@@ -384,15 +446,49 @@ public sealed class ContractRuntimeObligationTransformer {
       foreach (var descendant in Expressions(child)) { yield return descendant; }
     }
   }
-  // Verification splits retain original token positions; only the unsplit tree owns source edits.
-  private static IEnumerable<Expression> SourceExpressions(Expression expression) {
-    expression = expression.Resolved;
-    yield return expression;
-    var children = expression is QuantifierExpr quantifier ? quantifier.PreResolveSubExpressions : expression.SubExpressions;
+  // Verification splits and substituted defaults retain original token positions. Walk each authored binding and
+  // declaration default once so only its owning source tree can receive edits.
+  private static IEnumerable<INode> SourceNodes(INode node) {
+    if (node is DefaultValueExpression) { yield break; }
+    node = node is Expression expression ? expression.Resolved : node;
+    if (node is DefaultValueExpression) { yield break; }
+    yield return node;
+    IEnumerable<INode> children = node switch {
+      QuantifierExpr quantifier => quantifier.PreResolveSubExpressions,
+      FunctionCallExpr call => new INode[] { call.Receiver }.Concat(call.Bindings.ArgumentBindings),
+      DatatypeValue value => value.Bindings.ArgumentBindings,
+      ActualBindings bindings => bindings.ArgumentBindings,
+      _ => node.Children
+    };
     foreach (var child in children) {
-      foreach (var descendant in SourceExpressions(child)) { yield return descendant; }
+      foreach (var descendant in SourceNodes(child)) { yield return descendant; }
     }
   }
+
+  private static IEnumerable<Expression> SourceExpressions(Expression expression) =>
+    SourceNodes(expression).OfType<Expression>();
+
+  // Constructor defaults execute only when an authored construction reaches that constructor. Follow those
+  // constructions through their declaration defaults without widening instrumentation to sibling constructors.
+  private IEnumerable<DatatypeCtor> SourceDatatypeConstructors(IEnumerable<MethodOrFunction> roots) {
+    var seen = new HashSet<DatatypeCtor>();
+    var pending = new Stack<DatatypeCtor>(roots.SelectMany(SourceNodes).OfType<DatatypeValue>()
+      .Select(value => value.Ctor).OfType<DatatypeCtor>());
+    while (pending.TryPop(out var constructor)) {
+      if (!seen.Add(constructor) || constructor.IsGhost || constructor.EnclosingDatatype == null ||
+          constructor.EnclosingDatatype.EnclosingModuleDefinition.Name is "PbtRuntime" or "PbtRandom" ||
+          !sources.Any(source => ContractSourceSnapshot.UriFor(source.Path) == constructor.Origin.Uri)) {
+        continue;
+      }
+      yield return constructor;
+      foreach (var nested in constructor.Formals.Where(formal => formal.DefaultValue != null)
+                 .SelectMany(formal => SourceNodes(formal.DefaultValue!)).OfType<DatatypeValue>()
+                 .Select(value => value.Ctor).OfType<DatatypeCtor>()) {
+        pending.Push(nested);
+      }
+    }
+  }
+
   // Generic diagnostic values are executable; concrete Dafny shape tokens retain their erased type arguments.
   public static bool CompilableType(Type type) {
     if (type.IsRefType || type.AsTypeParameter != null || ContractHarnessBuilder.SupportedType(type)) { return true; }
@@ -456,11 +552,8 @@ public sealed class ContractRuntimeObligationTransformer {
     foreach (var formal in goal.Ins.Where(f => !CompilableType(f.Type))) {
       throw new NotSupportedException("non_compilable_input_type: " + formal.Name);
     }
-    if (Members().Any(m => !IsRuntimeMainFamily(m.Name) && (m.Name.StartsWith("Pbt", StringComparison.Ordinal) ||
-          m.Name.Contains("__pbt_", StringComparison.Ordinal)) ||
-          m.Name.StartsWith("pbtTypeShape", StringComparison.Ordinal)) ||
-        Members().SelectMany(m => m.Descendants()).OfType<IVariable>().Any(v => v.Name.StartsWith("pbtTypeShape", StringComparison.Ordinal))) {
-      throw new NotSupportedException("Reserved Pbt diagnostic name collision.");
+    if (UnsupportedDiagnosticNames(reachable.Where(callable => Members().Contains(callable)), sources) is { } nameReason) {
+      throw new NotSupportedException(nameReason);
     }
     exclusions.AddRange(rejected.Select(pair => new ContractRuntimeDeghostExclusion(pair.Key, pair.Value)));
     bool changed;
@@ -474,11 +567,13 @@ public sealed class ContractRuntimeObligationTransformer {
         }
       }
     } while (changed);
+    reachableDatatypeConstructors.UnionWith(SourceDatatypeConstructors(reachable.Where(callable =>
+      !callable.IsGhost || callable is Function function && functions.Contains(function))));
     shapedCallables.UnionWith(reachable.Where(callable => callable.TypeArgs.Count > 0 &&
       Members().Contains(callable) && (!callable.IsGhost || callable is Function f && functions.Contains(f))));
-    if (reachable.SelectMany(callable => callable.Descendants()).OfType<MemberSelectExpr>()
-        .Any(select => select.Member is Function function && shapedCallables.Contains(function))) {
-      throw new NotSupportedException("Generic higher-order function references cannot forward diagnostic type shapes.");
+    if (UnsupportedGenericReferences(reachable.Where(callable =>
+          callable.TypeArgs.Count == 0 || shapedCallables.Contains(callable))) is { } genericReason) {
+      throw new NotSupportedException(genericReason);
     }
     foreach (var member in reachable) {
       foreach (var formal in member.Ins.Concat(member is MethodOrConstructor m ? m.Outs : []).Where(f => CompilableType(f.Type))) {
@@ -580,7 +675,7 @@ public sealed class ContractRuntimeObligationTransformer {
     var goalWrapper = Wrapper(goal, goal.Name + "__pbt_goal", true, null);
     Insert(goal.Origin.Uri, goal.StartToken.pos, goalWrapper);
     oldDeclarations[goal] = "";
-    oldNames.Clear();
+    oldNames[goal] = [];
     InstrumentAssertions(assertionSites);
     if (!lemmaContract) { InstrumentLoops(protectedAssertionNodes); }
     if (oldDeclarations[goal].Length > 0) { Insert(goal.Origin.Uri, goal.Body!.StartToken.pos + 1, oldDeclarations[goal]); }
@@ -613,14 +708,16 @@ public sealed class ContractRuntimeObligationTransformer {
     var outputNames = goal.Outs.Select((_, i) => ContractBodyNames.Family(program, "pbtOutput" + i)).ToList();
     var mainName = ContractRuntimeGeneratorSignature.MemberName(goal, "PbtMain");
     var main = "\nmethod " + mainName + "()" + (goal.AllowsNontermination || generator.AllowsNontermination ? " decreases *" : "") +
-      " {\nvar " + randomName + " := PbtRandom.New();\n" + Location(generator.Origin) +
+      " {\nvar " + randomName + " := PbtRandom.New();\n" +
+      (contractModels == null ? "" : RuntimeChecks + ".SetModelRandom(" + randomName + ");\n") + Location(generator.Origin) +
       (inputs.Count == 0 ? "" : "var " + string.Join(", ", inputs) + " := ") + generator.Name + "(" + randomName + ");\n" +
+      (contractModels?.InitialCode(RuntimeChecks) ?? "") +
       RuntimeChecks + ".Generated();\n" + captures + "\n" +
       (outputNames.Count == 0 ? "" : "var " + string.Join(", ", outputNames) + " := ") + target + goal.Name + "__pbt_goal(" +
-      string.Join(", ", goal.Ins.Select(f => f.Name)) + ");\n" + RuntimeChecks + ".Complete();\n}\n";
+      string.Join(", ", goal.Ins.Select(f => f.Name + " := " + f.Name)) + ");\n" + RuntimeChecks + ".Complete();\n}\n";
     var insertion = goal.EnclosingClass is DefaultClassDecl ? goal.StartToken : goal.EnclosingClass.StartToken;
     Insert(goal.Origin.Uri, insertion.pos, main);
-    var transformed = Apply(sources, edits);
+    var transformed = Apply(edits);
     var source = ContractSourceSnapshot.Find(sources, goal.Origin.Uri);
     var prepared = new ContractPreparedProgram(program, goal, source,
       new(source.Path, goal.Origin.line, goal.Origin.col, goal.FullDafnyName, source.Sha256), OriginalCallable: nativeGoal, Sources: sources);
@@ -718,7 +815,6 @@ public sealed class ContractRuntimeObligationTransformer {
       }
       return;
     }
-    if (callable.OverriddenMember != null) { return; }
     if (callable is Method { Body: { } body }) {
       Replace(body, "{ " + RuntimeChecks + ".UnreachableBody(); }");
     } else if (callable is Function { ByMethodBody: { } byMethodBody }) {
@@ -750,10 +846,10 @@ public sealed class ContractRuntimeObligationTransformer {
     WithShapes(method.TypeArgs, () => WrapperCore(method, name, entry, site, goalSite));
 
   private string WrapperCore(Method method, string name, bool entry, IOrigin? site, bool goalSite) {
-    var firstClause = clauses.Count;
     oldDeclarations[method] = "";
-    oldNames.Clear();
-    var ins = ShapedFormals(method.TypeArgs, method.Ins);
+    oldNames[method] = [];
+    var ins = WrapperFormals(method, method.Ins);
+    var firstClause = clauses.Count;
     var outs = string.Join(", ", method.Outs.Select(f => (f.IsGhost && !variables.Contains(f) ? "ghost " : "") + f.Name + ": " + f.Type));
     var inputKind = entry ? ContractRuntimeObligationKind.EntryPrecondition : ContractRuntimeObligationKind.CallPrecondition;
     var outputKind = entry ? ContractRuntimeObligationKind.Postcondition : ContractRuntimeObligationKind.CalleePostcondition;
@@ -791,10 +887,14 @@ public sealed class ContractRuntimeObligationTransformer {
         SerializeValues(method.Outs) + ");\n" + after + "\n" + RuntimeChecks + ".LeaveCall(" + invocation + ");";
     }
     var call = lemmaContract && entry ? "" :
-      (method.Outs.Count == 0 ? "" : string.Join(", ", method.Outs.Select(f => f.Name)) + " := ") + method.Name + "(" + ShapedArguments(method, method.Ins) + ");";
+      (method.Outs.Count == 0 ? "" : string.Join(", ", method.Outs.Select(f => f.Name)) + " := ") +
+      method.Name + TypeArgumentNames(method.TypeArgs) + "(" + ShapedArguments(method, method.Ins) + ");";
+    if (!entry && contractModels?.IsModeled(method) == true) {
+      call = contractModels.TransitionCode(method, RuntimeChecks);
+    }
     return "\n" + (method.HasStaticKeyword ? "static " : "") + "method " + name + TypeParameters(method.TypeArgs) + "(" + ins + ")" +
       (outs.Length == 0 ? "" : " returns (" + outs + ")") + (method.AllowsNontermination ? "\n decreases *" : "") +
-      "\n{\n" + beginCall + oldDeclarations.GetValueOrDefault(method, "") + before +
+      "\n{\n" + beginCall + before + "\n" + oldDeclarations.GetValueOrDefault(method, "") +
       (entry ? "\n" + RuntimeChecks + ".Executed();\n" : "\n") + call + "\n" + after + "\n}\n";
   }
 
@@ -840,14 +940,36 @@ public sealed class ContractRuntimeObligationTransformer {
     var sourceCallables = Members().OfType<MethodOrFunction>().ToHashSet();
     var callables = lemmaContract ? reachable.Where(sourceCallables.Contains) :
       Reachable(program, nativeGoal).OfType<MethodOrFunction>();
-    var bodies = callables
+    var callableList = callables.DistinctBy(callable => callable.FullDafnyName).ToList();
+    foreach (var callable in callableList.Where(callable =>
+               !callable.IsGhost || callable is Function function && functions.Contains(function))) {
+      var calls = callable.Ins.Where(formal => formal.DefaultValue != null)
+        .SelectMany(formal => SourceExpressions(formal.DefaultValue!)).OfType<FunctionCallExpr>().Distinct()
+        .Where(call => (!lemmaContract || sourceCallables.Contains(call.Function)) &&
+          (!call.Function.IsGhost || functions.Contains(call.Function)) && HasContract(call.Function));
+      foreach (var call in calls) {
+        var token = call.NameNode.StartToken;
+        Add(token.Uri, token.pos, token.val.Length, SpecWrapper(call.Function));
+      }
+    }
+    foreach (var constructor in reachableDatatypeConstructors) {
+      var calls = constructor.Formals.Where(formal => formal.DefaultValue != null)
+        .SelectMany(formal => SourceExpressions(formal.DefaultValue!)).OfType<FunctionCallExpr>().Distinct()
+        .Where(call => (!lemmaContract || sourceCallables.Contains(call.Function)) &&
+          (!call.Function.IsGhost || functions.Contains(call.Function)) && HasContract(call.Function));
+      foreach (var call in calls) {
+        var token = call.NameNode.StartToken;
+        Add(token.Uri, token.pos, token.val.Length, SpecWrapper(call.Function));
+      }
+    }
+    var bodies = callableList
       .Select(c => (Callable: c, Body: c switch { MethodOrConstructor m => (INode?)m.Body, Function f => (INode?)f.ByMethodBody ?? f.Body, _ => null }))
       .Where(c => c.Body != null && (!c.Callable.IsGhost || c.Callable is Function f && functions.Contains(f)))
       .Concat(lemmaContract ? [] : new[] { (Callable: (MethodOrFunction)goal, Body: (INode?)goal.Body) })
       .DistinctBy(c => c.Callable.FullDafnyName).ToList();
     foreach (var context in bodies) {
       var goalSite = context.Callable.FullDafnyName == goal.FullDafnyName;
-      foreach (var call in context.Body!.Descendants().OfType<CallStmt>()
+      foreach (var call in SourceNodes(context.Body!).OfType<CallStmt>()
                  .Where(call => !call.Method.IsGhost && !protectedAssertionNodes.Contains(call) &&
                    (!lemmaContract || sourceCallables.Contains(call.Method))).Distinct()) {
         if (call.Method is not Method method) { continue; }
@@ -857,7 +979,8 @@ public sealed class ContractRuntimeObligationTransformer {
         var token = call.MethodSelect.MemberNameNode.StartToken;
         Add(token.Uri, token.pos, token.val.Length, name);
       }
-      var roots = context.Body is Expression bodyExpression ? [bodyExpression] : context.Body.Descendants().OfType<Statement>().SelectMany(s => s.NonSpecificationSubExpressions);
+      var roots = context.Body is Expression bodyExpression ? [bodyExpression] :
+        SourceNodes(context.Body).OfType<Statement>().SelectMany(s => s.NonSpecificationSubExpressions);
       var calls = roots.SelectMany(SourceExpressions).OfType<FunctionCallExpr>().Distinct()
         .Where(call => !protectedAssertionNodes.Contains(call) &&
           (!lemmaContract || sourceCallables.Contains(call.Function)) &&
@@ -877,7 +1000,7 @@ public sealed class ContractRuntimeObligationTransformer {
   private string CallSiteWrapperCore(FunctionCallExpr call, string name, bool goalSite) {
     var function = call.Function;
     var descriptor = ContractCallableSelector.DescribeFunction(program, function, resultFamily.Value);
-    oldDeclarations[descriptor] = ""; oldNames.Clear();
+    oldDeclarations[descriptor] = ""; oldNames[descriptor] = [];
     var before = TypeConstraintChecks(descriptor.Ins, goalSite ? ContractRuntimeObligationKind.CallPrecondition : ContractRuntimeObligationKind.CalleePostcondition, descriptor, call.Origin) +
       string.Join("\n", descriptor.Req.Select(c => goalSite ? Check(c.E, ContractRuntimeObligationKind.CallPrecondition, descriptor, "-1", call.Origin) : InternalPrecondition(c.E, descriptor.EnclosingClass.EnclosingModuleDefinition)));
     var after = GuardContracts(function, descriptor, CalleePostconditions(function, descriptor));
@@ -889,10 +1012,11 @@ public sealed class ContractRuntimeObligationTransformer {
     bool decreasesStar) {
     var result = descriptor.Outs.Single();
     return "\n" + (function.HasStaticKeyword ? "static " : "") + "function " + name + TypeParameters(function.TypeArgs) + "(" +
-      ShapedFormals(function.TypeArgs, descriptor.Ins) + "): " + result.Type +
+      WrapperFormals(function, descriptor.Ins) + "): " + result.Type +
       (decreasesStar ? "\n decreases *" : "") +
-      "\n{ " + oldDeclarations[descriptor] + before + "\nvar " + result.Name + " := " + function.Name + "(" +
-      ShapedArguments(function, descriptor.Ins) + ");\n" + after + "\n" + result.Name + " }\n";
+      "\n{ " + before + "\n" + oldDeclarations[descriptor] + "\nvar " + result.Name + " := " +
+      function.Name + TypeArgumentNames(function.TypeArgs) + "(" + ShapedArguments(function, descriptor.Ins) +
+      ");\n" + after + "\n" + result.Name + " }\n";
   }
 
   private string InternalPrecondition(Expression expression, ModuleDefinition scope) {
@@ -905,27 +1029,17 @@ public sealed class ContractRuntimeObligationTransformer {
     string? clauseText = null, (string Label, Expression Value, Type Type)? extra = null,
     IReadOnlyList<IVariable>? explicitValues = null, bool typeConstraint = false, string? typeTest = null, Function? definingFunction = null,
     string? forceUncheckedReason = null, bool stopOnFailure = false) {
-    var evaluated = new RuntimeSubstituter(node => node is StmtExpr statementExpression ? statementExpression.E : RewriteState(node, owner)).Substitute(expression);
+    var pendingOldCaptures = new Dictionary<Expression, PendingOldCapture>();
+    var evaluated = new RuntimeSubstituter(node => node is StmtExpr statementExpression
+      ? statementExpression.E
+      : RewriteState(node, owner, pendingOldCaptures)).Substitute(expression);
     var reason = typeConstraint ? (typeTest == null ? "type_constraint_not_executable" : null) : Reason(evaluated, true);
     if (reason == null && goalFunction != null && !DefinitionAvailable &&
         Expressions(evaluated).Any(node => node is FunctionCallExpr call && call.Function == goalFunction)) {
       // Executing the goal function here would run the implementation under test instead of its definition.
       reason = "non_compilable_function";
     }
-    var heap = false;
-    List<IVariable> values;
-    if (explicitValues != null) {
-      values = explicitValues.OrderBy(v => v.Name).ToList();
-    } else {
-      var free = new HashSet<IVariable>();
-      FreeVariablesUtil.ComputeFreeVariables(program.Options, evaluated, free, ref heap);
-      values = free.OrderBy(v => v.Name).ToList();
-    }
-    if (lemmaContract && owner == goal && !typeConstraint) {
-      // Native queries restore the complete original clause, including erased proof
-      // statements that may mention inputs absent from the surviving expression.
-      values = values.Concat(owner.Ins).Distinct().OrderBy(variable => variable.Name).ToList();
-    }
+    var values = CheckValues(evaluated, owner, explicitValues, typeConstraint, out var heap);
     var unavailable = values.Any(v => !CompilableType(v.Type) || v.IsGhost && !variables.Contains(v));
     // A type-constraint check has no closed-query form; its value either runs through the membership test or is unchecked.
     var noClosedForm = unavailable || heap || reason is "fresh_or_allocated" || typeConstraint;
@@ -960,6 +1074,17 @@ public sealed class ContractRuntimeObligationTransformer {
       // The previous diagnostic resolve erased this check from compiled code, so it may not claim a runtime decision.
       decision = cap == ContractRuntimeDecisionMethod.ClosedSmt && noClosedForm ? ContractRuntimeDecisionMethod.Unchecked : cap;
       reason = "runtime_check_not_compiled";
+    }
+    if (decision == ContractRuntimeDecisionMethod.Runtime ||
+        decision == ContractRuntimeDecisionMethod.ClosedSmt && heapPostcondition == null) {
+      CommitOldCaptures(owner, pendingOldCaptures.Values, evaluated);
+    } else {
+      // Fixed-heap queries restore the original indexed contract, and unchecked clauses are never evaluated.
+      // Keep their metadata and checkpoints source-bound without executing or rendering speculative snapshots.
+      evaluated = new RuntimeSubstituter(node => node is StmtExpr statementExpression
+        ? statementExpression.E
+        : null).Substitute(expression);
+      values = CheckValues(evaluated, owner, explicitValues, typeConstraint, out _);
     }
     var id = prefix + ":" + clauses.Count;
     var obligation = new ContractRuntimeObligation(id, kind, location.Path, location.Line, location.Column, clauseText ?? Text(expression),
@@ -1008,6 +1133,25 @@ public sealed class ContractRuntimeObligationTransformer {
       ? "if !" + check + (kind == ContractRuntimeObligationKind.EntryPrecondition
         ? " { " + RuntimeChecks + ".Stop(); }" : " { " + RuntimeChecks + ".Unreachable(); }")
       : "var pbtCheck" + nextName++ + " := " + check + ";");
+  }
+
+  private List<IVariable> CheckValues(Expression expression, Method owner,
+    IReadOnlyList<IVariable>? explicitValues, bool typeConstraint, out bool heap) {
+    heap = false;
+    List<IVariable> values;
+    if (explicitValues != null) {
+      values = explicitValues.OrderBy(variable => variable.Name).ToList();
+    } else {
+      var free = new HashSet<IVariable>();
+      FreeVariablesUtil.ComputeFreeVariables(program.Options, expression, free, ref heap);
+      values = free.OrderBy(variable => variable.Name).ToList();
+    }
+    if (lemmaContract && owner == goal && !typeConstraint) {
+      // Native queries restore the complete original clause, including erased proof
+      // statements that may mention inputs absent from the surviving expression.
+      values = values.Concat(owner.Ins).Distinct().OrderBy(variable => variable.Name).ToList();
+    }
+    return values;
   }
 
   // Checks that concrete values satisfy the subset-type and newtype constraints declared for these formals.
@@ -1135,6 +1279,9 @@ public sealed class ContractRuntimeObligationTransformer {
   private static string TypeParameters(IReadOnlyList<TypeParameter> parameters) => parameters.Count == 0 ? "" :
     "<" + string.Join(", ", parameters.Select(parameter => Printer.TypeParameterToString(parameter).TrimStart('*', '+', '!', '-'))) + ">";
 
+  private static string TypeArgumentNames(IReadOnlyList<TypeParameter> parameters) => parameters.Count == 0 ? "" :
+    "<" + string.Join(", ", parameters.Select(parameter => parameter.Name)) + ">";
+
   private T WithShapes<T>(IReadOnlyList<TypeParameter> parameters, Func<T> action) {
     var previous = shapeParameters;
     shapeParameters = parameters;
@@ -1148,8 +1295,12 @@ public sealed class ContractRuntimeObligationTransformer {
     shapedCallables.Contains(callable) ? callable.TypeArgs.Select((_, index) => ShapeName(index)) : [];
   private static string ShapedFormals(IReadOnlyList<TypeParameter> parameters, IEnumerable<Formal> formals) =>
     string.Join(", ", ShapeFormals(parameters).Concat(formals.Select(formal => formal.Name + ": " + formal.Type)));
+  private string WrapperFormals(MethodOrFunction callable, IEnumerable<Formal> formals) =>
+    string.Join(", ", ShapeFormals(callable.TypeArgs).Concat(formals.Select(formal =>
+      (formal.IsNameOnly ? "nameonly " : "") + formal.Name + ": " + formal.Type +
+      (formal.DefaultValue == null ? "" : " := " + RenderDefault(formal.DefaultValue, callable.EnclosingClass.EnclosingModuleDefinition)))));
   private string ShapedArguments(MethodOrFunction callable, IEnumerable<Formal> formals) =>
-    string.Join(", ", OriginalShapeArguments(callable).Concat(formals.Select(formal => formal.Name)));
+    string.Join(", ", OriginalShapeArguments(callable).Concat(formals.Select(formal => formal.Name + " := " + formal.Name)));
 
   // Shape tokens follow Dafny's resolved type applications, never the erased CLR representation.
   private Expression ShapeExpression(Type type) {
@@ -1179,26 +1330,50 @@ public sealed class ContractRuntimeObligationTransformer {
       var open = ArgumentOpen(callable.NameNode.EndToken);
       Insert(open.Uri, open.pos + 1, string.Join(", ", ShapeFormals(callable.TypeArgs)) + (callable.Ins.Count == 0 ? "" : ", "));
     }
-    var seen = new HashSet<(Uri, int)>();
     foreach (var callable in Members().OfType<MethodOrFunction>()) {
       WithShapes(callable.TypeArgs, () => {
-        foreach (var call in callable.Descendants().OfType<FunctionCallExpr>()
-                   .Where(call => shapedCallables.Contains(call.Function) && !protectedAssertionNodes.Contains(call))) {
-          if (call.OpenParen != null && seen.Add((call.OpenParen.Uri, call.OpenParen.pos))) {
+        foreach (var call in SourceNodes(callable).OfType<FunctionCallExpr>()
+                   .Where(call => shapedCallables.Contains(call.Function) && !protectedAssertionNodes.Contains(call)).Distinct()) {
+          if (call.OpenParen != null) {
             Insert(call.OpenParen.Uri, call.OpenParen.pos + 1,
-              string.Join(", ", call.TypeApplication_JustFunction.Select(ShapeText)) + (call.Args.Count == 0 ? "" : ", "));
+              string.Join(", ", call.TypeApplication_JustFunction.Select(ShapeText)) +
+              (call.Bindings.ArgumentBindings.Count == 0 ? "" : ", "));
           }
         }
-        foreach (var call in callable.Descendants().OfType<CallStmt>()
-                   .Where(call => shapedCallables.Contains(call.Method) && !protectedAssertionNodes.Contains(call))) {
+        foreach (var call in SourceNodes(callable).OfType<CallStmt>()
+                   .Where(call => shapedCallables.Contains(call.Method) && !protectedAssertionNodes.Contains(call)).Distinct()) {
           var open = ArgumentOpen(call.MethodSelect.MemberNameNode.EndToken);
-          if (seen.Add((open.Uri, open.pos))) {
-            Insert(open.Uri, open.pos + 1, string.Join(", ", call.MethodSelect.TypeApplicationJustMember.Select(ShapeText)) + (call.Args.Count == 0 ? "" : ", "));
+          Insert(open.Uri, open.pos + 1, string.Join(", ", call.MethodSelect.TypeApplicationJustMember.Select(ShapeText)) +
+            (call.Bindings.ArgumentBindings.Count == 0 ? "" : ", "));
+        }
+        return true;
+      });
+    }
+    foreach (var constructor in reachableDatatypeConstructors) {
+      WithShapes([], () => {
+        foreach (var call in constructor.Formals.Where(formal => formal.DefaultValue != null)
+                   .SelectMany(formal => SourceNodes(formal.DefaultValue!)).OfType<FunctionCallExpr>()
+                   .Where(call => shapedCallables.Contains(call.Function) && !protectedAssertionNodes.Contains(call)).Distinct()) {
+          if (call.TypeApplication_JustFunction.Any(type =>
+                UsesTypeParameter(type, constructor.EnclosingDatatype!.TypeArgs))) {
+            throw new NotSupportedException(
+              "Generic datatype constructor defaults cannot forward diagnostic type shapes.");
+          }
+          if (call.OpenParen != null) {
+            Insert(call.OpenParen.Uri, call.OpenParen.pos + 1,
+              string.Join(", ", call.TypeApplication_JustFunction.Select(ShapeText)) +
+              (call.Bindings.ArgumentBindings.Count == 0 ? "" : ", "));
           }
         }
         return true;
       });
     }
+  }
+
+  private static bool UsesTypeParameter(Type type, IReadOnlyCollection<TypeParameter> parameters) {
+    type = type.NormalizeExpand();
+    return type.AsTypeParameter is { } parameter && parameters.Contains(parameter) ||
+      type.TypeArgs.Any(argument => UsesTypeParameter(argument, parameters));
   }
 
   private static Token ArgumentOpen(Token name) {
@@ -1224,6 +1399,19 @@ public sealed class ContractRuntimeObligationTransformer {
       // Qualify original declarations before adding owned runtime shape helpers.
       // Those synthetic receivers already use their diagnostic source names.
       .Substitute(ContractQueryBuilder.QualifyExpression(program, scope, expression));
+
+  // A declaration default remains in its original lexical scope. Preserve its authored bindings so an omitted
+  // nested default is evaluated by that callee's runtime wrapper instead of being expanded at this call site.
+  private string RenderDefault(Expression expression, ModuleDefinition scope) =>
+    Printer.ExprToString(program.Options,
+      new RuntimeSubstituter(_ => null,
+        call => (CheckedCallee(call.Function) ? SpecWrapper(call.Function) : call.Name) +
+          TypeArguments(call.TypeApplication_JustFunction, scope),
+        call => shapedCallables.Contains(call.Function) ? call.TypeApplication_JustFunction.Select(ShapeExpression).ToList() : [],
+        preserveWrittenBindings: true).Substitute(expression));
+
+  private string TypeArguments(IReadOnlyList<Type> arguments, ModuleDefinition scope) => arguments.Count == 0 ? "" :
+    "<" + string.Join(", ", arguments.Select(argument => ContractQueryBuilder.QualifiedType(program, scope, argument))) + ">";
 
   private bool CheckedCallee(Function function) => HasContract(function) && (!function.IsGhost || functions.Contains(function));
 
@@ -1290,7 +1478,7 @@ public sealed class ContractRuntimeObligationTransformer {
     var name = function.Name + "__pbt_spec_" + nextName++;
     specWrappers.Add(function, name);
     var descriptor = ContractCallableSelector.DescribeFunction(program, function, resultFamily.Value);
-    oldDeclarations[descriptor] = ""; oldNames.Clear();
+    oldDeclarations[descriptor] = ""; oldNames[descriptor] = [];
     // Domain uncertainty invalidates the sample just like an unchecked callee postcondition.
     var before = TypeConstraintChecks(descriptor.Ins, ContractRuntimeObligationKind.CalleePostcondition, descriptor, null) +
       string.Join("\n", descriptor.Req.Select(c => Reason(c.E, false) == null
@@ -1302,10 +1490,11 @@ public sealed class ContractRuntimeObligationTransformer {
     return name;
   }
 
-  private Expression? RewriteState(Expression expression, Method owner) {
+  private Expression? RewriteState(Expression expression, Method owner,
+    IDictionary<Expression, PendingOldCapture> pending) {
     if (expression is OldExpr old && old.At == null && Reason(old.Expr, false) == null) {
       var value = EntryExpression(old.Expr, owner);
-      if (value != null) { return CaptureOld(old, value, owner); }
+      if (value != null) { return PlanOldCapture(old, value, owner, pending); }
       return null;
     }
     if (expression is UnchangedExpr { At: null } unchanged && unchanged.Frame.All(f => f.E.Type.IsRefType && f.E.Type.AsTopLevelTypeWithMembers is not null)) {
@@ -1314,7 +1503,8 @@ public sealed class ContractRuntimeObligationTransformer {
         foreach (var field in frame.E.Type.AsTopLevelTypeWithMembers.Members.OfType<Field>().Where(f => !f.IsStatic && (frame.FieldName == null || f.Name == frame.FieldName))) {
           if (!CompilableType(field.Type)) { return null; }
           var current = new MemberSelectExpr(expression.Origin, frame.E, field) { Type = field.Type };
-          result = Expression.CreateAnd(result, Expression.CreateEq(current, CaptureOld(current, current, owner), field.Type));
+          result = Expression.CreateAnd(result,
+            Expression.CreateEq(current, PlanOldCapture(current, current, owner, pending), field.Type));
         }
       }
       return result;
@@ -1342,17 +1532,41 @@ public sealed class ContractRuntimeObligationTransformer {
     return unavailable ? null : resolved;
   }
 
-  private Expression CaptureOld(Expression key, Expression value, Method owner) {
-    if (!oldNames.TryGetValue(key, out var variable)) {
-      variable = new BoundVar(key.Origin, "pbtOld" + nextName++, value.Type);
-      oldNames.Add(key, variable);
-      oldDeclarations[owner] = oldDeclarations.GetValueOrDefault(owner, "") + "var " + variable.Name + " := " + Printer.ExprToString(program.Options, Render(value, owner.EnclosingClass.EnclosingModuleDefinition, true)) + ";\n";
+  private Expression PlanOldCapture(Expression key, Expression value, Method owner,
+    IDictionary<Expression, PendingOldCapture> pending) {
+    var committed = oldNames.GetValueOrDefault(owner);
+    if (committed != null && committed.TryGetValue(key, out var existing)) {
+      return Expression.CreateIdentExpr(existing);
     }
-    return Expression.CreateIdentExpr(variable);
+    if (!pending.TryGetValue(key, out var capture)) {
+      var variable = new BoundVar(key.Origin, "pbtOld" + nextName++, value.Type);
+      capture = new(key, value, variable);
+      pending.Add(key, capture);
+    }
+    return Expression.CreateIdentExpr(capture.Variable);
+  }
+
+  private void CommitOldCaptures(Method owner, IEnumerable<PendingOldCapture> pending,
+    Expression evaluated) {
+    var referenced = Expressions(evaluated).OfType<IdentifierExpr>()
+      .Select(identifier => identifier.Var).ToHashSet();
+    var committed = oldNames.GetValueOrDefault(owner);
+    if (committed == null) {
+      committed = [];
+      oldNames.Add(owner, committed);
+    }
+    foreach (var capture in pending.Where(capture => referenced.Contains(capture.Variable))) {
+      if (committed.ContainsKey(capture.Key)) { continue; }
+      committed.Add(capture.Key, capture.Variable);
+      var rendered = Printer.ExprToString(program.Options,
+        Render(capture.Value, owner.EnclosingClass.EnclosingModuleDefinition, true));
+      oldDeclarations[owner] = oldDeclarations.GetValueOrDefault(owner, "") +
+        Location(capture.Key.Origin) + "var " + capture.Variable.Name + " := " + rendered + ";\n";
+    }
   }
 
   private sealed class RuntimeSubstituter(Func<Expression, Expression?> replacement, Func<FunctionCallExpr, string?>? rename = null,
-    Func<FunctionCallExpr, IReadOnlyList<Expression>>? prepend = null)
+    Func<FunctionCallExpr, IReadOnlyList<Expression>>? prepend = null, bool preserveWrittenBindings = false)
     : Substituter(null!, [], []) {
     public override Expression Substitute(Expression expression) {
       if (expression is QuantifierExpr { SplitQuantifier: not null } quantifier) {
@@ -1368,6 +1582,21 @@ public sealed class ContractRuntimeObligationTransformer {
       if (expression is FunctionCallExpr call && (rename != null || prepend != null)) {
         var name = rename?.Invoke(call) ?? call.Name;
         var arguments = prepend?.Invoke(call) ?? [];
+        if (preserveWrittenBindings) {
+          var bindings = arguments.Select(argument => new ActualBinding(null, argument)).Concat(
+            call.Bindings.ArgumentBindings.Select(binding => new ActualBinding(binding.FormalParameterName,
+              Substitute(binding.Actual), binding.IsGhost))).ToList();
+          return new FunctionCallExpr(call.Origin, new Name(call.NameNode.Origin, name), Substitute(call.Receiver),
+            call.OpenParen ?? call.Origin, call.CloseParen, new ActualBindings(bindings), call.AtLabel) {
+            Function = call.Function,
+            Type = call.Type,
+            TypeApplication_AtEnclosingClass = call.TypeApplication_AtEnclosingClass,
+            TypeApplication_JustFunction = call.TypeApplication_JustFunction,
+            IsByMethodCall = call.IsByMethodCall,
+            CoCall = call.CoCall,
+            CoCallHint = call.CoCallHint
+          };
+        }
         var copy = (FunctionCallExpr)base.Substitute(call);
         return new FunctionCallExpr(call.Origin, new Name(call.NameNode.Origin, name), copy.Receiver, copy.OpenParen ?? call.Origin,
           copy.CloseParen, arguments.Concat(copy.Args).ToList()) {
@@ -1375,6 +1604,17 @@ public sealed class ContractRuntimeObligationTransformer {
           Type = call.Type,
           TypeApplication_AtEnclosingClass = call.TypeApplication_AtEnclosingClass,
           TypeApplication_JustFunction = call.TypeApplication_JustFunction
+        };
+      }
+      if (preserveWrittenBindings && expression is DatatypeValue value) {
+        var bindings = value.Bindings.ArgumentBindings.Select(binding => new ActualBinding(binding.FormalParameterName,
+          Substitute(binding.Actual), binding.IsGhost)).ToList();
+        return new DatatypeValue(value.Origin, value.DatatypeName, value.MemberName, new ActualBindings(bindings)) {
+          Ctor = value.Ctor,
+          Type = value.Type,
+          InferredTypeArgs = value.InferredTypeArgs,
+          InferredPreTypeArgs = value.InferredPreTypeArgs,
+          IsCoCall = value.IsCoCall
         };
       }
       if (expression is StaticReceiverExpr receiver) {
@@ -1456,9 +1696,8 @@ public sealed class ContractRuntimeObligationTransformer {
   private string Serialize(string name, Type type) => RuntimeChecks + ".Serialize(" + name + ", " + ShapeText(type) + ")";
   private string SerializeValues(IEnumerable<IVariable> values) => Encode(values.Select(v => SerializeNamed(v.Name, v.Type)).ToList());
   private string Text(Node node) {
-    var source = ContractSourceSnapshot.Find(sources, node.Origin.Uri).Content;
     var range = node.EntireRange;
-    return source.Substring(Index(source, range.StartToken.pos), Index(source, range.StartToken.pos + range.Length) - Index(source, range.StartToken.pos));
+    return CachedSourceText(node.Origin.Uri).Slice(range.StartToken.pos, range.Length);
   }
   private void RemoveKeyword(Node node, string keyword) {
     foreach (var token in node.OwnedTokens.Where(t => t.val == keyword)) { Add(token.Uri, token.pos, token.val.Length, ""); }
@@ -1471,39 +1710,65 @@ public sealed class ContractRuntimeObligationTransformer {
   private void Replace(Node node, string text) { var range = node.EntireRange; Add(node.Origin.Uri, range.StartToken.pos, range.Length, text); }
   private void RemoveStatement(Statement statement) {
     var range = statement.EntireRange;
-    // The native reveal/hide statement range stops before its terminating semicolon.
-    var terminator = statement is HideRevealStmt && range.EndToken.Next is { val: ";" } next ? next : null;
+    // Native reveal/hide ranges and parser-synthesized proof-call assignments stop before their semicolon.
+    var ownsTerminator = statement is HideRevealStmt ||
+      statement is AssignStatement { Lhss.Count: 0, ResolvedStatements: { Count: 1 } resolved } && resolved[0] is CallStmt;
+    var terminator = ownsTerminator && range.EndToken.Next is { val: ";" } next ? next : null;
     var length = terminator == null ? range.Length : terminator.pos + 1 - range.StartToken.pos;
     Add(statement.Origin.Uri, range.StartToken.pos, length, "");
   }
   private void Insert(ContractSource source, int position, string text) => Insert(ContractSourceSnapshot.UriFor(source.Path), position, text);
   private void Insert(Uri uri, int position, string text) => Add(uri, position, 0, text);
   private void Add(Uri uri, int position, int length, string text) { edits.Add(new(uri, position, length, text)); }
-  private static int Index(string text, int bytes) {
-    var data = Encoding.UTF8.GetBytes(text);
-    if (bytes < 0 || bytes > data.Length) { throw new ArgumentException("Invalid source token offset."); }
-    return Encoding.UTF8.GetCharCount(data, 0, bytes);
+  private SourceText CachedSourceText(Uri uri) {
+    if (!sourceTextCache.TryGetValue(uri, out var text)) {
+      var source = ContractSourceSnapshot.Find(sources, uri);
+      text = new(source);
+      sourceTextCache.Add(uri, text);
+    }
+    return text;
   }
-  private static IReadOnlyList<ContractSource> Apply(IReadOnlyList<ContractSource> sources, List<Edit> edits) => sources.Select(source => {
-    var text = source.Content;
-    var selected = edits.Where(e => e.Uri == ContractSourceSnapshot.UriFor(source.Path)).Distinct().ToList();
-    // Proof-statement removal contains its resolved children; discard their edits, never overlapping siblings.
-    // An insertion at the removed range's start (e.g. a declaration before a removed `ghost` keyword) is a sibling.
-    selected.RemoveAll(e => selected.Any(other => other != e && other.Length > 0 && other.Text == "" && (e.Length == 0
-      ? other.Start < e.Start && e.Start < other.Start + other.Length
-      : e.Start >= other.Start && e.Start + e.Length <= other.Start + other.Length)));
-    foreach (var left in selected.Where(e => e.Length > 0)) {
-      var right = selected.FirstOrDefault(right => !ReferenceEquals(left, right) && right.Length > 0 && left.Start < right.Start + right.Length && right.Start < left.Start + left.Length);
-      if (right != null) {
-        throw new NotSupportedException("Overlapping diagnostic source replacements are not supported. " +
-          source.Path + ": [" + left.Start + ", " + (left.Start + left.Length) + ") -> " + JsonSerializer.Serialize(left.Text) +
-          " overlaps [" + right.Start + ", " + (right.Start + right.Length) + ") -> " + JsonSerializer.Serialize(right.Text));
+
+  private IReadOnlyList<ContractSource> Apply(List<Edit> edits) =>
+    Apply(sources, edits, source => CachedSourceText(ContractSourceSnapshot.UriFor(source.Path)));
+
+  internal static IReadOnlyList<ContractSource> Apply(IReadOnlyList<ContractSource> sources, List<Edit> edits) =>
+    Apply(sources, edits, source => new(source));
+
+  private static IReadOnlyList<ContractSource> Apply(IReadOnlyList<ContractSource> sources, List<Edit> edits,
+    Func<ContractSource, SourceText> sourceText) => sources.Select(source => {
+      var selected = edits.Where(e => e.Uri == ContractSourceSnapshot.UriFor(source.Path)).Distinct().ToList();
+      // A replacement owns the strict interior of its source range, so insertions into the replaced source disappear.
+      // Empty proof-statement removals also contain their resolved child edits, never boundary siblings.
+      selected.RemoveAll(e => selected.Any(other => other != e && other.Length > 0 && (e.Length == 0
+        ? other.Start < e.Start && e.Start < other.Start + other.Length
+        : other.Text == "" && e.Start >= other.Start && e.Start + e.Length <= other.Start + other.Length)));
+      foreach (var left in selected.Where(e => e.Length > 0)) {
+        var right = selected.FirstOrDefault(right => !ReferenceEquals(left, right) && right.Length > 0 && left.Start < right.Start + right.Length && right.Start < left.Start + left.Length);
+        if (right != null) {
+          throw new NotSupportedException("Overlapping diagnostic source replacements are not supported. " +
+            source.Path + ": [" + left.Start + ", " + (left.Start + left.Length) + ") -> " + JsonSerializer.Serialize(left.Text) +
+            " overlaps [" + right.Start + ", " + (right.Start + right.Length) + ") -> " + JsonSerializer.Serialize(right.Text));
+        }
       }
-    }
-    foreach (var edit in selected.OrderByDescending(e => e.Start).ThenByDescending(e => e.Length)) {
-      var start = Index(source.Content, edit.Start); var end = Index(source.Content, edit.Start + edit.Length);
-      text = text.Remove(start, end - start).Insert(start, edit.Text);
-    }
-    return source with { Content = text, Sha256 = ContractHarnessBuilder.Hash(text) };
-  }).ToList();
+      var text = sourceText(source);
+      var output = new StringBuilder();
+      var cursor = 0;
+      foreach (var group in selected.GroupBy(edit => edit.Start).OrderBy(group => group.Key)) {
+        var cursorIndex = text.Index(cursor);
+        output.Append(text.Content, cursorIndex, text.Index(group.Key) - cursorIndex);
+        foreach (var insertion in group.Where(edit => edit.Length == 0).Reverse()) {
+          output.Append(insertion.Text);
+        }
+        if (group.SingleOrDefault(edit => edit.Length > 0) is { } replacement) {
+          output.Append(replacement.Text);
+          cursor = replacement.Start + replacement.Length;
+        } else {
+          cursor = group.Key;
+        }
+      }
+      output.Append(text.Content, text.Index(cursor), text.Content.Length - text.Index(cursor));
+      var content = output.ToString();
+      return source with { Content = content, Sha256 = ContractHarnessBuilder.Hash(content) };
+    }).ToList();
 }

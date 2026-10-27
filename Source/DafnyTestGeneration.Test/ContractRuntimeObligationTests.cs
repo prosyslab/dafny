@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -129,6 +130,65 @@ public class ContractRuntimeObligationTests {
     Assert.IsType<BinaryExpr>(branch.Els.Resolved);
   }
 
+  // Removing a proof call from a reachable ghost function also removes its statement-expression separator.
+  [Fact]
+  public async Task ProofCallStatementExpressionConsumesSeparator() {
+    const string declarations = "lemma Proof(x:int) {} ghost function Id(x:int):int { Proof(x); x } " +
+      "method Goal(x:int) ensures Id(x)==x {}";
+    var result = await Transform(declarations);
+
+    var parsed = await ParseMemory(result.Sources);
+    var id = Assert.Single(ContractRuntimeObligationTransformer.Members(parsed).OfType<Function>()
+      .Where(function => function.Name == "Id"));
+    Assert.False(id.IsGhost);
+    Assert.Equal("x", Assert.IsType<IdentifierExpr>(id.Body!.Resolved).Name);
+    var original = Assert.Single(result.Prepared.Sources!, source => source.Path == "M.dfy");
+    var expected = "module M { import PbtRandom " + declarations +
+      " method Generate(r: PbtRandom.Source) returns (x: int) { x := 0; } }";
+    Assert.Equal(expected, original.Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(expected), original.Sha256);
+  }
+
+  // A proof-call separator inside one conditional branch disappears without changing its sibling branch.
+  [Fact]
+  public async Task NestedProofCallStatementExpressionPreservesBranch() {
+    const string declarations = "lemma Proof(x:int) {} ghost function Select(x:int):int { " +
+      "if x>=0 then (Proof(x); x) else x } method Goal(x:int) ensures Select(x)==x {}";
+    var result = await Transform(declarations);
+
+    var parsed = await ParseMemory(result.Sources);
+    var select = Assert.Single(ContractRuntimeObligationTransformer.Members(parsed).OfType<Function>()
+      .Where(function => function.Name == "Select"));
+    Assert.False(select.IsGhost);
+    var branch = Assert.IsType<ITEExpr>(select.Body!.Resolved);
+    Assert.IsType<IdentifierExpr>(branch.Thn.Resolved);
+    Assert.IsType<IdentifierExpr>(branch.Els.Resolved);
+    var original = Assert.Single(result.Prepared.Sources!, source => source.Path == "M.dfy");
+    var expected = "module M { import PbtRandom " + declarations +
+      " method Generate(r: PbtRandom.Source) returns (x: int) { x := 0; } }";
+    Assert.Equal(expected, original.Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(expected), original.Sha256);
+  }
+
+  // Adjacent proof calls lose both separators while preserving the final expression.
+  [Fact]
+  public async Task AdjacentProofCallStatementExpressionsConsumeSeparators() {
+    const string declarations = "lemma First(x:int) {} lemma Second(x:int) {} " +
+      "ghost function Id(x:int):int { First(x); Second(x); x } method Goal(x:int) ensures Id(x)==x {}";
+    var result = await Transform(declarations);
+
+    var parsed = await ParseMemory(result.Sources);
+    var id = Assert.Single(ContractRuntimeObligationTransformer.Members(parsed).OfType<Function>()
+      .Where(function => function.Name == "Id"));
+    Assert.False(id.IsGhost);
+    Assert.Equal("x", Assert.IsType<IdentifierExpr>(id.Body!.Resolved).Name);
+    var original = Assert.Single(result.Prepared.Sources!, source => source.Path == "M.dfy");
+    var expected = "module M { import PbtRandom " + declarations +
+      " method Generate(r: PbtRandom.Source) returns (x: int) { x := 0; } }";
+    Assert.Equal(expected, original.Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(expected), original.Sha256);
+  }
+
   // Split verification quantifiers share source tokens and must not create competing runtime call wrappers.
   [Fact]
   public async Task ColumnTraceQuantifierInstrumentsOriginalCallOnce() {
@@ -160,6 +220,55 @@ public class ContractRuntimeObligationTests {
     Assert.Equal(ContractRuntimeDecisionMethod.ClosedSmt, clause.Obligation.DecisionMethod);
     Assert.Equal(0, clause.EntryHeapPostcondition);
     Assert.Equal("M.Step", clause.CallHeapScope);
+  }
+
+  // A fixed-heap postcondition uses entry and return heaps without executing its speculative old-value read.
+  [Fact]
+  public async Task HeapPostconditionDiscardsOldCapture() {
+    var result = await Transform("class Cell { var value:int } " +
+      "twostate predicate Changed(cell:Cell) reads cell { cell.value == old(cell.value) } " +
+      "method Goal(cell:Cell) modifies cell " +
+      "ensures Changed(cell) && cell.value == old(cell.value) { cell.value:=cell.value; }",
+      "method Generate(r:PbtRandom.Source) returns (cell:Cell) { cell:=new Cell; cell.value:=0; }");
+    var clause = Assert.Single(result.Clauses.Where(item =>
+      item.Obligation.Kind == ContractRuntimeObligationKind.Postcondition && !item.TypeConstraint));
+    Assert.Equal(ContractRuntimeDecisionMethod.ClosedSmt, clause.Obligation.DecisionMethod);
+    Assert.Equal(0, clause.EntryHeapPostcondition);
+    Assert.Contains(clause.Expression.DescendantsAndSelf, node => node is OldExpr);
+    Assert.DoesNotContain(clause.Variables, variable => variable.Name.StartsWith("pbtOld", StringComparison.Ordinal));
+
+    var parsed = await ParseMemory(result.Sources);
+    var wrapper = MethodNamed(parsed, "Goal__pbt_goal");
+    Assert.DoesNotContain(wrapper.Body!.Descendants().OfType<SingleAssignStmt>(), assignment =>
+      assignment.Lhs.Resolved is IdentifierExpr { Var: LocalVariable local } &&
+      local.Name.StartsWith("pbtOld", StringComparison.Ordinal));
+    var heapCaptures = wrapper.Body.Descendants().OfType<CallStmt>().Distinct()
+      .Where(call => call.Method.Name == "CaptureHeap").OrderBy(call => call.Origin.pos);
+    Assert.Equal(new[] { "entry", "return" }, heapCaptures.Select(call =>
+      Assert.IsType<StringLiteralExpr>(call.Args[0].Resolved).Value?.ToString()));
+  }
+
+  // An unchecked old expression neither reads its value nor renders the checked function nested inside it.
+  [Fact]
+  public async Task UncheckedPostconditionDiscardsOldCaptureSideEffects() {
+    var result = await Transform("class Cell { var value:int } " +
+      "function Read(cell:Cell):int reads cell ensures Read(cell)==cell.value { cell.value } " +
+      "method Goal(cell:Cell) ensures fresh(cell) && old(Read(cell)) == 0 {}",
+      "method Generate(r:PbtRandom.Source) returns (cell:Cell) { cell:=new Cell; cell.value:=0; }");
+    var clause = Assert.Single(result.Clauses.Where(item =>
+      item.Obligation.Kind == ContractRuntimeObligationKind.Postcondition && !item.TypeConstraint));
+    Assert.Equal(ContractRuntimeDecisionMethod.Unchecked, clause.Obligation.DecisionMethod);
+    Assert.Contains(clause.Expression.DescendantsAndSelf, node => node is OldExpr);
+    Assert.DoesNotContain(clause.Variables, variable => variable.Name.StartsWith("pbtOld", StringComparison.Ordinal));
+
+    var parsed = await ParseMemory(result.Sources);
+    var members = ContractRuntimeObligationTransformer.Members(parsed).ToList();
+    Assert.DoesNotContain(members.OfType<Function>(), function =>
+      function.Name.StartsWith("Read__pbt_spec_", StringComparison.Ordinal));
+    var wrapper = MethodNamed(parsed, "Goal__pbt_goal");
+    Assert.DoesNotContain(wrapper.Body!.Descendants().OfType<SingleAssignStmt>(), assignment =>
+      assignment.Lhs.Resolved is IdentifierExpr { Var: LocalVariable local } &&
+      local.Name.StartsWith("pbtOld", StringComparison.Ordinal));
   }
 
   // Match checks use post-call output snapshots while evidence remains bound to the original formals.
@@ -278,6 +387,55 @@ public class ContractRuntimeObligationTests {
     Assert.Contains(result.Prepared.Method.Outs[0], clause.Variables);
   }
 
+  // A scalar closed-query downgrade retains old evidence after validating the non-null input.
+  [Fact]
+  public async Task ScalarClosedDowngradeRetainsOrderedOldCapture() {
+    const string declarations = "class Cell { var value:int } " +
+      "method Goal(cell:Cell) returns (x:int) modifies cell ensures x == old(cell.value) " +
+      "{ x:=cell.value; cell.value:=cell.value+1; }";
+    const string generator =
+      "method Generate(r:PbtRandom.Source) returns (cell:Cell) { cell:=new Cell; cell.value:=0; }";
+    var initial = await Transform(declarations, generator);
+    var initialClause = Assert.Single(initial.Clauses.Where(item =>
+      item.Obligation.Kind == ContractRuntimeObligationKind.Postcondition && !item.TypeConstraint));
+    var caps = new Dictionary<string, ContractRuntimeDecisionMethod> {
+      [ContractRuntimeObligationTransformer.IdPrefix(initialClause.Obligation.Id)] =
+        ContractRuntimeDecisionMethod.ClosedSmt
+    };
+
+    var result = await Transform(declarations, generator, caps);
+    var clause = Assert.Single(result.Clauses.Where(item =>
+      item.Obligation.Kind == ContractRuntimeObligationKind.Postcondition && !item.TypeConstraint));
+    Assert.Equal(ContractRuntimeDecisionMethod.ClosedSmt, clause.Obligation.DecisionMethod);
+    Assert.Null(clause.EntryHeapPostcondition);
+
+    var parsed = await ParseMemory(result.Sources);
+    var wrapper = MethodNamed(parsed, "Goal__pbt_goal");
+    var inputClause = Assert.Single(result.Clauses.Where(item => item.TypeConstraint &&
+      item.Obligation.Kind == ContractRuntimeObligationKind.EntryPrecondition));
+    var inputCheck = RuntimeCheck(wrapper, inputClause);
+    var oldCapture = Assert.Single(wrapper.Body!.Descendants().OfType<SingleAssignStmt>().Distinct().Where(assignment =>
+      assignment.Lhs.Resolved is IdentifierExpr { Var: LocalVariable local } &&
+      local.Name.StartsWith("pbtOld", StringComparison.Ordinal)));
+    var oldLocal = Assert.IsType<LocalVariable>(Assert.IsAssignableFrom<IdentifierExpr>(oldCapture.Lhs.Resolved).Var);
+    var oldExpression = Assert.Single(result.Prepared.Method.Ens.Single().E.DescendantsAndSelf.OfType<OldExpr>());
+    var captureLocation = wrapper.Body.Descendants().OfType<FunctionCallExpr>().Distinct()
+      .Where(call => call.Function.Name == "Location" && call.Origin.pos < oldCapture.Origin.pos)
+      .MaxBy(call => call.Origin.pos)!;
+    var locationText = Assert.IsType<StringLiteralExpr>(captureLocation.Args.Single().Resolved).Value?.ToString();
+    var invocation = Assert.Single(wrapper.Body.Descendants().OfType<CallStmt>().Distinct().Where(call =>
+      call.Method.Name == "Goal"));
+    var checkpoint = Assert.Single(wrapper.Body.Descendants().OfType<FunctionCallExpr>().Distinct().Where(call =>
+      call.Function.Name == "Checkpoint" && call.Args[0].Resolved is StringLiteralExpr literal &&
+      Equals(literal.Value, clause.Obligation.Id)));
+    Assert.True(inputCheck.Origin.pos < oldCapture.Origin.pos);
+    Assert.True(inputCheck.Origin.pos < captureLocation.Origin.pos);
+    Assert.NotNull(locationText);
+    Assert.EndsWith(":" + oldExpression.Origin.line + ":" + oldExpression.Origin.col, locationText);
+    Assert.True(oldCapture.Origin.pos < invocation.Origin.pos);
+    Assert.Contains(checkpoint.Args.SelectMany(Identifiers), identifier => identifier.Var == oldLocal);
+  }
+
   // An unavailable infinite-set output stays unchecked and never gains a compiled capture.
   [Fact]
   public async Task UnavailableOutputRemainsUncheckedWithoutCapture() {
@@ -312,6 +470,342 @@ public class ContractRuntimeObligationTests {
     Assert.True(capture.Assignment.Origin.pos < check.Origin.pos);
     Assert.True(check.Origin.pos < unusedAssignment.Origin.pos);
     Assert.Contains(Identifiers(RuntimeProperty(check)), identifier => identifier.Var == capture.Local);
+  }
+
+  // Erasing an unreachable method body discards shape insertions for generic calls that disappear with it.
+  [Fact]
+  public async Task ErasedMethodBodyDropsNestedGenericShapeInsertion() {
+    const string declarations = "method Relay<T>(x:T) returns (y:T) { y:=x; } " +
+      "method Unused() { var y:=Relay<int>(0); } " +
+      "method Goal(x:int) returns (y:int) { y:=Relay<int>(x); }";
+    var result = await Transform(declarations);
+
+    var parsed = await ParseMemory(result.Sources);
+    var unused = MethodNamed(parsed, "Unused");
+    Assert.Contains(unused.Body!.Descendants().OfType<CallStmt>(), call => call.Method.Name == "UnreachableBody");
+    Assert.DoesNotContain(unused.Body.Descendants().OfType<CallStmt>(), call => call.Method.Name == "Relay");
+    var original = Assert.Single(result.Prepared.Sources!, source => source.Path == "M.dfy");
+    var expected = "module M { import PbtRandom " + declarations +
+      " method Generate(r: PbtRandom.Source) returns (x: int) { x := 0; } }";
+    Assert.Equal(expected, original.Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(expected), original.Sha256);
+  }
+
+  // Erasing an unreachable function body discards shape insertions for generic calls that disappear with it.
+  [Fact]
+  public async Task ErasedFunctionBodyDropsNestedGenericShapeInsertion() {
+    const string declarations = "function Id<T>(x:T):T { x } " +
+      "function Unused():int { Id<int>(0) } " +
+      "method Goal(x:int) returns (y:int) { y:=Id<int>(x); }";
+    var result = await Transform(declarations);
+
+    var parsed = await ParseMemory(result.Sources);
+    var unused = Assert.Single(ContractRuntimeObligationTransformer.Members(parsed).OfType<Function>()
+      .Where(function => function.Name == "Unused"));
+    var trap = Assert.IsType<FunctionCallExpr>(unused.Body!.Resolved);
+    Assert.Equal("UnreachableValue", trap.Function.Name);
+    Assert.DoesNotContain(unused.Body.DescendantsAndSelf.OfType<FunctionCallExpr>(), call => call.Function.Name == "Id");
+    var original = Assert.Single(result.Prepared.Sources!, source => source.Path == "M.dfy");
+    var expected = "module M { import PbtRandom " + declarations +
+      " method Generate(r: PbtRandom.Source) returns (x: int) { x := 0; } }";
+    Assert.Equal(expected, original.Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(expected), original.Sha256);
+  }
+
+  // Erasing an unreachable body preserves the shape argument required by its retained generic contract call.
+  [Fact]
+  public async Task ErasedBodyRetainsGenericShapeInsertionInContract() {
+    const string declarations = "function Id<T>(x:T):T { x } " +
+      "method Unused(x:int) requires Id<int>(x)==x { var y:=Id<int>(x); } " +
+      "method Goal(x:int) returns (y:int) { y:=Id<int>(x); }";
+    var result = await Transform(declarations);
+
+    var parsed = await ParseMemory(result.Sources);
+    var unused = MethodNamed(parsed, "Unused");
+    var contractCall = Assert.Single(unused.Req.Single().E.DescendantsAndSelf.OfType<FunctionCallExpr>()
+      .Where(call => call.Function.Name == "Id"));
+    Assert.Equal(2, contractCall.Args.Count);
+    Assert.IsType<StringLiteralExpr>(contractCall.Args[0].Resolved);
+    Assert.Contains(unused.Body!.Descendants().OfType<CallStmt>(), call => call.Method.Name == "UnreachableBody");
+    Assert.DoesNotContain(unused.Body.Descendants().OfType<FunctionCallExpr>(), call => call.Function.Name == "Id");
+    var original = Assert.Single(result.Prepared.Sources!, source => source.Path == "M.dfy");
+    var expected = "module M { import PbtRandom " + declarations +
+      " method Generate(r: PbtRandom.Source) returns (x: int) { x := 0; } }";
+    Assert.Equal(expected, original.Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(expected), original.Sha256);
+  }
+
+  // An instance method wrapper retains its lexical default and forwards each evaluated input once by name.
+  [Fact]
+  public async Task MethodWrapperPreservesDefaultBindings() {
+    var result = await Transform("module Lib { function Seed(x:int):int ensures Seed(x)==x { x } } " +
+      "import L = Lib function Input(x:int):int { x } class Box { " +
+      "function Local(x:int):int ensures Local(x)==x { x } " +
+      "method Step<T>(a:int, nameonly b:int := this.Local(a)+L.Seed(a)) requires b>=a {} } " +
+      "method Goal(box:Box,x:int) { box.Step<bool>(a := Input(x)); }",
+      "method Generate(r:PbtRandom.Source) returns (box:Box,x:int) { box:=new Box; x:=0; }");
+    Assert.Contains(result.Clauses, clause => clause.Owner.Name == "Local" &&
+      clause.Obligation.Kind == ContractRuntimeObligationKind.CalleePostcondition);
+    Assert.Contains(result.Clauses, clause => clause.Owner.Name == "Seed" &&
+      clause.Obligation.Kind == ContractRuntimeObligationKind.CalleePostcondition);
+
+    var parsed = await ParseMemory(result.Sources);
+    var members = ContractRuntimeObligationTransformer.Members(parsed).ToList();
+    var wrapper = Assert.Single(members.OfType<Method>().Where(method =>
+      method.Name.StartsWith("Step__pbt_site_", StringComparison.Ordinal)));
+    var earlier = Assert.Single(wrapper.Ins.Where(formal => formal.Name == "a"));
+    var defaultValue = Assert.Single(wrapper.Ins.Where(formal => formal.Name == "b")).DefaultValue;
+    Assert.NotNull(defaultValue);
+    Assert.True(wrapper.Ins.Single(formal => formal.Name == "b").IsNameOnly);
+    Assert.Contains(Identifiers(defaultValue!), identifier => identifier.Var == earlier);
+    var defaultCalls = defaultValue!.DescendantsAndSelf.OfType<FunctionCallExpr>().Distinct().ToList();
+    var local = Assert.Single(defaultCalls.Where(call => call.Function.Name.StartsWith("Local__pbt_spec_", StringComparison.Ordinal)));
+    Assert.IsType<ThisExpr>(local.Receiver.Resolved);
+    var seed = Assert.Single(defaultCalls.Where(call => call.Function.Name.StartsWith("Seed__pbt_spec_", StringComparison.Ordinal)));
+    Assert.Equal("Lib", seed.Function.EnclosingClass.EnclosingModuleDefinition.Name);
+
+    var goal = MethodNamed(parsed, "Goal");
+    var sourceCall = Assert.Single(goal.Body!.Descendants().OfType<CallStmt>().Distinct().Where(call => call.Method == wrapper));
+    Assert.Equal(2, sourceCall.Bindings.ArgumentBindings.Count);
+    Assert.Null(sourceCall.Bindings.ArgumentBindings[0].FormalParameterName);
+    Assert.Equal("a", sourceCall.Bindings.ArgumentBindings[1].FormalParameterName!.val);
+    Assert.Single(sourceCall.Bindings.ArgumentBindings[1].Actual.DescendantsAndSelf.OfType<FunctionCallExpr>()
+      .Where(call => call.Function.Name == "Input"));
+
+    var forwarded = Assert.Single(wrapper.Body!.Descendants().OfType<CallStmt>().Distinct().Where(call => call.Method.Name == "Step"));
+    Assert.Equal(new[] { null, "a", "b" }, forwarded.Bindings.ArgumentBindings
+      .Select(binding => binding.FormalParameterName?.val).ToArray());
+    Assert.All(forwarded.Bindings.ArgumentBindings.Skip(1), binding =>
+      Assert.Equal(binding.FormalParameterName!.val, Assert.IsType<IdentifierExpr>(binding.Actual.Resolved).Name));
+    Assert.Single(forwarded.MethodSelect.TypeApplicationJustMember);
+  }
+
+  // A function wrapper keeps a nested omission so its checked callee evaluates dependent defaults without duplicating actuals.
+  [Fact]
+  public async Task FunctionWrapperPreservesNestedDefaultBindings() {
+    var result = await Transform("function Input(x:int):int { x } " +
+      "function Inner(x:int,y:int:=x):int requires x>=0 ensures Inner(x,y)==x+y { x+y } " +
+      "function Pick<T>(a:int,nameonly b:int:=Inner(Input(a))):int requires a>=0 { b } " +
+      "method Goal(x:int) { var y:=Pick<bool>(a:=x); }");
+    Assert.Contains(result.Clauses, clause => clause.Owner.Name == "Inner" &&
+      clause.Obligation.Kind == ContractRuntimeObligationKind.CalleePostcondition);
+
+    var parsed = await ParseMemory(result.Sources);
+    var members = ContractRuntimeObligationTransformer.Members(parsed).ToList();
+    var wrapper = Assert.Single(members.OfType<Function>().Where(function =>
+      function.Name.StartsWith("Pick__pbt_site_", StringComparison.Ordinal)));
+    var defaultValue = Assert.Single(wrapper.Ins.Where(formal => formal.Name == "b")).DefaultValue;
+    Assert.NotNull(defaultValue);
+    Assert.True(wrapper.Ins.Single(formal => formal.Name == "b").IsNameOnly);
+    var inner = Assert.Single(defaultValue!.DescendantsAndSelf.OfType<FunctionCallExpr>().Distinct().Where(call =>
+      call.Function.Name.StartsWith("Inner__pbt_spec_", StringComparison.Ordinal)));
+    Assert.Single(inner.Bindings.ArgumentBindings);
+    Assert.Equal(2, inner.Args.Count);
+    Assert.NotNull(inner.Function.Ins.Single(formal => formal.Name == "y").DefaultValue);
+    Assert.Single(inner.Bindings.ArgumentBindings[0].Actual.DescendantsAndSelf.OfType<FunctionCallExpr>()
+      .Where(call => call.Function.Name == "Input"));
+
+    var forwarded = Assert.Single(wrapper.Body!.DescendantsAndSelf.OfType<FunctionCallExpr>().Distinct().Where(call =>
+      call.Function.Name == "Pick"));
+    Assert.Equal(new[] { null, "a", "b" }, forwarded.Bindings.ArgumentBindings
+      .Select(binding => binding.FormalParameterName?.val).ToArray());
+    Assert.All(forwarded.Bindings.ArgumentBindings.Skip(1), binding =>
+      Assert.Equal(binding.FormalParameterName!.val, Assert.IsType<IdentifierExpr>(binding.Actual.Resolved).Name));
+    Assert.Single(forwarded.TypeApplication_JustFunction);
+  }
+
+  // Repeated omissions share the declaration default's checked callee without competing source replacements.
+  [Fact]
+  public async Task RepeatedOmittedDefaultsInstrumentAuthoredExpressionOnce() {
+    var result = await Transform("function Inner(x:int):int requires x>=0 ensures Inner(x)==x { x } " +
+      "function Pick(x:int:=Inner(0)):int { x } " +
+      "method Goal() { var first:=Pick(); var second:=Pick(); }",
+      "method Generate(r:PbtRandom.Source) {}");
+    Assert.Contains(result.Clauses, clause => clause.Owner.Name == "Inner" &&
+      clause.Obligation.Kind == ContractRuntimeObligationKind.CalleePostcondition);
+
+    var parsed = await ParseMemory(result.Sources);
+    var functions = ContractRuntimeObligationTransformer.Members(parsed).OfType<Function>().ToList();
+    var innerWrapper = Assert.Single(functions.Where(function =>
+      function.Name.StartsWith("Inner__pbt_spec_", StringComparison.Ordinal)));
+    Assert.DoesNotContain(functions, function =>
+      function.Name.StartsWith("Pick__pbt_site_", StringComparison.Ordinal));
+    Assert.DoesNotContain(functions, function =>
+      function.Name.StartsWith("Inner__pbt_site_", StringComparison.Ordinal));
+    var pick = Assert.Single(functions.Where(function => function.Name == "Pick"));
+    var defaultValue = Assert.Single(pick.Ins.Where(formal => formal.Name == "x")).DefaultValue;
+    var innerCall = Assert.Single(defaultValue!.DescendantsAndSelf.OfType<FunctionCallExpr>().Distinct());
+    Assert.Same(innerWrapper, innerCall.Function);
+    Assert.Single(innerCall.Bindings.ArgumentBindings);
+    var goal = MethodNamed(parsed, "Goal");
+    var calls = goal.Body!.Descendants().OfType<FunctionCallExpr>().Distinct().Where(call => call.Function == pick).ToList();
+    Assert.Equal(2, calls.Count);
+    Assert.All(calls, call => Assert.Empty(call.Bindings.ArgumentBindings));
+  }
+
+  // A datatype constructor in a wrapper default keeps its named actual and dependent nameonly omission.
+  [Fact]
+  public async Task WrapperDefaultPreservesDatatypeBindings() {
+    var result = await Transform("datatype Pair = Pair(x:int,nameonly y:int:=x) " +
+      "function Input(x:int):int { x } " +
+      "method Step(a:int,p:Pair:=Pair(x:=Input(a))) requires p.x>=a {} " +
+      "method Goal(x:int) { Step(x); }");
+
+    var parsed = await ParseMemory(result.Sources);
+    var wrapper = Assert.Single(ContractRuntimeObligationTransformer.Members(parsed).OfType<Method>().Where(method =>
+      method.Name.StartsWith("Step__pbt_site_", StringComparison.Ordinal)));
+    var defaultValue = Assert.Single(wrapper.Ins.Where(formal => formal.Name == "p")).DefaultValue;
+    var pair = Assert.IsType<DatatypeValue>(defaultValue!.Resolved);
+    var written = Assert.Single(pair.Bindings.ArgumentBindings);
+    Assert.Equal("x", written.FormalParameterName!.val);
+    Assert.Equal(2, pair.Arguments.Count);
+    Assert.True(pair.Ctor!.Formals.Single(formal => formal.Name == "y").IsNameOnly);
+    Assert.Single(written.Actual.DescendantsAndSelf.OfType<FunctionCallExpr>().Where(call => call.Function.Name == "Input"));
+  }
+
+  // A reached constructor default keeps its dependent argument and instruments one concrete generic checked call.
+  [Fact]
+  public async Task DatatypeDefaultInstrumentsCheckedGenericCall() {
+    var result = await Transform("function Checked<T>(x:int):int requires x>=0 ensures Checked<T>(x)==x { x } " +
+      "datatype Pair = Pair(x:int,nameonly y:int:=Checked<int>(x)) " +
+      "function Other(x:int):int requires x>=0 ensures Other(x)==x { x } " +
+      "datatype Spare = Spare(x:int,nameonly y:int:=Other(x)) " +
+      "function Input(x:int):int { x } " +
+      "method Step(a:int,p:Pair:=Pair(x:=Input(a))) requires p.x>=a {} " +
+      "method Goal(x:int) { Step(x); }");
+    Assert.Contains(result.Clauses, clause => clause.Owner.Name == "Checked" &&
+      clause.Obligation.Kind == ContractRuntimeObligationKind.CalleePostcondition);
+
+    var parsed = await ParseMemory(result.Sources);
+    var members = ContractRuntimeObligationTransformer.Members(parsed).ToList();
+    var checkedWrapper = Assert.Single(members.OfType<Function>().Where(function =>
+      function.Name.StartsWith("Checked__pbt_spec_", StringComparison.Ordinal)));
+    Assert.DoesNotContain(members.OfType<Function>(), function =>
+      function.Name.StartsWith("Other__pbt_spec_", StringComparison.Ordinal));
+    var pair = Assert.Single(parsed.RawModules().SelectMany(module => module.TopLevelDecls)
+      .OfType<DatatypeDecl>().Where(datatype => datatype.Name == "Pair"));
+    var constructor = Assert.Single(pair.Ctors);
+    var defaultValue = Assert.Single(constructor.Formals.Where(formal => formal.Name == "y")).DefaultValue;
+    var checkedCall = Assert.Single(defaultValue!.DescendantsAndSelf.OfType<FunctionCallExpr>().Distinct());
+    Assert.Same(checkedWrapper, checkedCall.Function);
+    Assert.Equal(2, checkedCall.Bindings.ArgumentBindings.Count);
+    Assert.IsType<StringLiteralExpr>(checkedCall.Bindings.ArgumentBindings[0].Actual.Resolved);
+    Assert.Equal("x", Assert.IsType<IdentifierExpr>(checkedCall.Bindings.ArgumentBindings[1].Actual.Resolved).Name);
+
+    var stepWrapper = Assert.Single(members.OfType<Method>().Where(method =>
+      method.Name.StartsWith("Step__pbt_site_", StringComparison.Ordinal)));
+    var wrapperDefault = Assert.Single(stepWrapper.Ins.Where(formal => formal.Name == "p")).DefaultValue;
+    var constructed = Assert.IsType<DatatypeValue>(wrapperDefault!.Resolved);
+    var written = Assert.Single(constructed.Bindings.ArgumentBindings);
+    Assert.Equal("x", written.FormalParameterName!.val);
+    Assert.Single(written.Actual.DescendantsAndSelf.OfType<FunctionCallExpr>().Distinct().Where(call =>
+      call.Function.Name == "Input"));
+  }
+
+  // Generic method and function calls with no written actuals receive a shape without a dangling comma.
+  [Fact]
+  public async Task GenericDefaultCallsInsertOnlyShapeArguments() {
+    var result = await Transform("method UseM<T>(x:int:=1) requires x>=0 {} " +
+      "function UseF<T>(x:int:=1):int requires x>=0 { x } " +
+      "method Goal() { UseM<bool>(); var y:=UseF<bool>(); }",
+      "method Generate(r:PbtRandom.Source) {}");
+
+    var parsed = await ParseMemory(result.Sources);
+    var members = ContractRuntimeObligationTransformer.Members(parsed).ToList();
+    var goal = MethodNamed(parsed, "Goal");
+    var methodWrapper = Assert.Single(members.OfType<Method>().Where(method =>
+      method.Name.StartsWith("UseM__pbt_site_", StringComparison.Ordinal)));
+    var functionWrapper = Assert.Single(members.OfType<Function>().Where(function =>
+      function.Name.StartsWith("UseF__pbt_site_", StringComparison.Ordinal)));
+    var methodCall = Assert.Single(goal.Body!.Descendants().OfType<CallStmt>().Distinct().Where(call => call.Method == methodWrapper));
+    var functionCall = Assert.Single(goal.Body.Descendants().OfType<FunctionCallExpr>().Distinct().Where(call => call.Function == functionWrapper));
+    Assert.Single(methodCall.Bindings.ArgumentBindings);
+    Assert.Single(functionCall.Bindings.ArgumentBindings);
+    Assert.Null(methodCall.Bindings.ArgumentBindings[0].FormalParameterName);
+    Assert.Null(functionCall.Bindings.ArgumentBindings[0].FormalParameterName);
+    Assert.NotNull(methodWrapper.Ins.Single(formal => formal.Name == "x").DefaultValue);
+    Assert.NotNull(functionWrapper.Ins.Single(formal => formal.Name == "x").DefaultValue);
+  }
+
+  // Equal-offset insertions retain the reverse application order around both replacement boundaries.
+  [Fact]
+  public void SourceEditsPreserveEqualOffsetAndBoundaryOrder() {
+    var result = ApplySourceEdits("abcdef",
+      (2, 0, "first"),
+      (2, 0, "second"),
+      (2, 2, "replacement"),
+      (4, 0, "after"));
+
+    Assert.Equal("absecondfirstreplacementafteref", result.Content);
+  }
+
+  // UTF-8 byte offsets select complete multibyte characters without shifting a following boundary insertion.
+  [Fact]
+  public void SourceEditsUseUtf8ByteOffsets() {
+    var alphaBytes = Encoding.UTF8.GetByteCount("α");
+    var betaBytes = Encoding.UTF8.GetByteCount("β");
+    var result = ApplySourceEdits("αβγ",
+      (alphaBytes, betaBytes, "中"),
+      (alphaBytes + betaBytes, 0, "!"));
+
+    Assert.Equal("α中!γ", result.Content);
+  }
+
+  // A source with no edits retains every original UTF-16 code unit, including an unpaired surrogate.
+  [Fact]
+  public void SourceEditsPreserveUnpairedSurrogateWithoutEdits() {
+    const string content = "\uD800abc";
+
+    var result = ApplySourceEdits(content);
+
+    Assert.Equal(content, result.Content);
+  }
+
+  // A partial UTF-8 byte offset maps through the legacy prefix character count before insertion.
+  [Fact]
+  public void SourceEditsPreservePartialByteOffsetMapping() {
+    var result = ApplySourceEdits("éZ", (1, 0, "!"));
+
+    Assert.Equal("é!Z", result.Content);
+  }
+
+  // An empty outer removal absorbs its nested removal and strict-interior insertion while retaining boundary insertions.
+  [Fact]
+  public void SourceEditsPreserveNestedRemovalContainment() {
+    var result = ApplySourceEdits("0123456789",
+      (2, 6, ""),
+      (3, 2, ""),
+      (4, 0, "discarded"),
+      (2, 0, "before"),
+      (8, 0, "after"));
+
+    Assert.Equal("01beforeafter89", result.Content);
+  }
+
+  // A nonempty replacement absorbs an insertion in its strict interior.
+  [Fact]
+  public void SourceEditsDiscardInsertionInsideReplacement() {
+    var result = ApplySourceEdits("abcdef", (1, 3, "replacement"), (2, 0, "discarded"));
+
+    Assert.Equal("areplacementef", result.Content);
+  }
+
+  // Overlapping nonempty replacements remain an explicit transformation error.
+  [Fact]
+  public void SourceEditsRejectOverlappingReplacements() {
+    var error = Assert.Throws<NotSupportedException>(() =>
+      ApplySourceEdits("abcdef", (1, 3, "left"), (3, 2, "right")));
+
+    Assert.StartsWith("Overlapping diagnostic source replacements are not supported.", error.Message);
+  }
+
+  // Clause text and transformed syntax retain exact locations after multibyte source content.
+  [Fact]
+  public async Task TransformationSlicesTextAfterUtf8Content() {
+    var result = await Transform("/* 한글 */ method Goal(x:int) ensures x == x {}");
+
+    Assert.Equal("x == x", Assert.Single(result.Clauses).Obligation.Clause);
+    await ParseMemory(result.Sources);
   }
 
   private const string ChoiceGenerator = "method Generate(r:PbtRandom.Source) returns (c:Choice) { c:=Left; }";
@@ -389,8 +883,19 @@ public class ContractRuntimeObligationTests {
     return guarded.E1.Resolved;
   }
 
+  private static ContractSource ApplySourceEdits(string content, params (int Start, int Length, string Text)[] changes) {
+    var source = new ContractSource("Edit.dfy", content, ContractHarnessBuilder.Hash(content));
+    var uri = ContractSourceSnapshot.UriFor(source.Path);
+    var edits = changes.Select(change =>
+      new ContractRuntimeObligationTransformer.Edit(uri, change.Start, change.Length, change.Text)).ToList();
+    var result = Assert.Single(ContractRuntimeObligationTransformer.Apply([source], edits));
+    Assert.Equal(ContractHarnessBuilder.Hash(result.Content), result.Sha256);
+    return result;
+  }
+
   private static async Task<ContractRuntimeTransformation> Transform(string text,
-    string generator = "method Generate(r: PbtRandom.Source) returns (x: int) { x := 0; }") {
+    string generator = "method Generate(r: PbtRandom.Source) returns (x: int) { x := 0; }",
+    IReadOnlyDictionary<string, ContractRuntimeDecisionMethod>? decisionCaps = null) {
     var options = MemoryOptions();
     // The transformer builds the harness main around the generator that the runner always inserts.
     var source = "module M { import PbtRandom " + text + " " + generator + " }";
@@ -400,7 +905,7 @@ public class ContractRuntimeObligationTests {
     var program = await ContractSourceSnapshot.ParseAsync(reporter, sources, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(m => m.Message)));
     var goal = ContractCallableSelector.SelectMethod(program, new("M.Goal"), requireConcreteReceiver: false);
-    return new ContractRuntimeObligationTransformer(program, sources, goal).Transform();
+    return new ContractRuntimeObligationTransformer(program, sources, goal, decisionCaps: decisionCaps).Transform();
   }
 
 }

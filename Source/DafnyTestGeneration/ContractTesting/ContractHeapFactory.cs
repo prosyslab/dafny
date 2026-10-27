@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
 using Microsoft.Dafny;
 using DafnyType = Microsoft.Dafny.Type;
 
@@ -381,22 +382,69 @@ public static class ContractHeapFactory {
   internal static void AuditOmittedFields(Program program, MethodOrFunction entry, IReadOnlySet<Field> omitted,
     IReadOnlySet<ICallable>? generatedConstructors = null) {
     if (omitted.Count == 0) { return; }
-    foreach (var callable in RelevantReachableCallables(program, entry)) {
+    foreach (var (callable, member, field) in ReferencedFields(program, entry)) {
       // These initializers are generated after validating a reserved-name collision. Their erased
       // witnesses initialize precisely the fields being audited, without observing their values.
       if (generatedConstructors?.Contains(callable) == true) { continue; }
-      foreach (var member in RelevantNodes(callable).OfType<MemberSelectExpr>()) {
-        if (member.Member is Field field && omitted.Contains(field)) {
-          throw new NotSupportedException($"Heap field '{field.EnclosingClass.FullDafnyName}.{field.Name}' is omitted, " +
-            $"but reachable callable '{CallableName(callable)}' references it at " +
-            $"{member.Origin.line}:{member.Origin.col}.");
+      if (omitted.Contains(field)) {
+        throw new NotSupportedException($"Heap field '{field.EnclosingClass.FullDafnyName}.{field.Name}' is omitted, " +
+          $"but reachable callable '{CallableName(callable)}' references it at " +
+          $"{member.Origin.line}:{member.Origin.col}.");
+      }
+    }
+  }
+
+  /// <summary>Required input state must be runtime-representable when the omission audit forbids erasing it.</summary>
+  internal static IReadOnlyList<string> UnsupportedRequiredGhostFields(Program program, Method entry,
+    CancellationToken cancellationToken) {
+    if (entry is Lemma) { return []; }
+    var classes = new HashSet<TopLevelDecl>();
+    var types = new Stack<DafnyType>(entry.Ins.Select(formal => formal.Type));
+    if (!entry.IsStatic) {
+      types.Push(UserDefinedType.FromTopLevelDecl(entry.Origin, entry.EnclosingClass));
+    }
+    while (types.TryPop(out var type)) {
+      cancellationToken.ThrowIfCancellationRequested();
+      type = type.NormalizeExpand();
+      foreach (var argument in type.TypeArgs) { types.Push(argument); }
+      if (type.AsTopLevelTypeWithMembers is ClassDecl declaration && classes.Add(declaration)) {
+        foreach (var field in declaration.Members.OfType<Field>().Where(field => !field.IsStatic)) {
+          types.Push(field.Type);
         }
+      } else if (type.AsDatatype is { } datatype && classes.Add(datatype)) {
+        var substitution = TypeParameter.SubstitutionMap(datatype.TypeArgs, type.TypeArgs);
+        foreach (var formal in datatype.Ctors.SelectMany(constructor => constructor.Formals)) {
+          types.Push(formal.Type.Subst(substitution));
+        }
+      }
+    }
+    var result = new List<string>();
+    var seen = new HashSet<Field>();
+    foreach (var (callable, member, field) in ReferencedFields(program, OriginalCallable(entry), cancellationToken)) {
+      cancellationToken.ThrowIfCancellationRequested();
+      if (!field.IsStatic && field.IsGhost && classes.Contains(field.EnclosingClass) && seen.Add(field) &&
+          !ContractRuntimeObligationTransformer.CompilableType(field.Type)) {
+        result.Add($"Required ghost heap field '{field.EnclosingClass.FullDafnyName}.{field.Name}' has unsupported runtime type " +
+          $"'{field.Type}'; reachable callable '{CallableName(callable)}' references it at " +
+          $"{member.Origin.line}:{member.Origin.col}, so the field cannot be omitted.");
+      }
+    }
+    return result;
+  }
+
+  private static IEnumerable<(ICallable Callable, MemberSelectExpr Member, Field Field)> ReferencedFields(
+    Program program, MethodOrFunction entry, CancellationToken cancellationToken = default) {
+    foreach (var callable in RelevantReachableCallables(program, entry, cancellationToken)) {
+      cancellationToken.ThrowIfCancellationRequested();
+      foreach (var member in RelevantNodes(callable).OfType<MemberSelectExpr>()) {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (member.Member is Field field) { yield return (callable, member, field); }
       }
     }
   }
 
   private static IReadOnlySet<ICallable> RelevantReachableCallables(Program program,
-    MethodOrFunction entry) {
+    MethodOrFunction entry, CancellationToken cancellationToken = default) {
     var resolvedEdges = program.RawModules()
       .SelectMany(module => module.CallGraph.GetVertices().Concat(module.InterModuleCallGraph.GetVertices()))
       .GroupBy(vertex => vertex.N).ToDictionary(group => group.Key,
@@ -408,6 +456,7 @@ public static class ContractHeapFactory {
     var pending = new Stack<ICallable>();
     pending.Push((ICallable)entry);
     while (pending.TryPop(out var callable)) {
+      cancellationToken.ThrowIfCancellationRequested();
       if (!reachable.Add(callable)) {
         continue;
       }
