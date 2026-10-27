@@ -75,11 +75,13 @@ public class PreCompilationTests : IClassFixture<PreCompilationTests.Fixture> {
     Assert.Equal(LineOf(GeneratorDraft.Sources[0].Content, "method MakeInput"), missing.Line);
   }
 
-  // A generator syntax error is reported at its model-relative path with line and column.
+  // A generator syntax error is an unsupported result naming its model-relative path with line and column.
   [Fact]
   public async Task LocatesGeneratorSyntaxError() {
-    var error = await Assert.ThrowsAsync<NotSupportedException>(() => Campaign.RunAsync(GeneratorSyntax));
-    Assert.Contains(".top-down-pbt/generators/Goal.dfy:2:8: invalid Rhs", error.Message);
+    var run = await Campaign.RunAsync(GeneratorSyntax);
+    Assert.Equal(ContractRuntimeStatus.Unsupported, run.Result.Status);
+    Assert.Contains(".top-down-pbt/generators/Goal.dfy:2:8: invalid Rhs", run.Result.Reason);
+    Assert.Equal(0, run.Population.Generated);
   }
 
   // Non-compilable ghost inputs fail before requesting an impossible concrete generator.
@@ -90,18 +92,24 @@ public class PreCompilationTests : IClassFixture<PreCompilationTests.Fixture> {
     Assert.Contains("non_compilable_input_type", run.Result.Reason);
   }
 
-  // First-class generic references remain explicit exclusions until they can carry shape arguments.
+  // First-class generic references remain explicit unsupported results until they can carry shape arguments.
   [Fact]
   public async Task RejectsGenericHigherOrderShapeErasure() {
-    var error = await Assert.ThrowsAsync<NotSupportedException>(() => Campaign.RunAsync(HigherOrderShape));
-    Assert.Contains("Generic higher-order function references", error.Message);
+    var run = await Campaign.RunAsync(HigherOrderShape);
+    Assert.Equal(ContractRuntimeStatus.Unsupported, run.Result.Status);
+    Assert.Contains("unsupported_generic_reference", run.Result.Reason);
+    Assert.Contains("Generic higher-order function references", run.Result.Reason);
+    Assert.Equal(0, run.Population.Generated);
   }
 
   // User formals cannot shadow the generated type-shape parameters.
   [Fact]
   public async Task RejectsGenericShapeFormalCollision() {
-    var error = await Assert.ThrowsAsync<NotSupportedException>(() => Campaign.RunAsync(ShapeCollision));
-    Assert.Contains("Reserved Pbt diagnostic name collision", error.Message);
+    var run = await Campaign.RunAsync(ShapeCollision);
+    Assert.Equal(ContractRuntimeStatus.Unsupported, run.Result.Status);
+    Assert.Contains("reserved_diagnostic_name", run.Result.Reason);
+    Assert.Contains("Reserved Pbt diagnostic name collision", run.Result.Reason);
+    Assert.Equal(0, run.Population.Generated);
   }
 
   internal static int LineOf(string source, string text) =>
