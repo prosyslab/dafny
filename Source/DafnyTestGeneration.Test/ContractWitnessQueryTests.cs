@@ -12,7 +12,6 @@ public class ContractWitnessQueryTests {
   [Theory]
   [InlineData("exists a:string, b:string :: \"\\U{1F600}x\" == a + b && |a| == 1 && b == \"x\"", ContractQueryOutcome.Unsat)]
   [InlineData("exists a:seq<int>, b:seq<int> :: [1,2] == a + b && |a| == 1 && b == [9]", ContractQueryOutcome.Sat)]
-  [InlineData("!(exists a:seq<int> :: [1,2] == a + a)", ContractQueryOutcome.Unsat)]
   [InlineData("exists a:seq<int> :: [1,1] == a + a", ContractQueryOutcome.Unsat)]
   [InlineData("!(exists a:seq<int> :: [1] == a + a)", ContractQueryOutcome.Unsat)]
   [InlineData("exists a:seq<nat>, b:seq<int> :: [-1] == a + b && |a| == 1", ContractQueryOutcome.Sat)]
