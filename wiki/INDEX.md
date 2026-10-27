@@ -1,3 +1,5 @@
+- [One Python client for native Dafny analysis](python-analysis-client.md) — `python/dafny_analysis` merges the Cosyn and Dafnyutils clients; injected command runner, strict Path/SHA-256 models, tests and limits.
+
 - [Native tests depend on which Z3 Dafny selects](native-test-solver-selection.md) — five contract tests differ between `z3-4.16.0` and the PATH fallback on both base and pin branch; comparison procedure and limits.
 
 - [Native PBT delivery and validation boundaries](pbt-main-delivery.md) — reviewed runtime closure, checked helper screening, verifier-seed forwarding and explicit matching-source/canonical-build limits.

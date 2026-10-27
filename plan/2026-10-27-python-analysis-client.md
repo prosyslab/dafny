@@ -1,6 +1,6 @@
 # Provide one Python analysis client package in the native fork
 
-Status: in-progress
+Status: done
 Date: 2026-10-27
 Parent: [Move the Dafny evaluator to root and keep one analysis client](../../../plan/2026-10-27-evaluator-to-root.md) (Phase A)
 
@@ -88,11 +88,11 @@ Legend: C = Cosyn copy, D = Dafnyutils copy.
 
 | Symbol | C | D | Merged decision | Reason / evidence |
 | --- | --- | --- | --- | --- |
-| Path-bearing model fields (`source_path`, `target_path`, `resolved_target_source_path`, `included_files`) | `Path`, strict (Python mode requires `Path`; JSON accepts strings) | `StrictStr` | `Path`, strict (C) | Cosyn's tests pin strict `Path` (`test_path_models.py`) and 37 Cosyn files use `Path`; D wraps every use in `Path(...)`. D call sites that compare to `str(...)` or construct models with strings must pass `Path` when they switch. |
+| Path-bearing model fields (`source_path`, `target_path`, `resolved_target_source_path`, `included_files`) | `Path`, strict (Python mode requires `Path`; JSON accepts strings) | `StrictStr` | `Path`, strict (C) | Cosyn's tests pin strict `Path` (`test_path_models.py`) and Cosyn code compares and resolves `Path`; D mostly wraps with `Path(...)` but also compares `source_path` to `str(...)` and builds models from strings. Those D call sites must pass and compare `Path` when they switch. |
 | `DefinitionInfo.source_path` empty value | rejected (`field_validator`) | accepted, default `""` | reject (C) | Native emits `""` only for nodes without a filename; stdin yields `"/"`. Rejecting avoids `Path("")` becoming the current directory. D's empty-path fallback and "omitted source path" check become unreachable. |
 | `DafnyFingerprintResult.sha256`, `DafnySourceSemanticFingerprint.*sha256`, `DafnyDefinitionSemanticFingerprint.*sha256`, `DafnyProofInputs.*sha256` | `SHA256` (64 lowercase hex) | `StrictStr` | `SHA256` (C) | Native emits `ToLowerInvariant()` hex (`DefinitionAnalysis.ProofInputs.cs:192,256`); integration test validates real output. |
 | `DafnyProject` / `DefinitionSourceFacts` | has `proof_inputs` | lacks it | `DafnyProject` with `proof_inputs`; alias `DefinitionSourceFacts = DafnyProject` | `proofInputs` is a native optional field (`--include-proof-inputs`); extra=forbid in D would reject it. Alias keeps D names until switch. |
-| `DafnyAnalysisResult` / `DefinitionAnalysisDocument` | `DafnyAnalysisResult` | `DefinitionAnalysisDocument` | `DafnyAnalysisResult`; alias `DefinitionAnalysisDocument = DafnyAnalysisResult` | Same fields (`definitions`, `sourceFacts`); C name has 21 users. |
+| `DafnyAnalysisResult` / `DefinitionAnalysisDocument` | `DafnyAnalysisResult` | `DefinitionAnalysisDocument` | `DafnyAnalysisResult`; alias `DefinitionAnalysisDocument = DafnyAnalysisResult` | Same fields (`definitions`, `sourceFacts`); the C name is imported throughout Cosyn. |
 | `DafnyDefinitions` / `StructuredDefinitionInfo` | `DafnyDefinitions` | `StructuredDefinitionInfo` | `DafnyDefinitions` | Same required-field set; D name has no caller outside its module. |
 | `DefinitionSourceSpan` vs `DafnyFingerprintSpan` for `children`/`sourceGroup` | `DefinitionSourceSpan` | `DafnyFingerprintSpan` | `DefinitionSourceSpan` (C) | Same two strict ints; separate type keeps fingerprint request spans distinct from analysis output. |
 | `DefinitionAnalysisModule` field order | `start,end,bodyStart,bodyEnd` | `bodyStart,bodyEnd,start,end` | C order | Order is not observable on the wire. |
@@ -134,7 +134,48 @@ python/tests`. Tests use in-memory JSON and fake runners; the only file read is 
 checked-in read-only fixture. No temporary directories, no fsync. No scratch artifacts
 are stored in `plan/` or `wiki/`; scratch lives in `/workspace/tmp/python-analysis-client/`.
 
+## Results
+
+Environment: Python 3.12.3 (the only interpreter available), pydantic 2.13.5 and pytest
+9.1.1 from the system site packages, ruff 0.15.x and pyright from `/usr/local/bin`.
+`python3 -m venv` cannot create a pip-enabled venv here (no `ensurepip`), so the venv
+`/workspace/tmp/python-analysis-client/venv` was made with `--without-pip
+--system-site-packages` and the package was installed with
+`/usr/bin/pip --python <venv>/bin/python install --no-build-isolation --no-deps -e python`
+(nothing went into system site-packages).
+
+- `python -m pytest -q python/tests` (from `/workspace/dafny`, venv interpreter): 65 passed,
+  4 deselected (integration).
+- `DAFNY_ANALYSIS_NATIVE=/workspace/cosyn/_build/dafny/Binaries/Dafny python -m pytest -q
+  -m integration python/tests`: 4 passed in 4.4 s. That executable reports
+  `4.11.1+cb1a6437f23cca667f007d3284c23b925e01c96d`, the commit of this branch's base; the
+  fork's own `Binaries/` is empty and no native rebuild was needed. Without the variable
+  the 4 tests skip. They cover stdin definitions, stdin span-only definitions, the full
+  document with semantic and verification facts and queries over it, and proof inputs.
+- `ruff check`/`ruff format --check` and `pyright` (standard mode) from `python/`: clean.
+- Manual probe (scratch, not committed): `dafny_source_fingerprints` with a real native
+  runner returned digests for a whole-file and a partial region; the whole-file digest equals
+  the native `fullSha256` of the same file. No committed fingerprint integration test: the
+  command only reads a request file and the client writes that file with
+  `NamedTemporaryFile`, which the test I/O policy does not allow in tests. Only the response
+  validation and empty-request paths are unit-tested.
+- Not verified: Python 3.11 (interpreter unavailable), pydantic below 2.13.5 (the
+  `>=2.7,<3` range is a declared lower bound, not a tested one), consumer test suites
+  (consumers are not switched in this plan).
+
+## Open items for the consumer phases
+
+- Hosts must supply a `DafnyCommandRunner`; consumer tests that monkeypatched the private
+  `_run_definition_analysis` should inject a fake runner instead.
+- Dafnyutils call sites and tests that pass string paths to analysis models or compare
+  `source_path` with `str(...)` must use `Path`.
+- Each host should assert that its own tool timeout equals
+  `DAFNY_DEFINITION_ANALYSIS_TIMEOUT_SEC` or pass `timeout_seconds` explicitly.
+- Cosyn keeps its `bench/core` warning filter and passes it as `expected_warning_filter`.
+
 ## Progress
 
 - 2026-10-27: branch `analysis-package` created from `cb1a6437f`; both copies diffed and
   the table above recorded before writing the package.
+- 2026-10-27: package, tests and wiki page added in focused commits; all checks above pass.
+  Documentation: [wiki/python-analysis-client.md](../wiki/python-analysis-client.md).

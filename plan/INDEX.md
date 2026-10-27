@@ -1,4 +1,4 @@
-- [Provide one Python analysis client package in the native fork](2026-10-27-python-analysis-client.md) — in progress; merged Cosyn/Dafnyutils `definition-analysis` and `source-fingerprint` client as `python/dafny_analysis`, difference table recorded; parent: [evaluator to root](../../../plan/2026-10-27-evaluator-to-root.md).
+- [Provide one Python analysis client package in the native fork](2026-10-27-python-analysis-client.md) — done; merged Cosyn/Dafnyutils `definition-analysis` and `source-fingerprint` client as `python/dafny_analysis` with an injected command runner, difference table and 65 unit plus 4 opt-in native tests recorded; parent: [evaluator to root](../../../plan/2026-10-27-evaluator-to-root.md).
 
 - [Repair native test failures on the commit-pin branch](2026-10-27-pin-test-repair.md) — done; 10 branch-introduced test failures and 5 Z3-4.16.0-dependent failures (also on `1de66ec5a`) resolved by test updates only, per the 2026-10-27 solver decision; parent: [commit pin](../../../plan/2026-10-27-dafny-commit-pin.md).
 
