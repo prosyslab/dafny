@@ -100,7 +100,7 @@ internal sealed class ContractGeneratorProofAudit {
     if (declarations.OfType<LetExpr>().Any(let => !let.Exact)) {
       return "Let-such-that creates retained Skolem axioms and is outside the bounded proof scope.";
     }
-    foreach (var topLevel in declarations.OfType<TopLevelDecl>()) {
+    foreach (var topLevel in declarations.OfType<TopLevelDecl>().Where(topLevel => topLevel is not TypeParameter)) {
       if (topLevel.Origin.Uri != null && randomUris.Contains(topLevel.Origin.Uri)) { continue; }
       if (topLevel.IsRefining) {
         return "Refining declarations are outside the bounded proof scope: " + topLevel.Name;

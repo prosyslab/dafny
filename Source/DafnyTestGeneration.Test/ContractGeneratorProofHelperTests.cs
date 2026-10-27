@@ -41,6 +41,21 @@ public sealed class ContractGeneratorProofHelperTests {
     function Twice(value: int): int { Add(value, value) }
     function Add(left: int, right: int): int { left + right }
     """;
+  private const string BindingGoalSource = """
+    module M {
+      lemma Proof(x: int) {}
+      ghost function Identity(x: int): int { Proof(x); x }
+      method Goal(x: int)
+        requires x >= 0
+        ensures Identity(x) == x
+      {}
+    }
+    """;
+  private const string BindingGeneratorSource = """
+    method {:pbt_generator "M.Goal"} Generate(r: PbtRandom.Source) returns (x: int) {
+      x := 0;
+    }
+    """;
 
   private sealed record Prepared(Program Original, Program Program, DafnyOptions Options,
     ContractRuntimePreparedSources Preparation, IReadOnlyList<ContractSource> Sources, IReadOnlyList<ContractSource> RuntimeSources,
@@ -52,6 +67,12 @@ public sealed class ContractGeneratorProofHelperTests {
     public Task<IReadOnlyList<Microsoft.Boogie.IVerificationTask>> GetVerificationTasksAsync(Microsoft.Boogie.ExecutionEngine engine,
       ResolutionResult resolution, ModuleDefinition moduleDefinition, CancellationToken cancellationToken) =>
       throw new InvalidOperationException("This boundary must reject before native verification or analyzer hashing.");
+  }
+
+  private sealed class ReachedVerifier : IProgramVerifier {
+    public Task<IReadOnlyList<Microsoft.Boogie.IVerificationTask>> GetVerificationTasksAsync(Microsoft.Boogie.ExecutionEngine engine,
+      ResolutionResult resolution, ModuleDefinition moduleDefinition, CancellationToken cancellationToken) =>
+      throw new InvalidOperationException("Reached the fake verifier after both analyzer bindings.");
   }
 
   private static ContractSource Snapshot(string path, string content) =>
@@ -68,10 +89,10 @@ public sealed class ContractGeneratorProofHelperTests {
   private static Method Method(Program program, string name) => Assert.Single(program.Descendants()
     .OfType<Method>().Where(method => method.Name == name && method.EnclosingClass.EnclosingModuleDefinition.Name == "M"));
 
-  private static async Task<Prepared> Prepare(string generatorSource = GeneratorSource) {
+  private static async Task<Prepared> Prepare(string generatorSource = GeneratorSource, string goalSource = GoalSource) {
     var options = new DafnyOptions(TextReader.Null, TextWriter.Null, TextWriter.Null);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
-    IReadOnlyList<ContractSource> sources = [Snapshot(GoalPath, GoalSource)];
+    IReadOnlyList<ContractSource> sources = [Snapshot(GoalPath, goalSource)];
     var original = await Parse(sources, options);
     var preparation = await ContractRuntimeSourcePreparation.PrepareAsync(original, sources, Method(original, "Goal"),
       [], Snapshot(GeneratorPath, generatorSource), options, CancellationToken.None);
@@ -90,6 +111,18 @@ public sealed class ContractGeneratorProofHelperTests {
     var program = await Parse(preparedSources, options);
     return new(original, program, options, preparation, preparedSources, runtimeSources, Method(program, "Goal"),
       Method(program, "Generate"), random);
+  }
+
+  private static DafnyProofInputs FakeAnalyzerInputs(Program program, IReadOnlySet<Uri> uris,
+    string? omitted = null) {
+    var definitions = program.Descendants().OfType<MethodOrFunction>()
+      .Where(callable => (callable is MethodOrConstructor { Body: not null } || callable is Function { Body: not null }) &&
+                         callable.Origin.Uri != null && uris.Contains(callable.Origin.Uri))
+      .Select(ContractGeneratorDefinitionIdentity.For).Distinct()
+      .Where(identity => identity.FullName != omitted)
+      .Select(identity => new DafnyDefinitionProofInput(identity.SourcePath, identity.FullName, new string('c', 64)))
+      .ToArray();
+    return new(1, new string('a', 64), new string('b', 64), definitions);
   }
 
   private static async Task<string?> RawAudit(Prepared prepared) {
@@ -253,6 +286,58 @@ public sealed class ContractGeneratorProofHelperTests {
     var transformed = new ContractRuntimeObligationTransformer(runtime, prepared.RuntimeSources, Method(runtime, "Goal"),
       generatorProof: report, selectedGenerator: Method(runtime, "Generate")).Transform();
     Assert.False(transformed.EntryRequiresOmitted);
+  }
+
+  // A missing original proof dependency reports its exact bounded analyzer identity before verification starts.
+  [Fact]
+  public async Task MissingOriginalProofIdentityReportsAnalyzerFailure() {
+    var prepared = await Prepare(BindingGeneratorSource, BindingGoalSource);
+    var calls = 0;
+    var report = await ContractGeneratorProof.TryProveAsync(prepared.RuntimeSources, prepared.Preparation.Sources,
+      "M.Goal", "Generate", prepared.Options, new UnusedVerifier(), 1000, analyze: (program, uris) => {
+        calls++;
+        return FakeAnalyzerInputs(program, uris, "M.Proof");
+      });
+
+    Assert.Equal(ContractGeneratorProofStatus.Unsupported, report.Status);
+    Assert.Equal("The analyzer could not bind every required original callable body: " +
+      "Analyzer required definition is missing: '/workspace/tmp/pbt-generator-helper-memory/Target.dfy::M.Proof'.",
+      report.Diagnostics);
+    Assert.Equal(1, calls);
+  }
+
+  // A missing strengthened-proof dependency is attributed to the proof-program binding after the original succeeds.
+  [Fact]
+  public async Task MissingProofProgramIdentityReportsAnalyzerFailure() {
+    var prepared = await Prepare(BindingGeneratorSource, BindingGoalSource);
+    var calls = 0;
+    var report = await ContractGeneratorProof.TryProveAsync(prepared.RuntimeSources, prepared.Preparation.Sources,
+      "M.Goal", "Generate", prepared.Options, new UnusedVerifier(), 1000, analyze: (program, uris) => {
+        calls++;
+        return FakeAnalyzerInputs(program, uris, calls == 2 ? "M.Proof" : null);
+      });
+
+    Assert.Equal(ContractGeneratorProofStatus.Unsupported, report.Status);
+    Assert.Equal("The analyzer could not identify the direct generator proof inputs: " +
+      "Analyzer required definition is missing: '/workspace/tmp/pbt-generator-helper-memory/Target.dfy::M.Proof'.",
+      report.Diagnostics);
+    Assert.Equal(2, calls);
+  }
+
+  // Complete fake analyzer identities pass both initial bindings and reach the throwing verifier without minting evidence.
+  [Fact]
+  public async Task CompleteAnalyzerIdentitiesReachFakeVerifier() {
+    var prepared = await Prepare(BindingGeneratorSource, BindingGoalSource);
+    var calls = 0;
+    var error = await Assert.ThrowsAsync<InvalidOperationException>(() => ContractGeneratorProof.TryProveAsync(
+      prepared.RuntimeSources, prepared.Preparation.Sources, "M.Goal", "Generate", prepared.Options,
+      new ReachedVerifier(), 1000, analyze: (program, uris) => {
+        calls++;
+        return FakeAnalyzerInputs(program, uris);
+      }));
+
+    Assert.Equal("Reached the fake verifier after both analyzer bindings.", error.Message);
+    Assert.Equal(2, calls);
   }
 
   // An assumption in a called sibling lemma cannot enter an audited generator proof closure.

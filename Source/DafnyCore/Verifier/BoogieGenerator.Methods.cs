@@ -1764,7 +1764,7 @@ namespace Microsoft.Dafny {
       var req = GetRequires();
       var mod = new List<Bpl.IdentifierExpr> { ordinaryEtran.HeapCastToIdentifierExpr };
       var ens = GetEnsures();
-      var proc = new Bpl.Procedure(m.Origin, name, [],
+      var proc = new Bpl.Procedure(kind == MethodTranslationKind.Implementation ? GetToken(m) : m.Origin, name, [],
         inParams, outParams.Values.ToList(), false, req, mod, ens, etran.TrAttributes(m.Attributes, null));
       AddVerboseNameAttribute(proc, m.FullDafnyName, kind);
 

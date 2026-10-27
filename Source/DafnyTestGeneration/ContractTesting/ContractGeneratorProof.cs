@@ -129,14 +129,20 @@ public static class ContractGeneratorProof {
       }
       var requiredDefinitions = scopes.SelectMany(scope => scope.Checks).Select(check => check.Declaration)
         .OfType<MethodOrFunction>().Distinct().Select(ContractGeneratorDefinitionIdentity.For).ToArray();
-      var originalBinding = ContractGeneratorInputBinding.Capture(runtimeProgram, sourceSnapshot, requiredDefinitions, analyze);
+      var originalBinding = ContractGeneratorInputBinding.Capture(runtimeProgram, sourceSnapshot, requiredDefinitions,
+        out var originalBindingFailure, analyze);
       if (originalBinding == null) {
-        return Report(ContractGeneratorProofStatus.Unsupported, "The analyzer could not bind every required original callable body.");
+        return Report(ContractGeneratorProofStatus.Unsupported,
+          "The analyzer could not bind every required original callable body: " + originalBindingFailure);
       }
       proofOptions.ProcessSolverOptions(reporter, generator.Origin);
       if (reporter.ErrorCount != 0) { return Report(ContractGeneratorProofStatus.Failed, string.Join("\n", diagnostics)); }
-      var proofBinding = ContractGeneratorInputBinding.Capture(proofProgram, build.Sources, requiredDefinitions, analyze);
-      if (proofBinding == null) { return Report(ContractGeneratorProofStatus.Unsupported, "The analyzer could not identify the direct generator proof inputs."); }
+      var proofBinding = ContractGeneratorInputBinding.Capture(proofProgram, build.Sources, requiredDefinitions,
+        out var proofBindingFailure, analyze);
+      if (proofBinding == null) {
+        return Report(ContractGeneratorProofStatus.Unsupported,
+          "The analyzer could not identify the direct generator proof inputs: " + proofBindingFailure);
+      }
       ContractQueryDeadline.Check(deadline, token);
       var checkedProof = await ContractGeneratorVerification.VerifyAsync(proofProgram, verifier, scopes,
         proofGenerator, deadline, token);
@@ -804,7 +810,7 @@ internal sealed record ContractGeneratorInputBinding(string Sources, string Proo
     Func<Program, IReadOnlySet<Uri>, DafnyProofInputs?>? analyze = null) =>
     Capture(program, sources, requiredDefinitions, out _, analyze);
 
-  private static ContractGeneratorInputBinding? Capture(Program program, IReadOnlyList<ContractSource> sources,
+  internal static ContractGeneratorInputBinding? Capture(Program program, IReadOnlyList<ContractSource> sources,
     IReadOnlyList<ContractGeneratorDefinitionIdentity> requiredDefinitions, out string? failure,
     Func<Program, IReadOnlySet<Uri>, DafnyProofInputs?>? analyze) {
     failure = null;

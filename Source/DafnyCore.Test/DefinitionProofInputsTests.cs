@@ -22,6 +22,74 @@ public class DefinitionProofInputsTests {
     { B(x); }
     """;
 
+  // Assertion-free lemmas and ordinary methods both receive translated declaration identities.
+  [Theory]
+  [InlineData("lemma Proof(x: int) {}", "Proof")]
+  [InlineData("method EmptyMethod() {}", "EmptyMethod")]
+  public async Task AssertionFreeDeclarationsHaveProofInputs(string source, string name) {
+    var result = await Analyze(source);
+
+    Assert.Equal(name, Assert.Single(result.ProofInputs!.Definitions).FullName);
+  }
+
+  // Adding a target assertion changes its identity while preserving the modular caller identity.
+  [Fact]
+  public async Task AssertionFreeTransitionInvalidatesTargetButNotCaller() {
+    const string source = "lemma Proof(x: int) {} lemma Caller(x: int) { Proof(x); assert x == x; }";
+    var before = await Analyze(source);
+    var after = await Analyze(source.Replace("Proof(x: int) {}", "Proof(x: int) { assert x == x; }"));
+
+    Assert.NotEqual(Input(before, "Proof"), Input(after, "Proof"));
+    Assert.Equal(Input(before, "Caller"), Input(after, "Caller"));
+  }
+
+  // Bodyless and verification-disabled declarations receive no proof-input identity.
+  [Theory]
+  [InlineData("lemma Bodyless()")]
+  [InlineData("lemma {:verify false} Disabled() {}")]
+  public async Task IneligibleDeclarationsDoNotReceiveProofInputs(string source) {
+    var result = await Analyze(source);
+
+    Assert.NotNull(result.ProofInputs);
+    Assert.Empty(result.ProofInputs!.Definitions);
+  }
+
+  // An extreme lemma's attributed implementation procedure does not grant it a partial proof-input identity.
+  [Fact]
+  public async Task ExtremeLemmaProcedureDoesNotReceiveProofInput() {
+    var program = await ProofInputRepeatabilityTests.Parse("least lemma Extreme() {}",
+      path: "/workspace/tmp/public-proof-inputs/source.dfy");
+    var extreme = Assert.Single(program.Descendants().OfType<ExtremeLemma>());
+    var translations = ProofInputRepeatabilityTests.Translate(program).ToArray();
+
+    Assert.Contains(translations.SelectMany(translation => translation.Item2.TopLevelDeclarations)
+      .OfType<Microsoft.Boogie.Procedure>(), procedure =>
+        procedure.Name.StartsWith("Impl$$", StringComparison.Ordinal) &&
+        procedure.tok is CanVerifyOrigin { CanVerify: var owner } && ReferenceEquals(owner, extreme));
+    var inputs = DefinitionAnalysis.ProofInputsFor(program, program.Compilation.RootSourceUris.ToHashSet(),
+      _ => translations, () => new string('a', 64));
+    Assert.NotNull(inputs);
+    Assert.Empty(inputs!.Definitions);
+  }
+
+  // A declaration outside native verification scope has neither an implementation nor a proof-input identity.
+  [Fact]
+  public async Task DeclarationOutsideVerificationScopeHasNoProofInput() {
+    var program = await ProofInputRepeatabilityTests.Parse("lemma Outside() {}",
+      path: "/workspace/tmp/public-proof-inputs/source.dfy");
+    program.Compilation.AlreadyVerifiedRoots.Add(Assert.Single(program.Compilation.RootSourceUris));
+    program.Compilation.UrisToVerify = null;
+    var translations = ProofInputRepeatabilityTests.Translate(program).ToArray();
+
+    Assert.DoesNotContain(translations.SelectMany(translation => translation.Item2.TopLevelDeclarations)
+      .OfType<Microsoft.Boogie.Implementation>(), implementation =>
+        implementation.tok is CanVerifyOrigin { CanVerify: MethodOrConstructor { Name: "Outside" } });
+    var inputs = DefinitionAnalysis.ProofInputsFor(program, program.Compilation.RootSourceUris.ToHashSet(),
+      _ => translations, () => new string('a', 64));
+    Assert.NotNull(inputs);
+    Assert.Empty(inputs!.Definitions);
+  }
+
   // Editing an ordinary callee body preserves the caller's modular proof input.
   [Fact]
   public async Task OrdinaryCalleeBodyDoesNotInvalidateCaller() {

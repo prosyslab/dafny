@@ -89,18 +89,20 @@ public static partial class DefinitionAnalysis {
       foreach (var declaration in boogieProgram.TopLevelDeclarations) {
         DefinitionNode? owner = null;
         var excludable = false;
-        if (declaration is Bpl.Implementation implementation &&
-            implementation.tok is CanVerifyOrigin origin &&
+        if (declaration is Bpl.Implementation or Bpl.Procedure &&
+            declaration.tok is CanVerifyOrigin origin &&
             origin.CanVerify is INode sourceNode &&
             declarationIndex.TryGetValue(sourceNode, out owner)) {
-          // A modular ordinary method/lemma call consumes its procedure contract. An
-          // inline implementation can instead become part of another VC, so keep it.
-          var modularMethod = origin.CanVerify is Method { IsByMethod: false } method &&
-            (method.GetType() == typeof(Method) || method.GetType() == typeof(Lemma));
-          excludable = modularMethod &&
-            !HasInlineAttribute(implementation.Attributes) &&
-            procedures.TryGetValue(implementation.Name, out var matches) && matches.Count == 1 &&
-            !HasInlineAttribute(matches[0].Attributes);
+          if (declaration is Bpl.Implementation implementation) {
+            // A modular ordinary method/lemma call consumes its procedure contract. An
+            // inline implementation can instead become part of another VC, so keep it.
+            var modularMethod = origin.CanVerify is Method { IsByMethod: false } method &&
+              (method.GetType() == typeof(Method) || method.GetType() == typeof(Lemma));
+            excludable = modularMethod &&
+              !HasInlineAttribute(implementation.Attributes) &&
+              procedures.TryGetValue(implementation.Name, out var matches) && matches.Count == 1 &&
+              !HasInlineAttribute(matches[0].Attributes);
+          }
         }
         translated.Add(new TranslatedProofDeclaration(moduleName,
           ProofDeclarationHash(printOptions, declaration), owner, excludable));
