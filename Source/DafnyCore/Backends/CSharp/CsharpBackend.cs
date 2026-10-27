@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Text;
@@ -14,6 +15,8 @@ public class CsharpBackend : ExecutableBackend {
   protected override SinglePassCodeGenerator CreateCodeGenerator() {
     return new CsharpCodeGenerator(Options, Reporter);
   }
+
+  protected virtual bool IncludeFrameworkPackageReferences => true;
 
   public override IReadOnlySet<string> SupportedExtensions => new HashSet<string> { ".cs", ".dll" };
 
@@ -44,10 +47,53 @@ public class CsharpBackend : ExecutableBackend {
     Directory.CreateDirectory(outputDir);
 
     var source = callToMain == null ? targetProgramText : targetProgramText + callToMain;
-    await File.WriteAllTextAsync(sourcePath, source);
+    await WriteTargetProgram(sourcePath, source);
 
     var outputType = callToMain == null ? "Library" : "Exe";
 
+    foreach (var file in otherFileNames) {
+      string extension = Path.GetExtension(file);
+      if (extension != null) { extension = extension.ToLower(); }
+      if (extension == ".cs") {
+        var normalizedPath = Path.Combine(Path.GetDirectoryName(file), Path.GetFileName(file));
+        if (!File.Exists(normalizedPath)) {
+          await outputWriter.Status($"Errors compiling program: Could not find {file}");
+          return (false, null);
+        }
+      }
+    }
+
+    var projectFile = CreateProjectFile(outputType, sourcePath, otherFileNames);
+    await WriteProjectFile(csprojPath, projectFile);
+
+    var arguments = new[] { "build", csprojPath, "-o", outputDir };
+    var psi = PrepareProcessStartInfo("dotnet", arguments);
+    var dotnetOutputWriter = new StringWriter();
+    var dotnetErrorWriter = new StringWriter();
+    var exitCode = await RunDotnetBuild(psi, dotnetOutputWriter, dotnetErrorWriter);
+    var dllPath = Path.Combine(outputDir, fileNames + ".dll");
+    if (exitCode != 0 || !File.Exists(dllPath)) {
+      await outputWriter.Status($@"Failed to compile C# source code using 'dotnet {string.Join(" ", arguments)}'. Command output was:" +
+                                dotnetOutputWriter.ToString() + dotnetErrorWriter.ToString());
+    } else {
+      if (Options.Verbose) {
+        await outputWriter.Status($"Compiled assembly into {Path.GetFileName(dllPath)}");
+      }
+    }
+    return (exitCode == 0, dllPath);
+  }
+
+  protected virtual Task WriteTargetProgram(string sourcePath, string source) =>
+    File.WriteAllTextAsync(sourcePath, source);
+
+  protected virtual Task WriteProjectFile(string projectPath, string project) =>
+    File.WriteAllTextAsync(projectPath, project);
+
+  protected virtual Task<int> RunDotnetBuild(ProcessStartInfo startInfo, TextWriter outputWriter,
+    TextWriter errorWriter) => RunProcess(startInfo, outputWriter, errorWriter);
+
+  protected virtual string CreateProjectFile(string outputType, string sourcePath,
+    ReadOnlyCollection<string> otherFileNames) {
     var itemGroupExtra = @"";
     if (!Options.IncludeRuntime) {
       var libPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
@@ -60,18 +106,11 @@ public class CsharpBackend : ExecutableBackend {
 
     var sourceFiles = new StringBuilder();
     sourceFiles.AppendLine(@$"<Compile Include=""{sourcePath}"" />");
-
     foreach (var file in otherFileNames) {
-      string extension = Path.GetExtension(file);
-      if (extension != null) { extension = extension.ToLower(); }
+      var extension = Path.GetExtension(file)?.ToLower();
       if (extension == ".cs") {
         var normalizedPath = Path.Combine(Path.GetDirectoryName(file), Path.GetFileName(file));
-        if (File.Exists(normalizedPath)) {
-          sourceFiles.AppendLine(@$"<Compile Include=""{normalizedPath}"" />");
-        } else {
-          await outputWriter.Status($"Errors compiling program: Could not find {file}");
-          return (false, null);
-        }
+        sourceFiles.AppendLine(@$"<Compile Include=""{normalizedPath}"" />");
       } else if (extension == ".dll") {
         sourceFiles.Append(@$"
     <Reference Include=""{Path.GetFileNameWithoutExtension(file)}"">
@@ -80,15 +119,18 @@ public class CsharpBackend : ExecutableBackend {
       }
     }
 
+    var packageReferences = IncludeFrameworkPackageReferences
+      ? @"
+      <PackageReference Include=""System.Runtime.Numerics"" Version=""4.3.0"" />
+      <PackageReference Include=""System.Collections.Immutable"" Version=""1.7.1"" />"
+      : "";
     var itemGroup = @$"
   <ItemGroup>
-      {sourceFiles}
-      <PackageReference Include=""System.Runtime.Numerics"" Version=""4.3.0"" />
-      <PackageReference Include=""System.Collections.Immutable"" Version=""1.7.1"" />
+      {sourceFiles}{packageReferences}
       {itemGroupExtra}
   </ItemGroup>";
 
-    var projectFile = @$"<Project Sdk=""Microsoft.NET.Sdk"">
+    return @$"<Project Sdk=""Microsoft.NET.Sdk"">
 
   <PropertyGroup>
     <OutputType>{outputType}</OutputType>
@@ -103,24 +145,6 @@ public class CsharpBackend : ExecutableBackend {
   {itemGroup}
 </Project>
 ";
-
-    await File.WriteAllTextAsync(csprojPath, projectFile);
-
-    var arguments = new[] { "build", csprojPath, "-o", outputDir };
-    var psi = PrepareProcessStartInfo("dotnet", arguments);
-    var dotnetOutputWriter = new StringWriter();
-    var dotnetErrorWriter = new StringWriter();
-    var exitCode = await RunProcess(psi, dotnetOutputWriter, dotnetErrorWriter);
-    var dllPath = Path.Combine(outputDir, fileNames + ".dll");
-    if (exitCode != 0 || !File.Exists(dllPath)) {
-      await outputWriter.Status($@"Failed to compile C# source code using 'dotnet {string.Join(" ", arguments)}'. Command output was:" +
-                                dotnetOutputWriter.ToString() + dotnetErrorWriter.ToString());
-    } else {
-      if (Options.Verbose) {
-        await outputWriter.Status($"Compiled assembly into {Path.GetFileName(dllPath)}");
-      }
-    }
-    return (exitCode == 0, dllPath);
   }
 
   public override async Task<bool> RunTargetProgram(string dafnyProgramName, string targetProgramText,

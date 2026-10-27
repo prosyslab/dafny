@@ -23,6 +23,8 @@ using System.Linq;
 using Microsoft.Boogie;
 using Bpl = Microsoft.Boogie;
 using System.Diagnostics;
+using System.Threading;
+using DafnyTestGeneration.ContractTesting;
 using Microsoft.Dafny.Compilers;
 using Microsoft.Dafny.Plugins;
 using VC;
@@ -36,6 +38,9 @@ namespace Microsoft.Dafny {
   /// Will be replaced by CompilationManager
   /// </summary>
   public class SynchronousCliCompilation : IDisposable {
+    internal sealed record CompilationSettings(Action<string, string>? PhaseObserver,
+      CancellationToken CancellationToken, bool WriteGeneratedTargetFiles);
+
     private readonly ExecutionEngine engine;
 
     public SynchronousCliCompilation(DafnyOptions dafnyOptions) {
@@ -657,9 +662,16 @@ namespace Microsoft.Dafny {
     /// Generate a target language program from the Dafny program and, if "invokeCompiler" is "true", invoke
     /// the target language compiler to compile it.
     /// </summary>
-    public static async Task<bool> CompileDafnyProgram(Program dafnyProgram, string dafnyProgramName,
-                                           ReadOnlyCollection<string> otherFileNames, bool invokeCompiler,
-                                           IDafnyOutputWriter outputWriter = null) {
+    public static Task<bool> CompileDafnyProgram(Program dafnyProgram, string dafnyProgramName,
+      ReadOnlyCollection<string> otherFileNames, bool invokeCompiler, IDafnyOutputWriter outputWriter = null) =>
+      CompileDafnyProgram(dafnyProgram, dafnyProgramName, otherFileNames, invokeCompiler, outputWriter, null);
+
+    internal static async Task<bool> CompileDafnyProgram(Program dafnyProgram, string dafnyProgramName,
+      ReadOnlyCollection<string> otherFileNames, bool invokeCompiler, IDafnyOutputWriter outputWriter,
+      CompilationSettings? settings) {
+      var cancellationToken = settings?.CancellationToken ?? CancellationToken.None;
+      var phaseObserver = settings?.PhaseObserver;
+      cancellationToken.ThrowIfCancellationRequested();
       var rewriters = RewriterCollection.GetRewriters(dafnyProgram.Reporter, dafnyProgram);
       foreach (var rewriter in rewriters) {
         rewriter.PostVerification(dafnyProgram);
@@ -693,13 +705,18 @@ namespace Microsoft.Dafny {
         mainMethod.IsEntryPoint = true;
         dafnyProgram.MainMethod = mainMethod;
       }
-      string targetProgramText;
-      var otherFiles = new Dictionary<string, string>();
-      {
-        var output = new ConcreteSyntaxTree();
-
+      ConcreteSyntaxTree output = null;
+      await ContractPhaseRecorder.MeasureAsync(phaseObserver, "code_generation", cancellationToken, async () => {
+        cancellationToken.ThrowIfCancellationRequested();
+        output = new ConcreteSyntaxTree();
         await DafnyMain.LargeStackFactory.StartNew(() => compiler.Compile(dafnyProgram, dafnyProgramName, output));
+      });
 
+      string targetProgramText = null;
+      string callToMain = null;
+      var otherFiles = new Dictionary<string, string>();
+      ContractPhaseRecorder.Measure(phaseObserver, "target_render", cancellationToken, () => {
+        cancellationToken.ThrowIfCancellationRequested();
         var writerOptions = new WriterState();
         var targetProgramTextWriter = new StringWriter();
         var files = new Queue<FileSyntax>();
@@ -713,14 +730,14 @@ namespace Microsoft.Dafny {
           file.Tree.Render(otherFileWriter, 0, writerOptions, files, compiler.TargetIndentSize);
           otherFiles.Add(file.Filename, otherFileWriter.ToString());
         }
-      }
-      string callToMain = null;
-      if (hasMain) {
-        var callToMainTree = new ConcreteSyntaxTree();
-        string baseName = Path.GetFileNameWithoutExtension(dafnyProgramName);
-        compiler.EmitCallToMain(mainMethod, baseName, callToMainTree);
-        callToMain = callToMainTree.MakeString(compiler.TargetIndentSize); // assume there aren't multiple files just to call main
-      }
+        if (hasMain) {
+          var callToMainTree = new ConcreteSyntaxTree();
+          string baseName = Path.GetFileNameWithoutExtension(dafnyProgramName);
+          compiler.EmitCallToMain(mainMethod, baseName, callToMainTree);
+          callToMain = callToMainTree.MakeString(compiler.TargetIndentSize); // assume there aren't multiple files just to call main
+        }
+        return true;
+      });
       Contract.Assert(hasMain == (callToMain != null));
       bool targetProgramHasErrors = dafnyProgram.Reporter.Count(ErrorLevel.Error) != oldErrorCount;
 
@@ -730,10 +747,12 @@ namespace Microsoft.Dafny {
         return false;
       }
       // blurt out the code to a file, if requested, or if other target-language files were specified on the command line.
-      if (options.SpillTargetCode > 0 || otherFileNames.Count > 0 || (invokeCompiler && !compiler.SupportsInMemoryCompilation) ||
-          (invokeCompiler && compiler.TextualTargetIsExecutable && !options.RunAfterCompile)) {
+      if (ShouldWriteGeneratedTargetFiles(options, compiler, otherFileNames, invokeCompiler,
+            settings?.WriteGeneratedTargetFiles ?? true)) {
         compiler.CleanSourceDirectory(targetPaths.SourceDirectory);
-        await WriteDafnyProgramToFiles(options, targetPaths, targetProgramHasErrors, targetProgramText, callToMain, otherFiles, outputWriter);
+        await ContractPhaseRecorder.MeasureAsync(phaseObserver, "generated_write", cancellationToken,
+          () => WriteDafnyProgramToFiles(options, targetPaths, targetProgramHasErrors, targetProgramText,
+            callToMain, otherFiles, outputWriter));
       }
 
       var postGenerateFailed = !await compiler.OnPostGenerate(dafnyProgramName, targetPaths.SourceDirectory, outputWriter);
@@ -776,6 +795,13 @@ namespace Microsoft.Dafny {
       }
       return compiledCorrectly;
     }
+
+    internal static bool ShouldWriteGeneratedTargetFiles(DafnyOptions options, IExecutableBackend compiler,
+      ReadOnlyCollection<string> otherFileNames, bool invokeCompiler, bool writeGeneratedTargetFiles) =>
+      writeGeneratedTargetFiles &&
+      (options.SpillTargetCode > 0 || otherFileNames.Count > 0 ||
+       (invokeCompiler && !compiler.SupportsInMemoryCompilation) ||
+       (invokeCompiler && compiler.TextualTargetIsExecutable && !options.RunAfterCompile));
 
     #endregion
 

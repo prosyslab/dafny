@@ -90,7 +90,8 @@ namespace Microsoft.Dafny.Compilers {
         CsharpSynthesizer.EmitImports(wr);
       }
 
-      if (program.Options.SystemModuleTranslationMode != CommonOptionBag.SystemModuleMode.OmitAllOtherModules) {
+      if (EmitSerializedDafnySource &&
+          program.Options.SystemModuleTranslationMode != CommonOptionBag.SystemModuleMode.OmitAllOtherModules) {
         EmitDafnySourceAttribute(program, wr);
       }
 
@@ -105,6 +106,8 @@ namespace Microsoft.Dafny.Compilers {
         EmitCoverageReportInstrumentation(program, wr);
       }
     }
+
+    protected virtual bool EmitSerializedDafnySource => true;
 
     /// <summary>
     /// Return true if the AST contains a method annotated with an attribute

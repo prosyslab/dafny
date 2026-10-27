@@ -45,14 +45,18 @@ public abstract class ExecutableBackend : IExecutableBackend {
       }
     }
 
-    // Write out the translation record for THIS translation before compiling,
-    // in case the compilation process mutates the program.
-    var translationRecord = new TranslationRecord(dafnyProgram);
-    var baseName = Path.GetFileNameWithoutExtension(dafnyProgramName);
-    var dtrFilePath = dafnyProgram.Options.Get(TranslationRecordOutput)?.FullName ?? $"{baseName}-{TargetId}.dtr";
-    var dtrWriter = output.NewFile(dtrFilePath);
-    translationRecord.Write(dtrWriter);
+    if (EmitTranslationRecord) {
+      // Write out the translation record for THIS translation before compiling,
+      // in case the compilation process mutates the program.
+      var translationRecord = new TranslationRecord(dafnyProgram);
+      var baseName = Path.GetFileNameWithoutExtension(dafnyProgramName);
+      var dtrFilePath = dafnyProgram.Options.Get(TranslationRecordOutput)?.FullName ?? $"{baseName}-{TargetId}.dtr";
+      var dtrWriter = output.NewFile(dtrFilePath);
+      translationRecord.Write(dtrWriter);
+    }
   }
+
+  protected virtual bool EmitTranslationRecord => true;
 
   protected void CheckInstantiationReplaceableModules(Program dafnyProgram) {
     foreach (var compiledModule in dafnyProgram.Modules()) {
