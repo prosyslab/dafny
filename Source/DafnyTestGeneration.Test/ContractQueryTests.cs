@@ -58,7 +58,6 @@ public class ContractQueryTests {
 
   // Proof-only queries recover quantified proofs without using target counterexamples as concrete models.
   [Theory]
-  [InlineData("exists k:int :: result == 2*k", ContractQueryOutcome.Unsat)]
   [InlineData("forall n:int :: n <= result", ContractQueryOutcome.Sat)]
   [InlineData("!(forall n:int :: n <= result)", ContractQueryOutcome.Unsat)]
   [InlineData("exists k:int :: 10 / (result-result) == k", ContractQueryOutcome.Error)]
@@ -72,6 +71,20 @@ public class ContractQueryTests {
     var result = await ContractSolver.CheckAsync(source, ContractQueryKind.ClosedClause, options, cancellation.Token,
       deadlineTimestamp: ContractQueryDeadline.AfterMilliseconds(3000));
     Assert.True(result.Outcome == expected, result.Diagnostics);
+  }
+
+  // With the bundled solver the positive existential has no witness proof and stays residual instead of proved.
+  [Fact]
+  public async Task ProofOnlyPositiveExistentialStaysResidual() {
+    var options = new DafnyOptions(DafnyOptions.Default);
+    options.ApplyDefaultOptionsWithoutSettingsDefault();
+    options.TimeLimit = 3;
+    using var cancellation = new CancellationTokenSource(3000);
+    var result = await ContractSolver.CheckAsync("method ContractDiagnosticQuery(result:int) requires result == 4 " +
+      "{ assert {:error \"contract_query_target\"} exists k:int :: result == 2*k; }", ContractQueryKind.ClosedClause, options,
+      cancellation.Token, deadlineTimestamp: ContractQueryDeadline.AfterMilliseconds(3000));
+    Assert.True(result.Outcome == ContractQueryOutcome.Sat, result.Diagnostics);
+    Assert.Contains("decision=Residual", result.Diagnostics);
   }
 
   // A false nonlinear existential cannot turn into a valid proof through native proof pruning.
