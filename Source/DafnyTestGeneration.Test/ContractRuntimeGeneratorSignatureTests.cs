@@ -356,7 +356,7 @@ public class ContractRuntimeGeneratorSignatureTests {
 
     Assert.Contains("var pbtRandom0 := PbtRandom.New();", content, StringComparison.Ordinal);
     Assert.Contains("var receiver0, receiver := Generate(pbtRandom0);", content, StringComparison.Ordinal);
-    Assert.Contains("var pbtOutput00 := receiver0.Goal__pbt_goal(receiver);", content, StringComparison.Ordinal);
+    Assert.Contains("var pbtOutput00 := receiver0.Goal__pbt_goal(receiver := receiver);", content, StringComparison.Ordinal);
     Assert.Contains("\"receiver0\"", content, StringComparison.Ordinal);
     Assert.Contains("\"receiver\"", content, StringComparison.Ordinal);
     await Resolve(transformed.Sources, options);
@@ -415,7 +415,7 @@ public class ContractRuntimeGeneratorSignatureTests {
     await Resolve(transformed.Sources, options);
   }
 
-  // Runtime-main freshening does not exempt any other reserved diagnostic member family.
+  // Runtime-main freshening does not exempt any other reserved diagnostic member family reached by the goal.
   [Theory]
   [InlineData("PbtChecks")]
   [InlineData("PbtRandom")]
@@ -423,7 +423,7 @@ public class ContractRuntimeGeneratorSignatureTests {
   [InlineData("user__pbt_helper")]
   [InlineData("pbtTypeShape")]
   public async Task RejectsOtherReservedDiagnosticMemberNames(string reservedName) {
-    var source = "module M { method " + reservedName + "() {} method Goal() {} " +
+    var source = "module M { method " + reservedName + "() {} method Goal() { " + reservedName + "(); } " +
       "method {:pbt_generator \"M.Goal\"} Generate() {} }";
     var (_, options, sources) = await Parse(source);
     var preparedSources = WithRuntime(sources);
