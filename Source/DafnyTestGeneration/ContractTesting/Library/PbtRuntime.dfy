@@ -1,6 +1,7 @@
 // Runtime role: local checks, observation records and value encoding for generated runtime-check instrumentation.
 // These calls are inserted by the transformer, never written by a generator author; none contacts the parent process.
 module {:extern "DafnyPbtRuntime"} PbtRuntime {
+  import PbtRandom
   // Static API of DafnyPbtRuntime.Checks; records JSON lines to the file named by --pbt-out.
   class {:extern "DafnyPbtRuntime", "Checks"} PbtChecks {
     // Generated runtime-check instrumentation. Runtime role: records one executed contract check (id, iteration, verdict, named values as JSON fragments) and returns passed; on a failed "call_precondition:" check it first records complete, then ends the sample process with exit code 0.
@@ -31,6 +32,16 @@ module {:extern "DafnyPbtRuntime"} PbtRuntime {
     static method {:extern} Input(name: string, value: string)
     // Generated runtime-check instrumentation. Runtime role: records every member of a JSON object of generated inputs as one input record.
     static method {:extern} InputValues(values: string)
+    // Generated runtime-check instrumentation. Runtime role: registers the sample's existing seeded random stream for all bounded model searches.
+    static method {:extern} SetModelRandom(random: PbtRandom.Source)
+    // Generated runtime-check instrumentation. Runtime role: searches the complete mixed bool/int Cartesian domain from a reproducibly varied offset; bool slots use 0 or 1 in values.
+    static method {:extern} FindModel(kinds: seq<bool>, lower: int, upper: int, cap: int,
+      condition: (seq<int>) -> bool) returns (found: bool, values: seq<int>)
+    // Generated runtime-check instrumentation. Runtime role: records the selected bounded-model values and their finite domain.
+    static method {:extern} ModelChoice(phase: string, symbol: string, kinds: seq<bool>, lower: int, upper: int,
+      values: seq<int>)
+    // Generated runtime-check instrumentation. Runtime role: records bounded-search exhaustion with the current heap and ends this sample without recording completion.
+    static method {:extern} ModelExhausted(phase: string, symbol: string)
     // Generated runtime-check instrumentation. Runtime role: records a heap capture for phase ("entry" or "return") with outputs as JSON and the current observed heap.
     static method {:extern} CaptureHeap(phase: string, outputs: string)
     // Generated runtime-check instrumentation. Runtime role: records the heap on entry to a nested call (scope = callee name, inputs as JSON) and returns the new invocation number.

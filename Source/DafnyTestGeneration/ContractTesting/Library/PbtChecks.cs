@@ -1,6 +1,6 @@
 namespace DafnyPbtRuntime {
-  /// <summary>Records runtime check results, contract calls and heap captures as observation JSONL for the parent process.</summary>
-  public static class Checks {
+  /// <summary>Records runtime checks, contract calls, bounded model events and heap captures as observation JSONL.</summary>
+  public static partial class Checks {
     private static string currentLocation;
     private static int nextInvocation;
     private static readonly System.Collections.Generic.Stack<int> Calls = new();
@@ -130,11 +130,53 @@ namespace DafnyPbtRuntime {
     }
     public static void Generated() { Write(new { kind = "generated" }); }
     public static void Executed() { Write(new { kind = "executed" }); }
+    public static void ModelChoice(Dafny.ISequence<Dafny.Rune> phase, Dafny.ISequence<Dafny.Rune> symbol,
+        Dafny.ISequence<bool> kinds, System.Numerics.BigInteger lower, System.Numerics.BigInteger upper,
+        Dafny.ISequence<System.Numerics.BigInteger> values) {
+      if (kinds.Count != values.Count) {
+        throw new System.ArgumentException("Model kind and value counts must match.", nameof(values));
+      }
+      var domainKinds = new string[kinds.Count];
+      var selected = new object[kinds.Count];
+      for (var index = 0; index < kinds.Count; index++) {
+        var isBoolean = kinds.Select(index);
+        var value = values.Select(index);
+        if (isBoolean && value != System.Numerics.BigInteger.Zero && value != System.Numerics.BigInteger.One) {
+          throw new System.ArgumentOutOfRangeException(nameof(values), "Boolean model values must be encoded as 0 or 1.");
+        }
+        domainKinds[index] = isBoolean ? "bool" : "int";
+        selected[index] = isBoolean ? value == System.Numerics.BigInteger.One : JsonNumber(value);
+      }
+      Write(new {
+        kind = "model_choice",
+        phase = Text(phase),
+        symbol = Text(symbol),
+        domain = new {
+          kinds = domainKinds,
+          integer_lower = JsonNumber(lower),
+          integer_upper = JsonNumber(upper),
+          candidate_count = (int)ContractModels.DomainCardinality(kinds, lower, upper)
+        },
+        values = selected
+      });
+    }
+    public static void ModelExhausted(Dafny.ISequence<Dafny.Rune> phase, Dafny.ISequence<Dafny.Rune> symbol) {
+      Write(new {
+        kind = "model_exhausted",
+        phase = Text(phase),
+        symbol = Text(symbol),
+        heap = System.Text.Json.JsonDocument.Parse(Observation.RuntimeHeap()).RootElement
+      });
+      FlushProfile();
+      System.Environment.Exit(0);
+    }
     public static void Complete() { Write(new { kind = "complete" }); FlushProfile(); }
     public static bool Location(Dafny.ISequence<Dafny.Rune> location) { currentLocation = Text(location); return true; }
     public static void Stop() { Write(new { kind = "rejected" }); FlushProfile(); System.Environment.Exit(0); }
     public static void Unreachable() { throw new System.InvalidOperationException("unreachable scaffold executed"); }
     public static void UnreachableBody() { throw new System.InvalidOperationException("statically unreachable diagnostic body executed"); }
     public static T UnreachableValue<T>() { throw new System.InvalidOperationException("statically unreachable diagnostic body executed"); }
+    private static System.Text.Json.JsonElement JsonNumber(System.Numerics.BigInteger value) =>
+      System.Text.Json.JsonDocument.Parse(value.ToString(System.Globalization.CultureInfo.InvariantCulture)).RootElement.Clone();
   }
 }

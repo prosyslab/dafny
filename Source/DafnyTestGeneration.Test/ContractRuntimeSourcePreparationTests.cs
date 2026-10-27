@@ -165,6 +165,33 @@ public class ContractRuntimeSourcePreparationTests {
     await Resolve(prepared);
   }
 
+  // Native extern preparation leaves the bodyless declaration and its binding attributes unchanged.
+  [Fact]
+  public async Task PreservesBodylessExternForNativeExecution() {
+    const string source = "module M { method {:extern} {:axiom} Helper(x: int) returns (y: int) " +
+      "ensures y == x + 1 method Goal(x: int) returns (y: int) { y := Helper(x); } }";
+
+    var prepared = await Prepare(source, null, externExecution: ContractRuntimeExternExecution.Native);
+
+    Assert.Contains("{:extern}", prepared.Sources[0].Content);
+    Assert.Contains("{:axiom}", prepared.Sources[0].Content);
+    Assert.Empty(prepared.InstalledDraftSymbols);
+    await Resolve(prepared);
+  }
+
+  // Native extern preparation rejects a supplied body before parsing or removing the original binding attributes.
+  [Fact]
+  public async Task RejectsNativeExternDraft() {
+    const string source = "module M { method {:extern} {:axiom} Helper(x: int) returns (y: int) " +
+      "ensures y == x + 1 method Goal(x: int) returns (y: int) { y := Helper(x); } }";
+    const string draft = "method {:pbt_draft \"M.Helper\"} Helper(x: int) returns (y: int) { y := x + 1; }";
+
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => Prepare(source, draft,
+      externExecution: ContractRuntimeExternExecution.Native));
+
+    Assert.Contains("Native extern execution", error.Message);
+  }
+
   // Bodyless functions retain their original ensures while receiving the draft expression.
   [Fact]
   public async Task ReplacesBodylessFunction() {
@@ -254,19 +281,22 @@ public class ContractRuntimeSourcePreparationTests {
   }
 
   private static async Task<ContractRuntimePreparedSources> Prepare(string source, string? draft,
-    string generator = Generator, string draftSymbol = "M.Helper") {
-    return await Prepare([Snapshot("M.dfy", source)], "M.Goal", draft, generator, draftSymbol);
+    string generator = Generator, string draftSymbol = "M.Helper",
+    ContractRuntimeExternExecution externExecution = ContractRuntimeExternExecution.Draft) {
+    return await Prepare([Snapshot("M.dfy", source)], "M.Goal", draft, generator, draftSymbol, externExecution);
   }
 
   private static async Task<ContractRuntimePreparedSources> Prepare(IReadOnlyList<ContractSource> snapshots,
-    string goalSymbol, string? draft, string generator, string draftSymbol) {
+    string goalSymbol, string? draft, string generator, string draftSymbol,
+    ContractRuntimeExternExecution externExecution = ContractRuntimeExternExecution.Draft) {
     var drafts = draft == null ? Array.Empty<ContractRuntimeDraft>() :
       new[] { new ContractRuntimeDraft(draftSymbol, "Draft.dfy", draft, ContractHarnessBuilder.Hash(draft)) };
-    return await Prepare(snapshots, goalSymbol, drafts, generator);
+    return await Prepare(snapshots, goalSymbol, drafts, generator, externExecution);
   }
 
   private static async Task<ContractRuntimePreparedSources> Prepare(IReadOnlyList<ContractSource> snapshots,
-    string goalSymbol, IReadOnlyList<ContractRuntimeDraft> drafts, string generator) {
+    string goalSymbol, IReadOnlyList<ContractRuntimeDraft> drafts, string generator,
+    ContractRuntimeExternExecution externExecution = ContractRuntimeExternExecution.Draft) {
     var options = new DafnyOptions(DafnyOptions.Default);
     options.ApplyDefaultOptionsWithoutSettingsDefault();
     var reporter = new BatchErrorReporter(options);
@@ -274,7 +304,8 @@ public class ContractRuntimeSourcePreparationTests {
     Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(message => message.Message)));
     var goal = ContractCallableSelector.SelectMethod(program, new(goalSymbol), requireConcreteReceiver: false);
     return await ContractRuntimeSourcePreparation.PrepareAsync(program, snapshots, goal, drafts,
-      new("Generator.dfy", generator, ContractHarnessBuilder.Hash(generator)), options, CancellationToken.None);
+      new("Generator.dfy", generator, ContractHarnessBuilder.Hash(generator)), options, CancellationToken.None,
+      externExecution);
   }
 
   private static async Task InsertsBodylessCallableBeforeEarlierDraftHelperAtEof(bool function) {

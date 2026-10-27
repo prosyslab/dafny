@@ -120,22 +120,29 @@ public static class ContractRuntimeSourcePreparation {
 
   public static Task<ContractRuntimePreparedSources> PrepareAsync(Program program,
     IReadOnlyList<ContractSource> sources, Method goal, IReadOnlyList<ContractRuntimeDraft> drafts,
-    ContractSource generator, DafnyOptions options, CancellationToken cancellationToken) =>
-    PrepareCoreAsync(program, sources, goal, drafts, generator, options, cancellationToken, false);
+    ContractSource generator, DafnyOptions options, CancellationToken cancellationToken,
+    ContractRuntimeExternExecution externExecution = ContractRuntimeExternExecution.Draft) =>
+    PrepareCoreAsync(program, sources, goal, drafts, generator, options, cancellationToken, false, externExecution);
 
   internal static Task<ContractRuntimePreparedSources> PrepareSelectedAsync(Program program,
     IReadOnlyList<ContractSource> sources, Method goal, IReadOnlyList<ContractRuntimeDraft> drafts,
-    ContractSource generator, DafnyOptions options, CancellationToken cancellationToken) =>
-    PrepareCoreAsync(program, sources, goal, drafts, generator, options, cancellationToken, true);
+    ContractSource generator, DafnyOptions options, CancellationToken cancellationToken,
+    ContractRuntimeExternExecution externExecution = ContractRuntimeExternExecution.Draft) =>
+    PrepareCoreAsync(program, sources, goal, drafts, generator, options, cancellationToken, true, externExecution);
 
   internal static IReadOnlyDictionary<string, ContractRuntimeDraft> IndexDrafts(Program program,
-    IReadOnlyList<ContractRuntimeDraft> drafts) {
+    IReadOnlyList<ContractRuntimeDraft> drafts,
+    ContractRuntimeExternExecution externExecution = ContractRuntimeExternExecution.Draft) {
     var callables = Members(program).OfType<MethodOrFunction>().ToList();
     var indexed = new Dictionary<string, ContractRuntimeDraft>(StringComparer.Ordinal);
     foreach (var draft in drafts) {
       var targets = callables.Where(member => member.FullDafnyName == draft.Symbol || member.FullName == draft.Symbol).ToList();
       if (targets.Count != 1) {
         throw new NotSupportedException("Draft target must identify one callable: " + draft.Symbol);
+      }
+      if (IsNativeExtern(targets[0], program.Options, externExecution)) {
+        throw new NotSupportedException("Native extern execution does not accept a draft for " +
+          targets[0].FullDafnyName + ".");
       }
       if (!indexed.TryAdd(targets[0].FullDafnyName, draft)) {
         throw new ArgumentException("Duplicate draft for " + targets[0].FullDafnyName);
@@ -146,7 +153,15 @@ public static class ContractRuntimeSourcePreparation {
 
   private static async Task<ContractRuntimePreparedSources> PrepareCoreAsync(Program program,
     IReadOnlyList<ContractSource> sources, Method goal, IReadOnlyList<ContractRuntimeDraft> drafts,
-    ContractSource generator, DafnyOptions options, CancellationToken cancellationToken, bool classifyDraftFailures) {
+    ContractSource generator, DafnyOptions options, CancellationToken cancellationToken, bool classifyDraftFailures,
+    ContractRuntimeExternExecution externExecution) {
+    var modelPolicy = await ContractRuntimeContractModels.ReadPolicyAsync(generator, goal.FullDafnyName,
+      options, cancellationToken);
+    var models = goal.Body == null ? null : ContractRuntimeContractModels.Create(program, goal, modelPolicy);
+    var indexedDrafts = IndexDrafts(program, drafts, externExecution);
+    if (indexedDrafts.Keys.Any(symbol => models?.ExternSymbols.Contains(symbol) == true)) {
+      throw new NotSupportedException("A modeled extern cannot also have an executable draft.");
+    }
     var edits = new List<Edit>();
     var module = goal.EnclosingClass.EnclosingModuleDefinition;
     var source = ContractSourceSnapshot.Find(sources, goal.Origin.Uri);
@@ -199,7 +214,7 @@ public static class ContractRuntimeSourcePreparation {
         var candidate = marked[0];
         ValidateSignature(target, candidate);
         var targetSource = ContractSourceSnapshot.Find(sources, target.Origin.Uri);
-        if (!NeedsDraft(target)) {
+        if (!NeedsDraft(target, options, externExecution)) {
           continue;
         }
         var targetModule = target.EnclosingClass.EnclosingModuleDefinition;
@@ -309,12 +324,22 @@ public static class ContractRuntimeSourcePreparation {
   }
 
   // A bodyless trait member is implemented by class overrides and dispatched at run time; it is never drafted.
-  internal static bool NeedsDraft(MethodOrFunction target) => !(target.EnclosingClass is TraitDecl && !target.IsStatic) && target switch {
-    Method { Body: null } => true,
-    Method { Body.Body: [AssertStmt { Expr.Resolved: LiteralExpr { Value: false } }] } => true,
-    Function { Body: null } => true,
-    _ => false
-  };
+  internal static bool NeedsDraft(MethodOrFunction target, DafnyOptions options,
+    ContractRuntimeExternExecution externExecution = ContractRuntimeExternExecution.Draft) =>
+    !(target.EnclosingClass is TraitDecl && !target.IsStatic) &&
+    !IsNativeExtern(target, options, externExecution) && target switch {
+      Method { Body: null } => true,
+      Method { Body.Body: [AssertStmt { Expr.Resolved: LiteralExpr { Value: false } }] } => true,
+      Function { Body: null } => true,
+      _ => false
+    };
+
+  internal static bool IsNativeExtern(MethodOrFunction target, DafnyOptions options,
+    ContractRuntimeExternExecution externExecution) =>
+    externExecution == ContractRuntimeExternExecution.Native && !target.IsGhost &&
+    !(target.EnclosingClass is TraitDecl && !target.IsStatic) &&
+    (target is Method { Body: null } or Function { Body: null }) &&
+    target.IsExtern(options, out _, out _);
 
   private static void ValidateGenerator(Method goal, Method generator, ContractRuntimeGeneratorNames names) {
     var receiverCount = goal.IsStatic ? 0 : 1;

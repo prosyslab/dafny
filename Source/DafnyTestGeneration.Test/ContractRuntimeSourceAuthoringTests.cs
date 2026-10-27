@@ -120,6 +120,104 @@ public class ContractRuntimeSourceAuthoringTests {
     Assert.Contains("M.Goal", result.Reason);
   }
 
+  // A filled function expression survives preparation and extraction with its original contract intact.
+  [Fact]
+  public async Task ExtractsFilledFunctionDraft() {
+    const string source = "module M { " +
+      "function {:axiom} Helper(x: int): int ensures Helper(x) == x + 1 " +
+      "method Goal(x: int) returns (y: int) { y := Helper(x); } }";
+    var request = DraftRequest(ContractRuntimeAuthoringAction.Prepare, source, "M.Helper");
+    var prepared = await Run(request);
+    var authored = prepared.Sources!.Select(snapshot => snapshot.Path == "M.dfy"
+      ? Snapshot(snapshot.Path, ReplaceFunctionTodoAfter(
+        ReplaceTodoAfter(snapshot.Content, "method {:pbt_generator", "x := 0;"),
+        "Helper(x: int)", "x + 1"))
+      : snapshot).ToArray();
+
+    var result = await Run(request with {
+      Action = ContractRuntimeAuthoringAction.Extract,
+      AuthoredSources = authored,
+      Manifest = prepared.Manifest
+    });
+
+    Assert.Equal(ContractRuntimeAuthoringStatus.Extracted, result.Status);
+    var draft = Assert.Single(result.Drafts!);
+    Assert.Contains("ensures Helper(x) == x + 1", draft.Content);
+    var body = draft.Content.LastIndexOf("{ (", StringComparison.Ordinal);
+    Assert.True(body >= 0);
+    Assert.Contains("x + 1", draft.Content[body..]);
+    Assert.DoesNotContain("pbt-authoring", draft.Content, StringComparison.Ordinal);
+  }
+
+  // A filled predicate expression survives preparation and extraction as an ordinary draft packet.
+  [Fact]
+  public async Task ExtractsFilledPredicateDraft() {
+    const string source = "module M { predicate {:axiom} Allowed(x: int) " +
+      "method Goal(x: int) {} }";
+    var request = DraftRequest(ContractRuntimeAuthoringAction.Prepare, source, "M.Allowed");
+    var prepared = await Run(request);
+    var authored = prepared.Sources!.Select(snapshot => snapshot.Path == "M.dfy"
+      ? Snapshot(snapshot.Path, ReplaceFunctionTodoAfter(
+        ReplaceTodoAfter(snapshot.Content, "method {:pbt_generator", "x := 0;"),
+        "Allowed(x: int)", "x >= 0"))
+      : snapshot).ToArray();
+
+    var result = await Run(request with {
+      Action = ContractRuntimeAuthoringAction.Extract,
+      AuthoredSources = authored,
+      Manifest = prepared.Manifest
+    });
+
+    Assert.Equal(ContractRuntimeAuthoringStatus.Extracted, result.Status);
+    var draft = Assert.Single(result.Drafts!);
+    Assert.Contains("{:pbt_draft \"M.Allowed\"}", draft.Content);
+    var body = draft.Content.LastIndexOf("{ (", StringComparison.Ordinal);
+    Assert.True(body >= 0);
+    Assert.Contains("x >= 0", draft.Content[body..]);
+    Assert.DoesNotContain("pbt-authoring", draft.Content, StringComparison.Ordinal);
+  }
+
+  // An untouched function view reaches ordinary unfilled-template feedback with both regions present.
+  [Fact]
+  public async Task UnfilledFunctionViewReturnsUnsupported() {
+    const string source = "module M { function {:axiom} Helper(x: int): int " +
+      "method Goal(x: int) returns (y: int) { y := Helper(x); } }";
+    var request = DraftRequest(ContractRuntimeAuthoringAction.Prepare, source, "M.Helper");
+    var prepared = await Run(request);
+
+    var result = await Run(request with {
+      Action = ContractRuntimeAuthoringAction.Extract,
+      AuthoredSources = prepared.Sources,
+      Manifest = prepared.Manifest
+    });
+
+    Assert.Equal(ContractRuntimeAuthoringStatus.Unsupported, result.Status);
+    Assert.Contains("M.Helper", result.Reason);
+    Assert.Contains("M.Goal", result.Reason);
+  }
+
+  // Editing a function contract outside its expression region is rejected before extraction.
+  [Fact]
+  public async Task RejectsFunctionContractEdit() {
+    const string source = "module M { " +
+      "function {:axiom} Helper(x: int): int ensures Helper(x) == x + 1 " +
+      "method Goal(x: int) returns (y: int) { y := Helper(x); } }";
+    var request = DraftRequest(ContractRuntimeAuthoringAction.Prepare, source, "M.Helper");
+    var prepared = await Run(request);
+    var authored = prepared.Sources!.Select(snapshot => snapshot.Path == "M.dfy"
+      ? Snapshot(snapshot.Path, ReplaceAfter(snapshot.Content, "Helper(x: int)",
+        "ensures Helper(x) == x + 1", "ensures true"))
+      : snapshot).ToArray();
+
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => Run(request with {
+      Action = ContractRuntimeAuthoringAction.Extract,
+      AuthoredSources = authored,
+      Manifest = prepared.Manifest
+    }));
+
+    Assert.Contains("signature, contract", error.Message);
+  }
+
   // A concrete source body takes precedence and is not exposed as an editable draft region.
   [Fact]
   public async Task ConcreteBodyTakesPrecedenceOverRequestedDraft() {
@@ -160,13 +258,13 @@ public class ContractRuntimeSourceAuthoringTests {
   [Fact]
   public async Task ExactPlaceholderDoesNotRejectOriginalPrefixIdentifier() {
     const string source = "module M { " +
-      "predicate PbtAuthoringTODO_Predicate(x: int) { x >= 0 } " +
       "method Helper(x: int) returns (y: int) ensures y == x + 1 { assert false; } " +
-      "method Goal(x: int) returns (y: int) requires PbtAuthoringTODO_Predicate(x) " +
-      "ensures y == x + 1 { y := Helper(x); } }";
+      "method Goal(PbtAuthoringTODO_x: int) returns (y: int) requires PbtAuthoringTODO_x >= 0 " +
+      "ensures y == PbtAuthoringTODO_x + 1 { y := Helper(PbtAuthoringTODO_x); } }";
     var prepared = await Run(Request(ContractRuntimeAuthoringAction.Prepare, source));
     var authored = prepared.Sources!.Select(snapshot => snapshot.Path == "M.dfy"
-      ? Snapshot(snapshot.Path, Author(snapshot.Content)) : snapshot).ToArray();
+      ? Snapshot(snapshot.Path, ReplaceTodoAfter(ReplaceTodoAfter(snapshot.Content,
+        "method {:pbt_generator", "PbtAuthoringTODO_x := 1;"), "method Helper", "y := x + 1;")) : snapshot).ToArray();
 
     var result = await Run(Request(ContractRuntimeAuthoringAction.Extract, source) with {
       AuthoredSources = authored,
@@ -174,7 +272,7 @@ public class ContractRuntimeSourceAuthoringTests {
     });
 
     Assert.Equal(ContractRuntimeAuthoringStatus.Extracted, result.Status);
-    Assert.Contains("PbtAuthoringTODO_Predicate", result.Generator!.Content);
+    Assert.Contains("PbtAuthoringTODO_x", result.Generator!.Content);
   }
 
   // Authoring requests reject resolver aliases so manifest symbols stay canonical across the wire.
@@ -331,6 +429,137 @@ public class ContractRuntimeSourceAuthoringTests {
     Assert.Contains("\"status\":\"ready\"", json);
   }
 
+  // Native authoring uses schema two and an explicit mode while legacy schema one keeps the field absent.
+  [Fact]
+  public void AuthoringWireUsesStrictExternExecutionShapes() {
+    var legacy = Request(ContractRuntimeAuthoringAction.Prepare);
+    var native = legacy with {
+      SchemaVersion = ContractRuntimeSourceAuthoring.NativeSchemaVersion,
+      ExternExecution = ContractRuntimeExternExecution.Native
+    };
+    using var legacyJson = JsonDocument.Parse(JsonSerializer.Serialize(legacy, ContractJson.Options));
+    using var nativeJson = JsonDocument.Parse(JsonSerializer.Serialize(native, ContractJson.Options));
+
+    Assert.False(legacyJson.RootElement.TryGetProperty("externExecution", out _));
+    Assert.Equal("native", nativeJson.RootElement.GetProperty("externExecution").GetString());
+  }
+
+  // Legacy authoring rejects an explicit draft value so schema one retains its original omitted field shape.
+  [Fact]
+  public async Task LegacyAuthoringRejectsExplicitExternMode() {
+    var request = Request(ContractRuntimeAuthoringAction.Prepare) with {
+      ExternExecution = ContractRuntimeExternExecution.Draft
+    };
+
+    var error = await Assert.ThrowsAsync<ArgumentException>(() => Run(request));
+
+    Assert.Contains("schema", error.Message);
+  }
+
+  // Schema two draft authoring replaces an extern body and extracts packets bound to that policy.
+  [Fact]
+  public async Task DraftAuthoringPreparesAndExtractsExternUnderSchemaTwo() {
+    const string source = "module M { method {:extern} {:axiom} Helper(x: int) returns (y: int) " +
+      "ensures y == x + 1 method Goal(x: int) returns (y: int) { y := Helper(x); } }";
+    var request = Request(ContractRuntimeAuthoringAction.Prepare, source) with {
+      SchemaVersion = ContractRuntimeSourceAuthoring.NativeSchemaVersion,
+      ExternExecution = ContractRuntimeExternExecution.Draft
+    };
+    var prepared = await Run(request);
+    Assert.Equal(ContractRuntimeAuthoringStatus.Ready, prepared.Status);
+    Assert.Equal(ContractRuntimeSourceAuthoring.NativeSchemaVersion, prepared.SchemaVersion);
+    Assert.Equal(ContractRuntimeExternExecution.Draft, prepared.Manifest!.ExternExecution);
+    Assert.Equal(new[] { "M.Helper" }, prepared.Manifest.DraftSymbols);
+    var authored = prepared.Sources!.Select(snapshot => snapshot.Path == "M.dfy"
+      ? Snapshot(snapshot.Path, ReplaceTodoAfter(ReplaceTodoAfter(snapshot.Content,
+        "Helper(x: int)", "y := x + 1;"), "method {:pbt_generator", "x := 0;"))
+      : snapshot).ToArray();
+
+    var result = await Run(request with {
+      Action = ContractRuntimeAuthoringAction.Extract,
+      AuthoredSources = authored,
+      Manifest = prepared.Manifest
+    });
+
+    Assert.Equal(ContractRuntimeAuthoringStatus.Extracted, result.Status);
+    Assert.Equal(ContractRuntimeSourceAuthoring.NativeSchemaVersion, result.SchemaVersion);
+    var draft = Assert.Single(result.Drafts!);
+    Assert.Equal("M.Helper", draft.Symbol);
+    Assert.Contains("ensures y == x + 1", draft.Content);
+    Assert.Contains("y := x + 1;", draft.Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(draft.Content), draft.Sha256);
+    Assert.Contains("x := 0;", result.Generator!.Content);
+    Assert.Equal(ContractHarnessBuilder.Hash(result.Generator.Content), result.Generator.Sha256);
+  }
+
+  // Native authoring preserves a reachable extern declaration and binds that policy into the manifest.
+  [Fact]
+  public async Task NativeAuthoringPreservesExternAndBindsManifest() {
+    const string source = "module M { method {:extern} {:axiom} Helper(x: int) returns (y: int) " +
+      "ensures y == x method Goal(x: int) returns (y: int) { y := Helper(x); } }";
+    var request = new ContractRuntimeAuthoringRequest(ContractRuntimeSourceAuthoring.NativeSchemaVersion,
+      ContractRuntimeAuthoringAction.Prepare, [Snapshot("M.dfy", source)], new("M.Goal"),
+      ExternExecution: ContractRuntimeExternExecution.Native);
+
+    var result = await Run(request);
+
+    Assert.Equal(ContractRuntimeSourceAuthoring.NativeSchemaVersion, result.SchemaVersion);
+    Assert.Equal(ContractRuntimeExternExecution.Native, result.Manifest!.ExternExecution);
+    Assert.Empty(result.Manifest.DraftSymbols);
+    var view = Assert.Single(result.Sources!, item => item.Path == "M.dfy").Content;
+    Assert.Contains("{:extern}", view);
+    Assert.Contains("{:axiom}", view);
+    Assert.DoesNotContain("draft-body", view, StringComparison.Ordinal);
+  }
+
+  // Native authoring rejects an explicit request to replace an extern with an editable draft.
+  [Fact]
+  public async Task NativeAuthoringRejectsRequestedExternDraft() {
+    const string source = "module M { method {:extern} Helper() method Goal() { Helper(); } }";
+    var request = new ContractRuntimeAuthoringRequest(ContractRuntimeSourceAuthoring.NativeSchemaVersion,
+      ContractRuntimeAuthoringAction.Prepare, [Snapshot("M.dfy", source)], new("M.Goal"),
+      RequestedDraftSymbols: ["M.Helper"], ExternExecution: ContractRuntimeExternExecution.Native);
+
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => Run(request));
+
+    Assert.Contains("requested draft", error.Message);
+  }
+
+  // Native authoring rejects an unreachable supplied extern draft before active-layout filtering.
+  [Fact]
+  public async Task NativeAuthoringRejectsUnreachableSuppliedExternDraft() {
+    const string source = "module M { method {:extern} Unused() method Goal() {} }";
+    const string content = "method {:pbt_draft \"M.Unused\"} Unused() {}";
+    var draft = new ContractRuntimeDraft("M.Unused", ".top-down-pbt/drafts/M.Unused.dfy", content,
+      ContractHarnessBuilder.Hash(content));
+    var request = new ContractRuntimeAuthoringRequest(ContractRuntimeSourceAuthoring.NativeSchemaVersion,
+      ContractRuntimeAuthoringAction.Prepare, [Snapshot("M.dfy", source)], new("M.Goal"), Drafts: [draft],
+      ExternExecution: ContractRuntimeExternExecution.Native);
+
+    var error = await Assert.ThrowsAsync<NotSupportedException>(() => Run(request));
+
+    Assert.Contains("Native extern execution", error.Message);
+  }
+
+  // Schema two extraction rejects a draft request reusing a manifest prepared under native extern policy.
+  [Fact]
+  public async Task AuthoringManifestRejectsExternPolicyChange() {
+    const string source = "module M { method {:extern} Helper() method Goal() { Helper(); } }";
+    var native = new ContractRuntimeAuthoringRequest(ContractRuntimeSourceAuthoring.NativeSchemaVersion,
+      ContractRuntimeAuthoringAction.Prepare, [Snapshot("M.dfy", source)], new("M.Goal"),
+      ExternExecution: ContractRuntimeExternExecution.Native);
+    var prepared = await Run(native);
+
+    var error = await Assert.ThrowsAsync<ArgumentException>(() => Run(native with {
+      Action = ContractRuntimeAuthoringAction.Extract,
+      AuthoredSources = prepared.Sources,
+      Manifest = prepared.Manifest,
+      ExternExecution = ContractRuntimeExternExecution.Draft
+    }));
+
+    Assert.Contains("manifest", error.Message);
+  }
+
   private static string Author(string content) {
     content = ReplaceTodoAfter(content, "method {:pbt_generator", "x := Seed();");
     content = ReplaceTodoAfter(content, "method Helper", "y := x + 1;");
@@ -351,6 +580,16 @@ public class ContractRuntimeSourceAuthoringTests {
     var end = content.IndexOf("();", start, StringComparison.Ordinal);
     Assert.True(body >= 0 && start >= 0 && end > start);
     return content[..start] + replacement + content[(end + 3)..];
+  }
+
+  private static string ReplaceFunctionTodoAfter(string content, string declaration, string replacement) {
+    var owner = content.IndexOf(declaration, StringComparison.Ordinal);
+    Assert.True(owner >= 0);
+    var body = content.IndexOf("-body-begin */", owner, StringComparison.Ordinal);
+    var start = content.IndexOf("PbtAuthoringTODO_", body, StringComparison.Ordinal);
+    var end = content.IndexOf('\n', start);
+    Assert.True(body >= 0 && start >= 0 && end > start);
+    return content[..start] + replacement + content[end..];
   }
 
   private static string TodoAfter(string content, string declaration) {
@@ -378,6 +617,10 @@ public class ContractRuntimeSourceAuthoringTests {
   private static ContractRuntimeAuthoringRequest Request(ContractRuntimeAuthoringAction action,
     string source = Source) => new(1, action, [Snapshot("M.dfy", source)], new("M.Goal"),
       RequestedDraftSymbols: ["M.Helper"], TimeoutMilliseconds: 30000);
+
+  private static ContractRuntimeAuthoringRequest DraftRequest(ContractRuntimeAuthoringAction action,
+    string source, string symbol) => new(1, action, [Snapshot("M.dfy", source)], new("M.Goal"),
+      RequestedDraftSymbols: [symbol], TimeoutMilliseconds: 30000);
 
   private static ContractSource Snapshot(string path, string content) =>
     new(path, content, ContractHarnessBuilder.Hash(content));

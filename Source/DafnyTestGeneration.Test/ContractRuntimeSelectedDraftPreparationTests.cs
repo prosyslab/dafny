@@ -55,13 +55,16 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
     sources.Append(Snapshot("PbtRuntime.dfy", ContractRuntimeInstrumentation.DafnySource)).ToArray();
 
   private static async Task<ContractRuntimeSelectedDraftSources> Prepare(string source,
-    IReadOnlyList<ContractRuntimeDraft> drafts, string generator = Generator, bool proof = false, ContractEntry? entry = null) {
+    IReadOnlyList<ContractRuntimeDraft> drafts, string generator = Generator, bool proof = false,
+    ContractEntry? entry = null, DafnyOptions? options = null, Action<string, string>? phaseObserver = null,
+    CancellationToken cancellationToken = default) {
     ContractSource[] sources = [Snapshot("Target.dfy", source)];
     var original = await Parse(sources);
     var goal = entry == null ? Method(original, "M.Goal") :
       ContractCallableSelector.SelectMethod(original, entry, requireConcreteReceiver: false, allowLemmaContract: true);
     return await ContractRuntimeSelectedDraftPreparation.PrepareAsync(original, sources, goal,
-      drafts, Snapshot("Generator.dfy", generator), proof, Options(), CancellationToken.None, selectedEntry: entry);
+      drafts, Snapshot("Generator.dfy", generator), proof, options ?? Options(), cancellationToken,
+      phaseObserver, selectedEntry: entry);
   }
 
   private static async Task<(Program Program, IReadOnlyList<ContractSource> Sources)> Runtime(
@@ -84,6 +87,27 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
     Assert.NotNull(build);
     var proof = await Parse(build!.Sources);
     return (proof, Method(proof, "M.Generate"), build.Sources);
+  }
+
+  // Preparation retains the exact resolved runtime source set, Program, options and deferred diagnostics as one bundle.
+  [Fact]
+  public async Task RetainsResolvedRuntimeBundle() {
+    var options = Options();
+    var prepared = await Prepare(Source, [
+      Draft("M.Helper", "method {:pbt_draft \"M.Helper\"} Helper(x: int) returns (y: int) { y := x; }")
+    ], options: options);
+    var independentlyResolved = await Runtime(prepared.Preparation);
+
+    Assert.Same(prepared.Preparation, prepared.Runtime.Preparation);
+    Assert.Same(options, prepared.Runtime.RuntimeProgram.Options);
+    Assert.Equal(ContractRuntimeTypeEvidence.SourceSetHash(independentlyResolved.Sources),
+      ContractRuntimeTypeEvidence.SourceSetHash(prepared.Runtime.RuntimeSources));
+    Assert.Equal(prepared.Runtime.RuntimeSources.Select(source => source.Path),
+      independentlyResolved.Sources.Select(source => source.Path));
+    Assert.Empty(prepared.Runtime.DeferredGhostDiagnostics);
+    Assert.Same(Method(prepared.Runtime.RuntimeProgram, "M.Goal"),
+      ContractCallableSelector.SelectMethod(prepared.Runtime.RuntimeProgram, new("M.Goal"),
+        requireConcreteReceiver: false));
   }
 
   // A syntactically broken unrelated registered packet never reaches the selected source parser.
@@ -375,12 +399,18 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
 
     Assert.Null(prepared.ProofPreparationFailure);
     Assert.Equal(new[] { "M.FirstProof", "M.SecondProof", "M.Value" }, prepared.Preparation.InstalledDraftSymbols.OrderBy(symbol => symbol));
+    Assert.Same(prepared.Preparation, prepared.Runtime.Preparation);
+    var independentlyResolved = await Runtime(prepared.Preparation);
+    Assert.Equal(ContractRuntimeTypeEvidence.SourceSetHash(independentlyResolved.Sources),
+      ContractRuntimeTypeEvidence.SourceSetHash(prepared.Runtime.RuntimeSources));
+    Assert.Same(Method(prepared.Runtime.RuntimeProgram, "M.Goal"),
+      ContractCallableSelector.SelectMethod(prepared.Runtime.RuntimeProgram, new("M.Goal"),
+        requireConcreteReceiver: false));
     var authored = await Parse(WithRuntime(prepared.Preparation.Sources));
     Assert.Contains(Method(authored, "M.FirstProof").Body!.Descendants().OfType<CallStmt>(),
       call => ReferenceEquals(call.Method, Method(authored, "M.SecondProof")));
-    var runtime = await Runtime(prepared.Preparation);
     var authenticated = await ContractGeneratorProof.AuthoredProofSourcesAsync(prepared.Preparation.Sources,
-      runtime.Sources, Options(), CancellationToken.None);
+      prepared.Runtime.RuntimeSources, Options(), CancellationToken.None);
     Assert.NotNull(authenticated);
     Assert.Equal(ContractRuntimeTypeEvidence.SourceSetHash(WithRuntime(prepared.Preparation.Sources)),
       ContractRuntimeTypeEvidence.SourceSetHash(authenticated!));
@@ -432,7 +462,7 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
     Assert.Contains(scopes, scope => scope.ContainsDeclaration(call.Method));
   }
 
-  // Generic call bindings survive synthesis while the original and generated raw sources retain the same unsupported-type-parameter policy.
+  // Generic proof-call bindings survive synthesis and remain inside the successful audited proof scope.
   [Fact]
   public async Task PreservesGenericGeneratorEnsuresProofCallTypeArgument() {
     const string source = "module M { lemma ContractProof<T>(x: int) method Goal(x: int) requires x >= 0 {} }";
@@ -454,11 +484,48 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
     var random = ContractGeneratorProof.ExtractPinnedPbtRandomSource();
     var failure = ContractGeneratorProofAudit.AuditRawProgram(raw, proof.Sources, proofGenerator.Origin.Uri,
       proofGenerator.Name, Method(proof.Program, "M.Goal").FullDafnyName, random);
-    Assert.Equal("Unsupported top-level declaration in retained source theory: TypeParameter T", failure);
+    Assert.Null(failure);
     var originalSources = prepared.Preparation.Sources.Append(Snapshot("PbtRandom.dfy", random)).ToArray();
     var original = await Parse(originalSources, resolve: false);
-    Assert.Equal(failure, ContractGeneratorProofAudit.AuditRawProgram(original, originalSources, proofGenerator.Origin.Uri,
+    Assert.Null(ContractGeneratorProofAudit.AuditRawProgram(original, originalSources, proofGenerator.Origin.Uri,
       proofGenerator.Name, Method(proof.Program, "M.Goal").FullDafnyName, random));
+    var scopes = ContractGeneratorProof.ProofScopes(proof.Program, proof.Sources, Method(proof.Program, "M.Goal"),
+      proofGenerator, random);
+    Assert.All(scopes, scope => Assert.Null(scope.Failure));
+    Assert.Contains(scopes, scope => scope.ContainsDeclaration(call.Method));
+  }
+
+  // Unrelated generic runtime methods remain source-audited without entering the generator proof dependency scopes.
+  [Fact]
+  public async Task AllowsUnrelatedGenericRuntimeMethodsInRetainedProofSource() {
+    const string source = "module M { method Relay<T>(x: T) returns (y: T) { y := x; } " +
+      "method Unused() { var y := Relay<int>(0); } " +
+      "method Goal(x: int) returns (y: int) requires x >= 0 ensures y == x }";
+    var prepared = await Prepare(source, [
+      Draft("M.Goal", "method {:pbt_draft \"M.Goal\"} Goal(x: int) returns (y: int) { y := Relay<int>(x); }")
+    ], proof: true);
+
+    Assert.Null(prepared.ProofPreparationFailure);
+    Assert.Equal(new[] { "M.Goal" }, prepared.Preparation.InstalledDraftSymbols);
+    var proof = await DirectProof(prepared.Preparation);
+    var goal = Method(proof.Program, "M.Goal");
+    var relay = Method(proof.Program, "M.Relay");
+    var unused = Method(proof.Program, "M.Unused");
+    Assert.Single(goal.Req);
+    Assert.Single(goal.Ens);
+    Assert.Contains(goal.Body!.Descendants().OfType<CallStmt>(), call => call.Method == relay);
+    Assert.Contains(unused.Body!.Descendants().OfType<CallStmt>(), call => call.Method == relay);
+    var random = ContractGeneratorProof.ExtractPinnedPbtRandomSource();
+    var raw = await Parse(proof.Sources, resolve: false);
+    var proofGenerator = Method(proof.Program, "M.Generate");
+    var failure = ContractGeneratorProofAudit.AuditRawProgram(raw, proof.Sources, proofGenerator.Origin.Uri,
+      proofGenerator.Name, goal.FullDafnyName, random);
+    Assert.Null(failure);
+    var audit = ContractGeneratorProofAudit.BindResolved(proof.Program, proof.Sources, failure, random);
+    var scopes = ContractGeneratorProof.ProofScopes(proof.Program, proof.Sources, goal, proofGenerator, random);
+    Assert.All(scopes, scope => Assert.Null(scope.Failure));
+    Assert.DoesNotContain(scopes, scope => scope.ContainsDeclaration(relay));
+    Assert.True(audit.IsBoundTo(proof.Program, proof.Sources));
   }
 
   // Every retained ambient logical function remains a proof root, including its newly introduced proof-method calls.
@@ -487,6 +554,74 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
     Assert.Contains(scopes, scope => scope.ContainsDeclaration(Method(proofProgram, "M.AmbientProof")));
   }
 
+  // A visible mutable-field requirement stops proof preparation after the reusable runtime resolve.
+  [Fact]
+  public async Task RejectsVisibleHeapProofBeforeAuthoredPreparation() {
+    const string source = "module M { class Cell { var value: int } const cell: Cell? " +
+      "method Goal(x: int) requires cell == null || cell.value >= 0 {} }";
+    var phases = new List<(string Phase, string State)>();
+    var prepared = await Prepare(source, [], proof: true,
+      phaseObserver: (phase, state) => phases.Add((phase, state)));
+    var report = Assert.IsType<ContractGeneratorProofReport>(prepared.ProofPreparationFailure);
+
+    Assert.Equal(ContractGeneratorProofStatus.Unsupported, report.Status);
+    Assert.Contains("mutable heap fields", report.Diagnostics, StringComparison.Ordinal);
+    Assert.Equal(1, phases.Count(phase => phase == ("resolve", "started")));
+    Assert.Same(prepared.Preparation, prepared.Runtime.Preparation);
+    Assert.Same(Method(prepared.Runtime.RuntimeProgram, "M.Goal"),
+      ContractCallableSelector.SelectMethod(prepared.Runtime.RuntimeProgram, new("M.Goal"),
+        requireConcreteReceiver: false));
+  }
+
+  // An instance receiver stops proof preparation after the reusable runtime resolve.
+  [Fact]
+  public async Task RejectsReceiverProofBeforeAuthoredPreparation() {
+    const string source = "module M { class C { constructor() {} method Goal(x: int) requires x >= 0 {} } }";
+    const string generator = "method {:pbt_generator \"M.C.Goal\"} Generate(r: PbtRandom.Source) " +
+      "returns (receiver: C, x: int) { receiver := new C(); x := 0; }";
+    var phases = new List<(string Phase, string State)>();
+    var prepared = await Prepare(source, [], generator, proof: true, entry: new("M.C.Goal"),
+      phaseObserver: (phase, state) => phases.Add((phase, state)));
+    var report = Assert.IsType<ContractGeneratorProofReport>(prepared.ProofPreparationFailure);
+
+    Assert.Equal(ContractGeneratorProofStatus.Unsupported, report.Status);
+    Assert.Contains("receiver and heap proofs", report.Diagnostics, StringComparison.Ordinal);
+    Assert.Equal(1, phases.Count(phase => phase == ("resolve", "started")));
+    Assert.Same(prepared.Preparation, prepared.Runtime.Preparation);
+  }
+
+  // Cancellation reported by the final runtime resolve takes precedence over an early unsupported receiver result.
+  [Fact]
+  public async Task PreservesCancellationBeforeEarlyProofRejection() {
+    const string source = "module M { class C { method Goal(x: int) requires x >= 0 {} } }";
+    const string generator = "method {:pbt_generator \"M.C.Goal\"} Generate(r: PbtRandom.Source) " +
+      "returns (receiver: C, x: int) { receiver := new C; x := 0; }";
+    using var cancellation = new CancellationTokenSource();
+
+    await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Prepare(source, [], generator, proof: true,
+      entry: new("M.C.Goal"), phaseObserver: (phase, state) => {
+        if (phase == "resolve" && state == "completed") { cancellation.Cancel(); }
+      }, cancellationToken: cancellation.Token));
+  }
+
+  // A heap edge hidden by runtime ghost-body erasure still reaches the authoritative authored proof check.
+  [Fact]
+  public async Task RetainsAuthoredHeapCheckAfterEarlyGatePasses() {
+    const string source = "module M { class Cell { var value: int } const cell: Cell? " +
+      "function Read(): int reads cell { if cell == null then 0 else cell.value } " +
+      "lemma Proof() { assert Read() >= 0; } function Check(): bool { Proof(); true } " +
+      "method Goal(x: int) requires Check() {} }";
+    var phases = new List<(string Phase, string State)>();
+    var prepared = await Prepare(source, [], proof: true,
+      phaseObserver: (phase, state) => phases.Add((phase, state)));
+    var report = Assert.IsType<ContractGeneratorProofReport>(prepared.ProofPreparationFailure);
+
+    Assert.Equal(ContractGeneratorProofStatus.Unsupported, report.Status);
+    Assert.Contains("requirement functions", report.Diagnostics, StringComparison.Ordinal);
+    Assert.Equal(2, phases.Count(phase => phase == ("resolve", "started")));
+    Assert.Same(prepared.Preparation, prepared.Runtime.Preparation);
+  }
+
   // Invalid proof-only syntax produces explicit failure evidence while the valid runtime retains its entry condition.
   [Fact]
   public async Task RollsBackMalformedProofOnlyPacketAndKeepsEntryChecks() {
@@ -502,10 +637,11 @@ public sealed class ContractRuntimeSelectedDraftPreparationTests {
     Assert.Empty(report.CoveredNativeChecks);
     Assert.Null(report.VerifiedCertificate);
     Assert.Empty(prepared.Preparation.InstalledDraftSymbols);
-    var runtime = await Runtime(prepared.Preparation);
-    var goal = Method(runtime.Program, "M.Goal");
-    var generated = ContractRuntimeGeneratorSignature.Select(runtime.Program, goal, prepared.Preparation.GeneratorMethodName);
-    var transformed = new ContractRuntimeObligationTransformer(runtime.Program, runtime.Sources, goal,
+    var goal = Method(prepared.Runtime.RuntimeProgram, "M.Goal");
+    var generated = ContractRuntimeGeneratorSignature.Select(prepared.Runtime.RuntimeProgram, goal,
+      prepared.Preparation.GeneratorMethodName);
+    var transformed = new ContractRuntimeObligationTransformer(prepared.Runtime.RuntimeProgram,
+      prepared.Runtime.RuntimeSources, goal,
       prepared.Preparation.SourceMap, generatorProof: report, selectedGenerator: generated).Transform();
     Assert.False(transformed.EntryRequiresOmitted);
     Assert.Contains(transformed.Clauses, clause => clause.Obligation.Kind == ContractRuntimeObligationKind.EntryPrecondition && !clause.TypeConstraint);

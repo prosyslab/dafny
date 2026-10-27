@@ -16,7 +16,9 @@ public sealed record ContractRuntimeAuthoringManifest(
   [property: JsonRequired] IReadOnlyList<ContractDependency> PreparedSources,
   [property: JsonRequired] IReadOnlyList<string> DraftSymbols,
   string? GeneratorSymbol = null,
-  ContractDependency? RuntimeSource = null);
+  ContractDependency? RuntimeSource = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  ContractRuntimeExternExecution? ExternExecution = null);
 
 /// <summary>One additive native request for preparing or extracting a runtime source view.</summary>
 public sealed record ContractRuntimeAuthoringRequest(
@@ -30,7 +32,9 @@ public sealed record ContractRuntimeAuthoringRequest(
   IReadOnlyList<ContractSource>? AuthoredSources = null,
   ContractRuntimeAuthoringManifest? Manifest = null,
   int TimeoutMilliseconds = 30000,
-  IReadOnlyList<ContractDependency>? TrustedSources = null);
+  IReadOnlyList<ContractDependency>? TrustedSources = null,
+  [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  ContractRuntimeExternExecution? ExternExecution = null);
 
 /// <summary>Returns exact view snapshots or extracted legacy campaign packets.</summary>
 public sealed record ContractRuntimeAuthoringResult(

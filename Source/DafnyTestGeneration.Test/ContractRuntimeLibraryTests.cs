@@ -13,8 +13,8 @@ using Xunit;
 namespace DafnyTestGeneration.Test;
 
 public class ContractRuntimeLibraryTests {
-  // SHA-256 of the Dafny text pinned after the Runtime/Smt role renaming; changing the file changes source-set hashes.
-  private const string DafnySourceSha256 = "adcd11f333a7086255e3736b212dbd613737f7b6af084f64f86545cf76d5425e";
+  // SHA-256 of the checked-in Dafny runtime declarations; changing the file changes source-set hashes.
+  private const string DafnySourceSha256 = "8965d7933db0ad93747efd23d8286b1b8d6335f7f1300ec5070b90da44116c15";
 
   private static string Sha256(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
 

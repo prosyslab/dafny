@@ -6,9 +6,9 @@ using Microsoft.Dafny;
 
 namespace DafnyTestGeneration.ContractTesting;
 
-/// <summary>Supplies the diagnostic-only random stream and append-only runtime check recorder.</summary>
+/// <summary>Supplies the diagnostic-only random stream, bounded contract model search and append-only runtime recorder.</summary>
 public static class ContractRuntimeInstrumentation {
-  /// <summary>Dafny declarations of the diagnostic random stream and runtime check recorder, loaded from the checked-in library.</summary>
+  /// <summary>Dafny declarations of the diagnostic random stream, bounded model search and runtime recorder.</summary>
   public static readonly string DafnySource = ContractRuntimeLibrary.ReadWithoutTerminator("PbtRuntime.dfy");
 
   /// <summary>Returns the C# text compiled beside the diagnostic program: the checked-in library plus the per-task configuration class.</summary>
@@ -57,7 +57,8 @@ public static class ContractRuntimeInstrumentation {
       }
       }
 
-      """ + "\n" + ContractRuntimeLibrary.Read("PbtChecks.cs") + ContractRuntimeLibrary.Read("PbtRandom.cs");
+      """ + "\n" + ContractRuntimeLibrary.Read("PbtChecks.cs") + ContractRuntimeLibrary.Read("PbtRandom.cs") +
+      ContractRuntimeLibrary.Read("PbtContractModels.cs");
   }
 
   internal static string TypeShapeToken(Microsoft.Dafny.Type type, IReadOnlyList<TypeParameter>? parameters = null) => Convert.ToBase64String(

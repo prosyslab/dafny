@@ -12,7 +12,8 @@ namespace DafnyTestGeneration.ContractTesting;
 
 /// <summary>Prepares full-context diagnostic source views and extracts legacy runtime packets from them.</summary>
 public static class ContractRuntimeSourceAuthoring {
-  public const int SchemaVersion = 1;
+  public const int LegacySchemaVersion = 1;
+  public const int NativeSchemaVersion = 2;
   public const int MaximumRequestBytes = 64 * 1024 * 1024;
   private const int MaximumSourceCount = 4096;
   private const long MaximumSourceBytes = 64L * 1024 * 1024;
@@ -46,7 +47,7 @@ public static class ContractRuntimeSourceAuthoring {
       throw new ArgumentException("Prepare does not accept authored sources or a prior manifest.");
     }
     var build = await BuildAsync(request, options, cancellationToken);
-    return new(SchemaVersion, request.Action, ContractRuntimeAuthoringStatus.Ready,
+    return new(request.SchemaVersion, request.Action, ContractRuntimeAuthoringStatus.Ready,
       "Runtime authoring source view is ready.", build.View, build.Manifest);
   }
 
@@ -69,8 +70,7 @@ public static class ContractRuntimeSourceAuthoring {
     if (!baseline.Keys.ToHashSet(StringComparer.Ordinal).SetEquals(authored.Keys)) {
       throw new ArgumentException("Authored source paths must exactly match the prepared source view.");
     }
-    var regions = build.Drafts.SelectMany(layout => new[] { layout.Body, layout.Helpers })
-      .Concat([build.Generator.Contracts, build.Generator.Body, build.Generator.Helpers]).ToArray();
+    var regions = AuthoringRegions(build.Drafts, build.Generator);
     var authoredRegionText = new Dictionary<string, string>(StringComparer.Ordinal);
     foreach (var path in baseline.Keys) {
       cancellationToken.ThrowIfCancellationRequested();
@@ -120,17 +120,17 @@ public static class ContractRuntimeSourceAuthoring {
       await ValidateAuthoredGeneratorAsync(generator, build.Generator.Symbol, options, cancellationToken);
     }
     if (incomplete.Count != 0) {
-      return new(SchemaVersion, request.Action, ContractRuntimeAuthoringStatus.Unsupported,
+      return new(request.SchemaVersion, request.Action, ContractRuntimeAuthoringStatus.Unsupported,
         "Unfilled runtime authoring templates: " + string.Join(", ", incomplete.Order(StringComparer.Ordinal)));
     }
 
     var prepared = await ContractRuntimeSourcePreparation.PrepareAsync(build.Program, request.Sources, build.Goal,
-      completed, generator!, options, cancellationToken);
+      completed, generator!, options, cancellationToken, EffectiveExternExecution(request));
     if (!prepared.InstalledDraftSymbols.SetEquals(build.Manifest.DraftSymbols)) {
       throw new NotSupportedException("Extracted draft installation does not match the prepared authoring manifest.");
     }
     await ResolveExtractedAsync(options, prepared, cancellationToken);
-    return new(SchemaVersion, request.Action, ContractRuntimeAuthoringStatus.Extracted,
+    return new(request.SchemaVersion, request.Action, ContractRuntimeAuthoringStatus.Extracted,
       "Runtime authoring packets were extracted from the validated source view.",
       Drafts: completed, Generator: generator);
   }
@@ -145,11 +145,19 @@ public static class ContractRuntimeSourceAuthoring {
     }
     var goal = ContractCallableSelector.SelectMethod(program, request.Entry,
       requireConcreteReceiver: false, allowLemmaContract: true);
+    var modelPolicy = await ContractRuntimeContractModels.ReadPolicyAsync(request.Generator, goal.FullDafnyName,
+      options, cancellationToken);
+    var blockers = ContractRuntimeFeasibility.AnalyzeResolved(program, request.Sources, goal,
+      EffectiveExternExecution(request), modelPolicy, cancellationToken);
+    if (blockers.Count != 0) {
+      throw new NotSupportedException(string.Join("\n", blockers.Select(blocker => blocker.Code + ": " + blocker.Diagnostic)));
+    }
     var membersBySymbol = ContractRuntimeSourcePreparation.Members(program).OfType<MethodOrFunction>()
       .ToDictionary(member => member.FullDafnyName, StringComparer.Ordinal);
+    var externExecution = EffectiveExternExecution(request);
     var drafts = (request.Drafts ?? []).ToList();
     var generatedDraftSymbols = new HashSet<string>(StringComparer.Ordinal);
-    var indexed = ContractRuntimeSourcePreparation.IndexDrafts(program, drafts);
+    var indexed = ContractRuntimeSourcePreparation.IndexDrafts(program, drafts, externExecution);
     if (indexed.Any(pair => pair.Value.Symbol != pair.Key)) {
       throw new NotSupportedException("Runtime authoring draft symbols must use exact canonical Dafny names.");
     }
@@ -158,7 +166,12 @@ public static class ContractRuntimeSourceAuthoring {
       if (!membersBySymbol.TryGetValue(requested, out var target)) {
         throw new NotSupportedException("Requested draft target must identify one callable: " + requested);
       }
-      if (!ContractRuntimeSourcePreparation.NeedsDraft(target) || indexed.ContainsKey(target.FullDafnyName)) {
+      if (ContractRuntimeSourcePreparation.IsNativeExtern(target, options, externExecution)) {
+        throw new NotSupportedException("Native extern execution does not accept a requested draft for " +
+          target.FullDafnyName + ".");
+      }
+      if (!ContractRuntimeSourcePreparation.NeedsDraft(target, options, externExecution) ||
+          indexed.ContainsKey(target.FullDafnyName)) {
         continue;
       }
       var packet = DraftTemplate(target, ContractSourceSnapshot.Find(request.Sources, target.Origin.Uri), request.Sources);
@@ -167,12 +180,14 @@ public static class ContractRuntimeSourceAuthoring {
     }
     var generatedGenerator = request.Generator == null;
     var generator = request.Generator ?? await GeneratorTemplateAsync(program, goal, request.Entry,
-      request.Sources, options, cancellationToken);
+      request.Sources, options, cancellationToken, externExecution);
     var activeDrafts = new List<(ContractRuntimeDraft Draft, MethodOrFunction Target)>();
     foreach (var draft in drafts) {
       cancellationToken.ThrowIfCancellationRequested();
       var target = membersBySymbol[draft.Symbol];
-      if (ContractRuntimeSourcePreparation.NeedsDraft(target)) { activeDrafts.Add((draft, target)); }
+      if (ContractRuntimeSourcePreparation.NeedsDraft(target, options, externExecution)) {
+        activeDrafts.Add((draft, target));
+      }
     }
     ValidatePacketPaths(request.Sources, drafts, generator, goal.FullDafnyName);
 
@@ -196,8 +211,18 @@ public static class ContractRuntimeSourceAuthoring {
         ? TodoPrefix + Token("generator-todo", goal.FullDafnyName, SourceIdentity(request.Sources)) : null,
       options, cancellationToken);
     var prepared = await ContractRuntimeSourcePreparation.PrepareAsync(program, request.Sources, goal,
-      layouts.Select(layout => layout.Wrapped).ToArray(), generatorLayout.Wrapped, options, cancellationToken);
+      layouts.Select(layout => layout.Wrapped).ToArray(), generatorLayout.Wrapped, options, cancellationToken,
+      externExecution);
     var view = prepared.Sources.ToList();
+    var regions = AuthoringRegions(layouts, generatorLayout);
+    var viewByPath = view.ToDictionary(source => source.Path, StringComparer.Ordinal);
+    foreach (var pathRegions in regions.GroupBy(region => region.Path, StringComparer.Ordinal)) {
+      cancellationToken.ThrowIfCancellationRequested();
+      if (!viewByPath.TryGetValue(pathRegions.Key, out var source)) {
+        throw new NotSupportedException("Prepared runtime authoring source is missing: " + pathRegions.Key);
+      }
+      LocateRegions(source.Content, pathRegions.ToArray(), cancellationToken);
+    }
     var runtimePath = FreshRuntimePath(view.Concat(layouts.Select(layout =>
       new ContractSource(layout.Packet.Path, layout.Packet.Content, layout.Packet.Sha256))).Append(generator));
     var runtime = ContractRuntimeInstrumentation.DafnySource;
@@ -207,7 +232,7 @@ public static class ContractRuntimeSourceAuthoring {
     var manifest = new ContractRuntimeAuthoringManifest(
       Dependencies(request.Sources), Dependencies(view),
       prepared.InstalledDraftSymbols.Order(StringComparer.Ordinal).ToArray(), goal.FullDafnyName,
-      runtimeDependency);
+      runtimeDependency, request.ExternExecution);
     return new(program, goal, layouts, generatorLayout, view, manifest);
   }
 
@@ -278,14 +303,14 @@ public static class ContractRuntimeSourceAuthoring {
 
   private static async Task<ContractSource> GeneratorTemplateAsync(Program program, Method goal,
     ContractEntry entry, IReadOnlyList<ContractSource> sources, DafnyOptions options,
-    CancellationToken cancellationToken) {
+    CancellationToken cancellationToken, ContractRuntimeExternExecution externExecution) {
     var placeholder = TodoPrefix + Token("generator-todo", goal.FullDafnyName, SourceIdentity(sources));
     var path = ".top-down-pbt/generators/" + goal.FullDafnyName + ".dfy";
     var signature = ContractRuntimeGeneratorSignature.Format(goal);
     var probeContent = signature + "\n{}\n";
     var probe = new ContractSource(path, probeContent, ContractHarnessBuilder.Hash(probeContent));
     var prepared = await ContractRuntimeSourcePreparation.PrepareAsync(program, sources, goal, [], probe,
-      options, cancellationToken);
+      options, cancellationToken, externExecution);
     var rawReporter = new BatchErrorReporter(new DafnyOptions(options));
     var raw = await ContractSourceSnapshot.ParseAsync(rawReporter, prepared.Sources, cancellationToken, resolve: false);
     if (rawReporter.ErrorCount != 0) {
@@ -351,9 +376,13 @@ public static class ContractRuntimeSourceAuthoring {
     if (candidate is Method) {
       bodyStart += Encoding.UTF8.GetByteCount(bodyNode.StartToken.val);
       bodyEnd -= Encoding.UTF8.GetByteCount(bodyNode.EndToken.val);
+      candidateText = InsertBytes(candidateText, bodyEnd, "\n" + body.End + "\n");
+      candidateText = InsertBytes(candidateText, bodyStart, "\n" + body.Begin + "\n");
+    } else {
+      // Source preparation copies only the function expression range, including these parentheses.
+      candidateText = InsertBytes(candidateText, bodyEnd, "\n" + body.End + "\n)");
+      candidateText = InsertBytes(candidateText, bodyStart, "(\n" + body.Begin + "\n");
     }
-    candidateText = InsertBytes(candidateText, bodyEnd, "\n" + body.End + "\n");
-    candidateText = InsertBytes(candidateText, bodyStart, "\n" + body.Begin + "\n");
     var helpers = new List<string>();
     foreach (var declaration in declarations.Where(declaration => declaration != candidate)) {
       cancellationToken.ThrowIfCancellationRequested();
@@ -411,7 +440,11 @@ public static class ContractRuntimeSourceAuthoring {
       helperTexts.Add(Slice(packet.Content, declaration.EntireRange.StartToken.pos,
         declaration.EntireRange.Length));
     }
-    var content = generatorText + "\n" + helpers.Begin + "\n" + string.Join("\n", helperTexts) +
+    var modelHint = "// Optional finite bool/int ghost-state and extern model; bounds are inclusive, cap <= 4096.\n" +
+      "// Add an empty helper here to opt in: method {:pbt_contract_models \"" + goal.FullDafnyName +
+      "\", -2, 2, 256} ModelPolicy() {}\n" +
+      "// Models replace selected extern calls; unsupported shapes are rejected and exhausted bounds give no evidence.\n";
+    var content = generatorText + "\n" + helpers.Begin + "\n" + modelHint + string.Join("\n", helperTexts) +
       "\n" + helpers.End + "\n";
     return new(packet, packet with { Content = content, Sha256 = ContractHarnessBuilder.Hash(content) },
       goal.FullDafnyName, placeholder, contracts, body, helpers);
@@ -524,6 +557,10 @@ public static class ContractRuntimeSourceAuthoring {
     return result;
   }
 
+  private static Region[] AuthoringRegions(IReadOnlyList<DraftLayout> drafts, GeneratorLayout generator) =>
+    drafts.SelectMany(layout => new[] { layout.Body, layout.Helpers })
+      .Concat([generator.Contracts, generator.Body, generator.Helpers]).ToArray();
+
   private static string Mask(string content, IReadOnlyDictionary<Region, RegionSpan> spans,
     CancellationToken cancellationToken) {
     var output = new StringBuilder(content.Length);
@@ -598,6 +635,7 @@ public static class ContractRuntimeSourceAuthoring {
   private static bool ManifestMatches(ContractRuntimeAuthoringManifest supplied,
     ContractRuntimeAuthoringManifest expected) => supplied.GeneratorSymbol == expected.GeneratorSymbol &&
     supplied.RuntimeSource == expected.RuntimeSource &&
+    supplied.ExternExecution == expected.ExternExecution &&
     supplied.OriginalSources.SequenceEqual(expected.OriginalSources) &&
     supplied.PreparedSources.SequenceEqual(expected.PreparedSources) &&
     supplied.DraftSymbols.SequenceEqual(expected.DraftSymbols, StringComparer.Ordinal);
@@ -610,7 +648,13 @@ public static class ContractRuntimeSourceAuthoring {
   }
 
   private static void ValidateRequest(ContractRuntimeAuthoringRequest request) {
-    if (request.SchemaVersion != SchemaVersion || request.Sources == null || request.Sources.Count == 0 ||
+    var validSchema = request.ExternExecution switch {
+      null => request.SchemaVersion == LegacySchemaVersion,
+      ContractRuntimeExternExecution.Draft or ContractRuntimeExternExecution.Native =>
+        request.SchemaVersion == NativeSchemaVersion,
+      _ => false
+    };
+    if (!validSchema || request.Sources == null || request.Sources.Count == 0 ||
         request.Entry == null || string.IsNullOrWhiteSpace(request.Entry.Symbol) || request.TimeoutMilliseconds <= 0) {
       throw new ArgumentException("Invalid runtime authoring schema, sources, entry, or deadline.");
     }
@@ -621,7 +665,8 @@ public static class ContractRuntimeSourceAuthoring {
       throw new ArgumentException("Runtime authoring draft requests must be non-null and unique.");
     }
     if (request.Manifest != null && (request.Manifest.OriginalSources == null ||
-        request.Manifest.PreparedSources == null || request.Manifest.DraftSymbols == null)) {
+        request.Manifest.PreparedSources == null || request.Manifest.DraftSymbols == null ||
+        request.Manifest.ExternExecution != request.ExternExecution)) {
       throw new ArgumentException("Runtime authoring manifests require all dependency and symbol collections.");
     }
     if (request.Sources.Count > MaximumSourceCount || (request.Drafts?.Count ?? 0) > MaximumSourceCount ||
@@ -636,6 +681,9 @@ public static class ContractRuntimeSourceAuthoring {
       .Concat((request.Drafts ?? []).Select(draft => new ContractSource(draft.Path, draft.Content, draft.Sha256)))
       .Concat(request.Generator == null ? [] : [request.Generator]), "Runtime authoring request sources");
   }
+
+  private static ContractRuntimeExternExecution EffectiveExternExecution(ContractRuntimeAuthoringRequest request) =>
+    request.ExternExecution ?? ContractRuntimeExternExecution.Draft;
 
   private static void ValidatePacketPaths(IReadOnlyList<ContractSource> sources,
     IReadOnlyList<ContractRuntimeDraft> drafts, ContractSource generator, string goalSymbol) {
