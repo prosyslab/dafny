@@ -1,3 +1,5 @@
+- [Repair native test failures on the commit-pin branch](2026-10-27-pin-test-repair.md) — blocked; 10 branch-introduced test failures repaired (test updates only); 5 Z3-4.16.0-dependent failures also present on `1de66ec5a` left open; parent: [commit pin](../../../plan/2026-10-27-dafny-commit-pin.md).
+
 - [Resolve verification-facts rebase conflicts](2026-10-22-resolve-rebase-conflicts.md) — done; all nine commits rebased, native source/tests match the target, both owner histories retained, conflict/whitespace/Markdown audits pass.
 
 - [Land reviewed PBT changes](2026-10-25-pbt-reviewed-main-delivery.md) — done; two focused native commits, excluded unused DTOs and explicit matching-source/canonical-build limits.

@@ -1,3 +1,5 @@
+- [Native tests depend on which Z3 Dafny selects](native-test-solver-selection.md) — five contract tests differ between `z3-4.16.0` and the PATH fallback on both base and pin branch; comparison procedure and limits.
+
 - [Native PBT delivery and validation boundaries](pbt-main-delivery.md) — reviewed runtime closure, checked helper screening, verifier-seed forwarding and explicit matching-source/canonical-build limits.
 
 - [Nested statement matches in proof expressions](nested-match-substitution.md) — independently accepted compiler substitution, local scope and ordinary proof rejection; source delivery on expecto, image and weekly outcomes tracked by the parent.

@@ -1,0 +1,9 @@
+# Native tests depend on which Z3 Dafny selects
+
+Status: current; checked 2026-10-27 on `1de66ec5a` and `pin/2026-10-27`. Originating plan: [pin test repair](../plan/2026-10-27-pin-test-repair.md).
+
+Dafny looks for `z3/bin/z3-<DafnyOptions.DefaultZ3Version>` next to the loaded `DafnyCore.dll` (`DefaultZ3Version` is `4.16.0` in `Source/DafnyCore/DafnyOptions.cs`) and otherwise falls back to the first `z3` on `PATH`. The test projects copy `Binaries/z3/**` (both `z3-4.12.1` and `z3-4.16.0` on this machine) into their output directory, so a normal build selects 4.16.0, while a build without that directory selects the system `z3` (4.8.12 here).
+
+Five tests give different results by selected solver, on the unchanged origin base `1de66ec5a` as well as on the branch: `ContractQueryTests.ProofOnlyQuantifiersRetainOriginalAssertionAndDefinedness("exists k:int :: result == 2*k")` (needs a witness proof; fails only on 4.16.0), `ContractWitnessQueryTests.ConcreteConcatenationRetainsNativeTarget("!(exists a:seq<int> :: [1,2] == a + a)")` (exceeds its 3 s deadline on 4.12.1 and 4.16.0), and in `DafnyDriver.Test` `ClauseDependenciesTests.ClassifiesEveryBucket`, `ClauseDependenciesTests.UncertifiedDependencyKeepsCalleeClauseUnchecked(3, ...)` and `InitialAdmissionTests.ScalarClosedCalleeUsesOriginalSources(2, False)`. With the 4.16.0 file hidden from the test output directory all of them pass at both revisions. Under 4.16.0 the opaque-dependency bucket reports callee violations where 4.8.12 leaves the clause unchecked, which is a solver-result difference, not an effect of the branch.
+
+Use this when a native contract test fails only in an environment that has `z3-4.16.0`: compare against the base revision with the same `Binaries/z3` before attributing it to a source change. The tests were not changed; no timeout or assertion was relaxed. Which solver the product and the Docker images should use for these queries is undecided.
