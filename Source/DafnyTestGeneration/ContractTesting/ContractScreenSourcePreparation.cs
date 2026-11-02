@@ -238,14 +238,18 @@ internal static class ContractScreenSourcePreparation {
     }
   }
 
+  // These scans run before resolution, while Children may depend on resolved types.
+  private static IEnumerable<INode> RawDescendants(INode node) =>
+    node.PreResolveChildren.Concat(node.PreResolveChildren.SelectMany(RawDescendants));
+
   private static IEnumerable<Declaration> RawDeclarations(Program program) =>
-    program.DefaultModuleDef.Descendants().Concat(program.Files.SelectMany(file => file.Descendants()))
+    RawDescendants(program.DefaultModuleDef).Concat(program.Files.SelectMany(RawDescendants))
       .OfType<Declaration>().Distinct();
 
   private static void CheckSourceOptions(Program program, DafnyOptions options, string beforeOptions) {
     if (beforeOptions != DefinitionAnalysis.ContextOptionsIdentity(options) ||
         RawDeclarations(program).Any(declaration => Attributes.Contains(declaration.Attributes, "options")) ||
-        program.DefaultModuleDef.Descendants().Prepend(program.DefaultModuleDef).OfType<ModuleDefinition>()
+        RawDescendants(program.DefaultModuleDef).Prepend(program.DefaultModuleDef).OfType<ModuleDefinition>()
           .Any(module => Attributes.Contains(module.Attributes, "options"))) {
       throw new NotSupportedException("source_options");
     }

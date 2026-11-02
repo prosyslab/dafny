@@ -50,3 +50,5 @@
 
 2026-10-26: [Old-state capture admission](pbt-trusted-sources.md#old-state-capture-admission-2026-10-26) defers capture emission until the final consuming decision and validates inputs first; independent44 memory cases and scoped formatting pass. Exact-input r03 reaches64 target calls, then external ghost-state errors and classification timeout; no valid classified sample or counterexample.
 - [Bounded contract models](pbt-trusted-sources.md#bounded-contract-models-2026-10-26) — explicit generator policy, finite bool/int state and joint extern transition search, preserved checks and no-evidence exhaustion; independent145 memory checks and three project builds pass. No Csplit or real native IO correctness claim.
+
+- [Traverse syntactic children before contract-screen resolution](contract-screen-source-traversal.md) — verified development patch; publication authorized; downstream deployment tracked in integration recovery plan.

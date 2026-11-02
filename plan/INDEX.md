@@ -83,3 +83,5 @@
 
 - [Execute bounded logical contracts as explicit PBT models](../../plan/2026-10-26-pbt-bounded-contract-models.md) — done; independently accepted native implementation,145 memory checks and three project builds. No sampled native/Csplit efficacy claim.
 - [Gate PBT authoring with binary native feasibility](../../plan/2026-10-26-pbt-binary-feasibility.md) — done; shared source-only binary gate,109 native memory cases and three builds pass; runtime/benchmark efficacy remains separate.
+
+- [Correct raw traversal in native contract-screen preparation](2026-11-02-contract-screen-source-traversal.md) — done for verified source patch; normal publication and linked pin updates authorized.
