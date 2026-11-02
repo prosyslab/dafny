@@ -85,3 +85,5 @@
 - [Gate PBT authoring with binary native feasibility](../../plan/2026-10-26-pbt-binary-feasibility.md) — done; shared source-only binary gate,109 native memory cases and three builds pass; runtime/benchmark efficacy remains separate.
 
 - [Correct raw traversal in native contract-screen preparation](2026-11-02-contract-screen-source-traversal.md) — done for verified source patch; normal publication and linked pin updates authorized.
+
+- [Contract screen omitted-body identity](2026-11-02-contract-screen-omitted-body-identity.md) — done (native source phase); independent tests and native controls passed, publication follow-up owned by root.

@@ -52,3 +52,5 @@
 - [Bounded contract models](pbt-trusted-sources.md#bounded-contract-models-2026-10-26) — explicit generator policy, finite bool/int state and joint extern transition search, preserved checks and no-evidence exhaustion; independent145 memory checks and three project builds pass. No Csplit or real native IO correctness claim.
 
 - [Traverse syntactic children before contract-screen resolution](contract-screen-source-traversal.md) — verified development patch; publication authorized; downstream deployment tracked in integration recovery plan.
+
+- [Contract screen omitted-body identities](contract-screen-omitted-body-identity.md) — native resolution lifecycle verified in development; not deployed or pinned.

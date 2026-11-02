@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using DafnyTestGeneration.ContractTesting;
@@ -28,6 +29,52 @@ public class ContractScreenSourcePreparationTests {
     var method = ContractCallableSelector.SelectMethod(parsed.Program, new("Child"));
     Assert.Null(method.Body);
     Assert.Single(method.Ens);
+  }
+
+  // Ambient named-class bodies keep resolved qualified identities while only the global target is projected.
+  [Fact]
+  public async Task AmbientClassBodyRetainsQualifiedIdentityOutsideProjection() {
+    const string helperBody = "{ var z: int := 0; }";
+    const string childBody = "{ y := x + 1; }";
+    const string source = "class Ambient { method Helper() " + helperBody + " }\n" +
+      "method Child(x: int) returns (y: int) ensures y == x + 1 " + childBody;
+    var reporter = Reporter();
+
+    var parsed = await Prepare(source, reporter);
+
+    Assert.Equal(0, reporter.ErrorCount);
+    Assert.NotNull(parsed.Projection);
+    Assert.Equal("Child", parsed.Projection.Target.Name);
+    Assert.Equal(parsed.Projection.Target, Assert.Single(parsed.Projection.Members));
+    var omitted = parsed.OmittedBodies.ToDictionary(body => body.Symbol);
+    Assert.Equal(2, omitted.Count);
+    var helper = omitted["Ambient.Helper"];
+    Assert.Equal(ContractSourceSnapshot.UriFor("input.dfy").LocalPath, helper.SourcePath);
+    Assert.Equal(source.IndexOf(helperBody, StringComparison.Ordinal), helper.Start);
+    Assert.Equal(helper.Start + helperBody.Length, helper.End);
+    var child = omitted["Child"];
+    Assert.Equal(helper.SourcePath, child.SourcePath);
+    Assert.Equal(source.IndexOf(childBody, StringComparison.Ordinal), child.Start);
+    Assert.Equal(child.Start + childBody.Length, child.End);
+    Assert.DoesNotContain(parsed.Program.DefaultModuleDef.TopLevelDecls, declaration => declaration.Name == "Ambient");
+    var method = ContractCallableSelector.SelectMethod(parsed.Program, new("Child"));
+    Assert.Null(method.Body);
+    Assert.Single(method.Ens);
+  }
+
+  // Resolution errors remain reporter failures without manufacturing omitted-body symbol identities.
+  [Fact]
+  public async Task AmbientResolutionErrorReturnsNoProjectionOrOmittedIdentities() {
+    const string source = "class Ambient { method Helper(value: Missing) {} }\n" +
+      "method Child(x: int) returns (y: int) ensures y == x + 1 { y := x + 1; }";
+    var reporter = Reporter();
+
+    var parsed = await Prepare(source, reporter);
+
+    Assert.True(reporter.ErrorCount > 0);
+    Assert.NotEmpty(parsed.OriginalSpans);
+    Assert.Null(parsed.Projection);
+    Assert.Empty(parsed.OmittedBodies);
   }
 
   // Declaration options are rejected before projection even when the body has a typed local.

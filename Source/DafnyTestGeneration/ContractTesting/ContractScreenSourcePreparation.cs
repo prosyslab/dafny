@@ -53,17 +53,20 @@ internal static class ContractScreenSourcePreparation {
       CheckSourceOptions(discovery, reporter.Options, beforeOptions);
       var keys = RawDeclarations(discovery).ToDictionary(declaration => declaration, declaration => Key(declaration, null));
       var spans = DefinitionAnalysis.AnalyzeSpans(discovery, sources.Select(source => ContractSourceSnapshot.UriFor(source.Path)).ToHashSet());
-      var omitted = new List<ContractScreenOmittedBody>();
+      var omittedBodies = new List<(Method Method, int Start, int End)>();
       foreach (var method in keys.Keys.OfType<Method>().Where(method =>
                  (method.GetType() == typeof(Method) || method.GetType() == typeof(Lemma)) && !method.IsByMethod)) {
         if (method.Body == null) { continue; }
-        omitted.Add(new(method.Origin.Uri.LocalPath, method.FullDafnyName,
-          method.Body.StartToken.pos, method.Body.EndToken.pos + method.Body.EndToken.val.Length));
+        // Body ranges are syntax, but qualified names require resolver-populated owners.
+        omittedBodies.Add((method, method.Body.StartToken.pos,
+          method.Body.EndToken.pos + method.Body.EndToken.val.Length));
         method.ClearBody();
       }
       // Discovery resolves names and types only. It never translates or verifies this ambient program.
       await new ProgramResolver(discovery).Resolve(cancellationToken);
-      if (reporter.ErrorCount != 0) { return new(discovery, spans, omitted, null); }
+      if (reporter.ErrorCount != 0) { return new(discovery, spans, [], null); }
+      var omitted = omittedBodies.Select(body => new ContractScreenOmittedBody(
+        body.Method.Origin.Uri.LocalPath, body.Method.FullDafnyName, body.Start, body.End)).ToList();
       var selected = ContractCallableSelector.SelectMethod(discovery, target, allowLemmaContract: true);
       if (!keys.TryGetValue(selected, out var targetKey) || selected.EnclosingClass is not DefaultClassDecl ||
           selected.GetType() != typeof(Method) && selected.GetType() != typeof(Lemma)) {
@@ -146,7 +149,6 @@ internal static class ContractScreenSourcePreparation {
     foreach (var file in program.Files) { Prune(file); }
     // These ranges must be captured before body removal: several AST ranges are lazy.
     var spans = projection.OriginalSpans;
-    var omitted = new List<ContractScreenOmittedBody>();
     var originalMembers = new HashSet<MemberDecl>();
     var keptQueries = 0;
     VisitModule(program.DefaultModuleDef);
@@ -218,8 +220,6 @@ internal static class ContractScreenSourcePreparation {
             }
             if (generatedQuery) { keptQueries++; continue; }
             if (method.Body != null) {
-              omitted.Add(new(member.Origin.Uri.LocalPath, member.FullDafnyName,
-                method.Body.StartToken.pos, method.Body.EndToken.pos + method.Body.EndToken.val.Length));
               method.ClearBody();
             }
             AuditRawExpressions(method.SubExpressions);
