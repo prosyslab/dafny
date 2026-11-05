@@ -36,6 +36,32 @@ public class PruneIfNotUsedSinceLastPruneCache<TKey, TValue>
     items = new(comparer);
   }
 
+  /// <summary>
+  /// Copies membership and pruning state into an independently owned cache. Callers must prevent
+  /// concurrent Set/TryGet calls; a running UseAndPrune operation is rejected rather than waited on.
+  /// The supplied functions determine key/value ownership; this cache never assumes they are immutable.
+  /// </summary>
+  public PruneIfNotUsedSinceLastPruneCache<TKey, TValue> Clone(
+    Func<TKey, TKey> cloneKey, Func<TValue, TValue> cloneValue, CancellationToken cancellationToken = default) {
+    if (!semaphoreSlim.Wait(0, cancellationToken)) {
+      throw new InvalidOperationException("Cannot clone a cache while it is in use.");
+    }
+
+    try {
+      var clone = new PruneIfNotUsedSinceLastPruneCache<TKey, TValue>(items.Comparer);
+      foreach (var (key, item) in items) {
+        cancellationToken.ThrowIfCancellationRequested();
+        clone.items.TryAdd(cloneKey(key), new Item(cloneValue(item.Value)) { Accessed = item.Accessed });
+      }
+
+      cancellationToken.ThrowIfCancellationRequested();
+      return clone;
+    }
+    finally {
+      semaphoreSlim.Release();
+    }
+  }
+
   public async Task<PruneResult<T>> UseAndPrune<T>(Func<Task<T>> use, CancellationToken cancellationToken) {
     await semaphoreSlim.WaitAsync(cancellationToken);
     try {

@@ -21,26 +21,58 @@ namespace Microsoft.Dafny.LanguageServer.Language {
     private readonly IFileSystem fileSystem;
     private readonly TelemetryPublisherBase telemetryPublisher;
     private readonly ILogger<DafnyLangParser> logger;
+    private readonly ILogger<CachingParser> innerParserLogger;
     private readonly SemaphoreSlim mutex = new(1);
     private readonly ProgramParser programParser;
 
     public DafnyLangParser(DafnyOptions options, IFileSystem fileSystem, TelemetryPublisherBase telemetryPublisher,
-      ILogger<DafnyLangParser> logger, ILogger<CachingParser> innerParserLogger) {
+      ILogger<DafnyLangParser> logger, ILogger<CachingParser> innerParserLogger)
+      : this(options, fileSystem, telemetryPublisher, logger, innerParserLogger, null) {
+    }
+
+    private DafnyLangParser(DafnyOptions options, IFileSystem fileSystem, TelemetryPublisherBase telemetryPublisher,
+      ILogger<DafnyLangParser> logger, ILogger<CachingParser> innerParserLogger, ProgramParser? clonedParser) {
       this.options = options;
       this.fileSystem = fileSystem;
       this.telemetryPublisher = telemetryPublisher;
       this.logger = logger;
-      programParser = options.Get(DafnyLangSymbolResolver.UseCaching)
+      this.innerParserLogger = innerParserLogger;
+      programParser = clonedParser ?? (options.Get(DafnyLangSymbolResolver.UseCaching)
         ? new CachingParser(innerParserLogger, fileSystem, telemetryPublisher)
-        : new ProgramParser(innerParserLogger, fileSystem);
+        : new ProgramParser(innerParserLogger, fileSystem));
+    }
+
+    public int CachedParseCount => (programParser as CachingParser)?.CachedParseCount ?? 0;
+
+    /// <summary>
+    /// Creates an independent parser bound to the supplied child filesystem/options. The caller must
+    /// fence the source against new work and supply detached child options. Existing parse templates
+    /// are reconstructed from retained text once; no resolver or compilation state is inherited.
+    /// </summary>
+    public DafnyLangParser Clone(DafnyOptions options, IFileSystem fileSystem,
+      TelemetryPublisherBase telemetryPublisher, CancellationToken cancellationToken = default) {
+      if (!mutex.Wait(0, cancellationToken)) {
+        throw new InvalidOperationException("Cannot clone a parser while it is in use.");
+      }
+
+      try {
+        var clonedParser = options.Get(DafnyLangSymbolResolver.UseCaching) && programParser is CachingParser cached
+          ? cached.Clone(options, fileSystem, telemetryPublisher, cancellationToken)
+          : null;
+        cancellationToken.ThrowIfCancellationRequested();
+        return new DafnyLangParser(options, fileSystem, telemetryPublisher, logger, innerParserLogger, clonedParser);
+      }
+      finally {
+        mutex.Release();
+      }
     }
 
     public async Task<ProgramParseResult> Parse(Compilation compilation, CancellationToken cancellationToken) {
       await mutex.WaitAsync(cancellationToken);
 
-      var rootFiles = await compilation.RootFiles;
       var beforeParsing = DateTime.Now;
       try {
+        var rootFiles = await compilation.RootFiles;
         return await programParser.ParseFiles(compilation.Project.ProjectName, rootFiles, compilation.Reporter, cancellationToken);
       }
       finally {

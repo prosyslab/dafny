@@ -12,13 +12,39 @@ using Microsoft.Extensions.Logging;
 namespace Microsoft.Dafny.LanguageServer.Language;
 
 public class CachingParser : ProgramParser {
-  private readonly PruneIfNotUsedSinceLastPruneCache<byte[], DfyParseFileResult> parseCache = new(new HashEquality());
+  private sealed record CachedParseFile(DfyParseFileResult Result, string Source);
+
+  private readonly PruneIfNotUsedSinceLastPruneCache<byte[], CachedParseFile> parseCache;
   private readonly TelemetryPublisherBase telemetryPublisher;
+
+  public int CachedParseCount => parseCache.Count;
 
   public CachingParser(ILogger<ProgramParser> logger,
     IFileSystem fileSystem,
-    TelemetryPublisherBase telemetryPublisher) : base(logger, fileSystem) {
+    TelemetryPublisherBase telemetryPublisher) : this(logger, fileSystem, telemetryPublisher, new(new HashEquality())) {
+  }
+
+  private CachingParser(ILogger<ProgramParser> logger, IFileSystem fileSystem,
+    TelemetryPublisherBase telemetryPublisher,
+    PruneIfNotUsedSinceLastPruneCache<byte[], CachedParseFile> parseCache) : base(logger, fileSystem) {
     this.telemetryPublisher = telemetryPublisher;
+    this.parseCache = parseCache;
+  }
+
+  /// <summary>
+  /// Requires a drained source parser and independently owned child options. Each inherited template
+  /// is parsed once from retained immutable text, without consulting either filesystem. Cloner alone
+  /// cannot detach token chains, module/include options, attributes and builtins delegate captures.
+  /// No mutable parse template graph is shared between parsers; ordinary cache hits still clone before use.
+  /// </summary>
+  public CachingParser Clone(DafnyOptions options, IFileSystem fileSystem,
+    TelemetryPublisherBase telemetryPublisher, CancellationToken cancellationToken = default) {
+    var cache = parseCache.Clone(key => (byte[])key.Clone(), entry => {
+      var result = base.ParseFile(options, new FileSnapshot(new StringReader(entry.Source), entry.Result.Version),
+        entry.Result.Uri, cancellationToken);
+      return new CachedParseFile(result, entry.Source);
+    }, cancellationToken);
+    return new CachingParser(logger, fileSystem, telemetryPublisher, cache);
   }
 
   public override Task<ProgramParseResult> ParseFiles(string programName, IReadOnlyList<DafnyFile> files,
@@ -36,19 +62,26 @@ public class CachingParser : ProgramParser {
     // Add NUL delimiter to avoid collisions (otherwise hash("A" + "BC") == hash("AB" + "C"))
     var uriBytes = Encoding.UTF8.GetBytes(uri + "\0");
 
-    var (newReader, hash) = ComputeHashFromReader(uriBytes, reader, SHA256.Create()!);
-    if (!parseCache.TryGet(hash, out var result)) {
+    using var hashAlgorithm = SHA256.Create();
+    var (newReader, hash) = ComputeHashFromReader(uriBytes, reader, hashAlgorithm);
+    using var bufferedReader = newReader;
+    if (!parseCache.TryGet(hash, out var entry)) {
       logger.LogDebug($"Parse cache miss for {uri}");
-      result = base.ParseFile(options, fileSnapshot with { Reader = newReader }, uri, cancellationToken);
-      parseCache.Set(hash, result);
+      var source = bufferedReader.ReadToEnd();
+      var parsed = base.ParseFile(options, fileSnapshot with { Reader = new StringReader(source) }, uri, cancellationToken);
+      entry = new CachedParseFile(parsed, source);
+      parseCache.Set(hash, entry);
     } else {
       logger.LogDebug($"Parse cache hit for {uri}");
     }
 
     // Clone declarations before returning them, since they are mutable and we don't want to mutate the one in the cache.
     // We should cache an immutable version of the AST instead: https://github.com/dafny-lang/dafny/issues/4086
+    // These templates belong only to this parser. Forking a parser must reconstruct them, since the
+    // source cloner deliberately preserves some token/options/delegate references within one parser.
+    var result = entry!.Result;
     var cloner = new ParsedSourceCloner();
-    var clonedResult = result! with {
+    var clonedResult = result with {
       Module = new FileModuleDefinition(cloner, result.Module),
       Version = fileSnapshot.Version
     };
