@@ -85,10 +85,17 @@ record DiagnosticMessageData(MessageSource Source, ErrorLevel Level, TokenRange 
   }
 
   private static JsonObject SerializeToken(DafnyOptions options, TokenRange range) {
+    var uri = range.Uri;
+    if (uri is { IsFile: true } && options.PrintPathMapper != null) {
+      var path = options.PrintPathMapper(uri.LocalPath);
+      if (path != uri.LocalPath) {
+        uri = new UriBuilder(uri) { Path = path }.Uri;
+      }
+    }
     return new JsonObject {
       ["filename"] = range.StartToken.filename,
       ["filePath"] = TokenExtensions.GetRelativeFilename(options, range.StartToken),
-      ["uri"] = range.Uri?.AbsoluteUri ?? "file:///unknown",
+      ["uri"] = uri?.AbsoluteUri ?? "file:///unknown",
       ["range"] = SerializeRange(range)
     };
   }

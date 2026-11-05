@@ -87,12 +87,13 @@ public static class TokenExtensions {
     }
 
     var currentDirectory = Directory.GetCurrentDirectory();
+    var path = token.Uri.IsFile ? options.GetPrintPath(token.Filepath) : token.Filepath;
     string filename = token.Uri.Scheme switch {
       "stdin" => "<stdin>",
-      "transcript" => Path.GetFileName(token.Filepath),
+      "transcript" => Path.GetFileName(path),
       _ => options.UseBaseNameForFileName
-        ? Path.GetFileName(token.Filepath)
-        : (token.Filepath.StartsWith(currentDirectory) ? Path.GetRelativePath(currentDirectory, token.Filepath) : token.Filepath).Replace('\\', '/')
+        ? Path.GetFileName(path)
+        : (path.StartsWith(currentDirectory) ? Path.GetRelativePath(currentDirectory, path) : path).Replace('\\', '/')
     };
     return filename;
   }

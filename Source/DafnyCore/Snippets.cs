@@ -46,9 +46,10 @@ public class Snippets {
     var fsCache = FsCaches.GetOrCreateValue(options)!;
     List<string> lines = fsCache.GetOrAdd(uri, key => {
       try {
-        // Note: This is not guaranteed to be the same file that Dafny parsed. To ensure that, Dafny should keep
-        // an in-memory version of each file it parses.
-        var file = DafnyFile.HandleDafnyFile(OnDiskFileSystem.Instance, new ErrorReporterSink(options), options, uri, Token.NoToken);
+        // Without a host file system this is the file on disk, which is not guaranteed to be the one Dafny parsed.
+        // A host that parses through its own file system sets SnippetFileSystem to read the parsed bytes.
+        var file = DafnyFile.HandleDafnyFile(options.SnippetFileSystem ?? OnDiskFileSystem.Instance,
+          new ErrorReporterSink(options), options, uri, Token.NoToken);
         using var reader = file.GetContent().Reader;
         lines = Util.Lines(reader).ToList();
       } catch (Exception) {

@@ -102,7 +102,22 @@ namespace Microsoft.Dafny {
     public new IDafnyOutputWriter OutputWriter =>
       Get(CommonOptionBag.JsonOutput) ? new JsonOutputWriter(this) : new HumanReadableOutputWriter(this);
 
-    public string GetPrintPath(string path) => UseBaseNameForFileName ? Path.GetFileName(path) : path;
+    /// <summary>
+    /// Where source excerpts under diagnostics are read from. Null reads the file on disk, as the one-shot CLI does.
+    /// A host that parses through its own file system (the analysis session) sets it to that file system, so an
+    /// excerpt shows the bytes Dafny parsed. It belongs to one options instance, so concurrent requests do not share it.
+    /// </summary>
+    [CanBeNull]
+    public IFileSystem SnippetFileSystem { get; set; }
+
+    /// <summary>Maps source paths for request-local output without changing source locations or file lookups.</summary>
+    [CanBeNull]
+    public Func<string, string> PrintPathMapper { get; set; }
+
+    public string GetPrintPath(string path) {
+      path = PrintPathMapper?.Invoke(path) ?? path;
+      return UseBaseNameForFileName ? Path.GetFileName(path) : path;
+    }
     public TextWriter ErrorWriter { get; set; }
     public TextReader Input { get; }
     public static readonly DafnyOptions Default = new(TextReader.Null, TextWriter.Null, TextWriter.Null);
