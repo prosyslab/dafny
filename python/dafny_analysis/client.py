@@ -215,12 +215,17 @@ def definition_analysis_details_from_paths(
     proof_input_allow_warnings: bool = False,
     expected_warning_filter: ExpectedWarningFilter | None = None,
     cwd: Path | None = None,
+    analysis_sources: Collection[Path] | None = None,
 ) -> DefinitionAnalysisDetails:
     """Analyze once and retain the filtered warnings that suppress strict proof inputs.
 
     With ``proof_input_options`` the source order and warning flags are the caller's and
     proof inputs are dropped when Dafny reports a warning that ``expected_warning_filter``
     does not remove; without a filter every warning counts.
+
+    ``analysis_sources`` reports facts for those verified sources of the compilation
+    while ``source_paths`` stay its roots, so the native compilation and its
+    diagnostics do not change with the reported scope. It must list every root.
     """
 
     if not source_paths:
@@ -242,6 +247,9 @@ def definition_analysis_details_from_paths(
         arguments.append("--include-semantic-facts")
     if proof_input_options is not None:
         arguments.extend(("--include-proof-inputs", *proof_input_options))
+    if analysis_sources is not None:
+        for source in sorted({path.resolve() for path in analysis_sources}):
+            arguments.extend(("--analysis-source", str(source)))
     arguments.extend(str(path) for path in sorted_paths)
     working_directory = cwd or sorted_paths[0].parent
     completed = _run_definition_analysis(

@@ -53,6 +53,10 @@ public static class ShouldCompileOrVerify {
     return !declaration.Origin.FromIncludeDirective(compilation);
   }
 
+  /// <summary>The source files whose declarations this compilation verifies.</summary>
+  public static ISet<Uri> VerifiedUris(this CompilationData compilation) =>
+    compilation.UrisToVerify ??= ComputeUrisToVerify(compilation);
+
   public static bool FromIncludeDirective(this IOrigin token, CompilationData outerModule) {
     if (token is RefinementOrigin) {
       return false;

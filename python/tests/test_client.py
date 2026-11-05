@@ -271,6 +271,36 @@ def test_proof_input_mode_uses_caller_order_and_options() -> None:
     assert arguments[-2:] == (str(second.resolve()), str(TOY_SOURCE.resolve()))
 
 
+# A reported scope is passed as analysis sources while the roots stay the compilation input.
+def test_analysis_sources_keep_roots_and_add_reported_sources() -> None:
+    runner = FakeRunner(
+        lambda _: json_completed(_document(semanticFacts=SEMANTIC_FACTS, proofInputs=PROOF_INPUTS))
+    )
+    included = TOY_SOURCE.parent / "Included.dfy"
+
+    definition_analysis_details_from_paths(
+        [TOY_SOURCE],
+        runner=runner,
+        proof_input_options=(),
+        analysis_sources=[included, TOY_SOURCE, included],
+    )
+
+    arguments = runner.invocations[0].arguments
+    selected = sorted({included.resolve(), TOY_SOURCE.resolve()})
+    expected = tuple(part for path in selected for part in ("--analysis-source", str(path)))
+    assert arguments[-5:] == (*expected, str(TOY_SOURCE.resolve()))
+    assert arguments.count(str(TOY_SOURCE.resolve())) == 2
+
+
+# Without analysis sources the native default scope is unchanged.
+def test_absent_analysis_sources_emit_no_selection() -> None:
+    runner = FakeRunner(lambda _: json_completed(_document(semanticFacts=SEMANTIC_FACTS)))
+
+    definition_analysis_details_from_paths([TOY_SOURCE], runner=runner)
+
+    assert "--analysis-source" not in runner.invocations[0].arguments
+
+
 # An unexpected warning discards proof inputs and is retained for the caller.
 def test_unfiltered_warning_discards_proof_inputs() -> None:
     runner = FakeRunner(
