@@ -126,10 +126,11 @@ Generate module names in the older A_mB_mC style instead of the current A.B.C sc
   }
 
   public ModuleDefinition(Cloner cloner, ModuleDefinition original) : base(cloner, original) {
-    NameNode = original.NameNode;
+    BodyStartTok = cloner.Origin(original.BodyStartTok);
+    NameNode = original.NameNode.Clone(cloner);
     PrefixIds = original.PrefixIds.Select(cloner.Origin).ToList();
     IsFacade = original.IsFacade;
-    Attributes = original.Attributes;
+    Attributes = cloner.CloneAttributes(original.Attributes);
     ModuleKind = original.ModuleKind;
     Implements = original.Implements == null ? null : original.Implements with { Target = new ModuleQualifiedId(cloner, original.Implements.Target) };
     foreach (var d in original.SourceDecls) {

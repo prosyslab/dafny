@@ -60,6 +60,12 @@ namespace Microsoft.Dafny {
     }
 
     public virtual TopLevelDecl CloneDeclaration(TopLevelDecl d, ModuleDefinition newParent) {
+      var clone = CloneDeclarationCore(d, newParent);
+      clone.BodyStartTok = Origin(d.BodyStartTok);
+      return clone;
+    }
+
+    private TopLevelDecl CloneDeclarationCore(TopLevelDecl d, ModuleDefinition newParent) {
       Contract.Requires(d != null);
       Contract.Requires(newParent != null);
 
@@ -494,6 +500,12 @@ namespace Microsoft.Dafny {
     }
 
     public virtual Function CloneFunction(Function f, string newName = null) {
+      var clone = CloneFunctionCore(f, newName);
+      clone.BodyStartTok = Origin(f.BodyStartTok);
+      return clone;
+    }
+
+    private Function CloneFunctionCore(Function f, string newName) {
       var tps = f.TypeArgs.ConvertAll(CloneTypeParam);
       var formals = f.Ins.ConvertAll(p => CloneFormal(p, false));
       var result = f.Result != null ? CloneFormal(f.Result, false) : null;

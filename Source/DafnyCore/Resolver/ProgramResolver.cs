@@ -266,7 +266,12 @@ public class ProgramResolver {
       if (pointer.Get() is ModuleDecl moduleDecl) {
         declarationPointers.Add(moduleDecl, v => {
           pointer.Set(v);
-          v.EnclosingModuleDefinition = module;
+          // Exports resolve inside their literal module before this callback runs.
+          // A cached literal may have replaced this parsed module, so retain the
+          // resolved export's owner rather than reparenting it to the parsed copy.
+          if (v is not ModuleExportDecl) {
+            v.EnclosingModuleDefinition = module;
+          }
           if (v is LiteralModuleDecl literalModuleDecl) {
             literalModuleDecl.ModuleDef.EnclosingModule = module;
           }

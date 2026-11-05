@@ -47,12 +47,20 @@ public class CachingParser : ProgramParser {
 
     // Clone declarations before returning them, since they are mutable and we don't want to mutate the one in the cache.
     // We should cache an immutable version of the AST instead: https://github.com/dafny-lang/dafny/issues/4086
-    var cloner = new Cloner(true, false);
+    var cloner = new ParsedSourceCloner();
     var clonedResult = result! with {
       Module = new FileModuleDefinition(cloner, result.Module),
       Version = fileSnapshot.Version
     };
     return clonedResult;
+  }
+
+  private sealed class ParsedSourceCloner() : Cloner(true, false) {
+    public override Function CloneFunction(Function function, string? newName = null) {
+      var clone = base.CloneFunction(function, newName);
+      clone.SignatureEllipsis = function.SignatureEllipsis == null ? null : Origin(function.SignatureEllipsis);
+      return clone;
+    }
   }
 
   /// <summary>
