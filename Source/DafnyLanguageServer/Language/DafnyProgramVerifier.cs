@@ -30,6 +30,12 @@ namespace Microsoft.Dafny.LanguageServer.Language {
       ResolutionResult resolution,
       ModuleDefinition moduleDefinition,
       CancellationToken cancellationToken) {
+      var translation = await TranslateModuleAsync(engine, resolution, moduleDefinition, cancellationToken);
+      return await GetVerificationTasksFromTranslationAsync(engine, resolution, moduleDefinition, translation, cancellationToken);
+    }
+
+    public async Task<Microsoft.Boogie.Program> TranslateModuleAsync(ExecutionEngine engine,
+      ResolutionResult resolution, ModuleDefinition moduleDefinition, CancellationToken cancellationToken) {
 
       if (!BoogieGenerator.ShouldVerifyModule(resolution.ResolvedProgram, moduleDefinition)) {
         throw new Exception("tried to get verification tasks for a module that is not verified");
@@ -43,7 +49,7 @@ namespace Microsoft.Dafny.LanguageServer.Language {
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        var boogieProgram = await DafnyMain.LargeStackFactory.StartNew(() => {
+        return await DafnyMain.LargeStackFactory.StartNew(() => {
           Type.ResetScopes();
           var translatorFlags = new BoogieGenerator.TranslatorFlags(errorReporter.Options) {
             InsertChecksums = 0 < engine.Options.VerifySnapshots,
@@ -52,6 +58,18 @@ namespace Microsoft.Dafny.LanguageServer.Language {
           var translator = new BoogieGenerator(errorReporter, resolution.ResolvedProgram.ProofDependencyManager, translatorFlags);
           return translator.DoTranslation(resolution.ResolvedProgram, moduleDefinition);
         }, cancellationToken);
+      }
+      finally {
+        mutex.Release();
+      }
+    }
+
+    public async Task<IReadOnlyList<IVerificationTask>> GetVerificationTasksFromTranslationAsync(ExecutionEngine engine,
+      ResolutionResult resolution, ModuleDefinition moduleDefinition, Microsoft.Boogie.Program boogieProgram,
+      CancellationToken cancellationToken) {
+      await mutex.WaitAsync(cancellationToken);
+      try {
+        var program = resolution.ResolvedProgram;
         var suffix = moduleDefinition.SanitizedName;
 
         cancellationToken.ThrowIfCancellationRequested();

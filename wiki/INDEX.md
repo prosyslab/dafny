@@ -1,3 +1,9 @@
+- [Independent native branch cache cloning](native-analysis-session.md#independent-native-branch-cache-cloning-2026-11-05) — retained parent/multiple child epochs, private parser templates and detached authoritative proof caches;59client units/17fake integrations/27native cases and independent reviews. [Plan](../plan/2026-11-05-native-cache-cloning.md).
+
+- [Request-local diagnostic locations](native-analysis-session.md#request-local-diagnostic-locations-2026-11-05) — logical cached ranges and captured excerpts stay unchanged; request-local filename/JSON URI presentation maps to physical sources. [Plan](../plan/2026-11-05-review-diagnostic-locations.md).
+
+- [Persistent native analysis and verification](native-analysis-session.md) — 2026-11-04 session cache retention (per-context result/resolver caches, position-free result key, rebased cache hits) and reported analysis scope (`--analysis-source`) keeps one compilation across scope changes, per-profile facts cache; 2026-11-05 session warning/diagnostic text maps logical root to physical per request (Driver59 incl. 16 new); 2026-11-05 diagnostic source excerpts read the request's captured bytes through `DafnyOptions.SnippetFileSystem` instead of the logical-root file on disk (smoke F6; 12 new Driver tests); source/local phase accepted: clone metadata, diagnostic channels and cached export ownership, Core84/Driver21/fresh review. Parent records image/runtime/experiment acceptance; invalid artifacts remain separate.
+
 - [One Python client for native Dafny analysis](python-analysis-client.md) — `python/dafny_analysis` merges the Cosyn and Dafnyutils clients; injected command runner, strict Path/SHA-256 models, tests and limits.
 
 - [Native tests depend on which Z3 Dafny selects](native-test-solver-selection.md) — five contract tests differ between `z3-4.16.0` and the PATH fallback on both base and pin branch; comparison procedure and limits.

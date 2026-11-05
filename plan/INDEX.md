@@ -1,3 +1,15 @@
+- [Clone reusable native caches into independent sessions](2026-11-05-native-cache-cloning.md) — done; private parser templates/detached native proof snapshots, branch lifecycle and bounded native backing ownership;27native cases/59client units/17fake integrations and independent review pass.
+
+- [Map session diagnostic locations per physical request](2026-11-05-review-diagnostic-locations.md) — done; request-local human/JSON paths preserve logical cached ranges and captured excerpts; fresh scoped assemblies, 18 synthetic tests and independent source review pass; full dependency rebuild blocked by Gradle lock.
+
+- [Render session diagnostic excerpts from the request's source bytes](2026-11-05-session-snippet-source.md) — done (local scope; independent review accepted); `Snippets.GetFileLine` reads the logical path on disk, so `source_root != logical_root` sessions show a stale line under diagnostics (smoke finding F6); route excerpt reads through the request's captured file system; parent: [goal-owned native sessions](../../cosyn/plan/2026-11-04-goal-owned-native-sessions.md).
+
+- [Remap logical-root paths in native session warning text](2026-11-05-session-warning-path-remap.md) — done (local scope; independent review accepted); `UnverifiedLibrary` and not-found warnings, selection errors map logical to physical per request when diagnostics are replayed; parent: [goal-owned native sessions](../../cosyn/plan/2026-11-04-goal-owned-native-sessions.md).
+
+- [Keep session caches across option changes and make result reuse position-insensitive](2026-11-04-session-cache-retention.md) — done (local source scope); context-keyed caches, assertion-shape key and token rebasing; Core63/Driver49/Python105 and adversarial session cases pass; independent review accepted; memory unmeasured, one State per session remains; parent: [goal-owned native sessions](../../cosyn/plan/2026-11-04-goal-owned-native-sessions.md).
+
+- [Separate the compilation input from the reported analysis scope](2026-11-04-analysis-scope-reuse.md) — done; Core86/Driver28/Python104 and real Cat session check; `--analysis-source`, session state reuse across scope changes, per-profile facts cache; parent: [incremental analysis](../../plan/2026-11-04-incremental-analysis-implementation.md).
+
 - [Provide one Python analysis client package in the native fork](2026-10-27-python-analysis-client.md) — done; merged Cosyn/Dafnyutils `definition-analysis` and `source-fingerprint` client as `python/dafny_analysis` with an injected command runner, difference table and 65 unit plus 4 opt-in native tests recorded; parent: [evaluator to root](../../../plan/2026-10-27-evaluator-to-root.md).
 
 - [Repair native test failures on the commit-pin branch](2026-10-27-pin-test-repair.md) — done; 10 branch-introduced test failures and 5 Z3-4.16.0-dependent failures (also on `1de66ec5a`) resolved by test updates only, per the 2026-10-27 solver decision; parent: [commit pin](../../../plan/2026-10-27-dafny-commit-pin.md).
@@ -87,3 +99,4 @@
 - [Correct raw traversal in native contract-screen preparation](2026-11-02-contract-screen-source-traversal.md) — done for verified source patch; normal publication and linked pin updates authorized.
 
 - [Contract screen omitted-body identity](2026-11-02-contract-screen-omitted-body-identity.md) — done (native source phase); independent tests and native controls passed, publication follow-up owned by root.
+- [Persistent native analysis session](2026-11-02-native-analysis-session.md) — native source/local phase done; clone metadata, diagnostic channels and cached export ownership pass Core84/Driver21 and fresh reviews. Parent owns all artifact/image/runtime/experiment acceptance.

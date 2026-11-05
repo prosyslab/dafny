@@ -22,7 +22,7 @@ namespace Microsoft.Dafny {
 
   public record VerificationScopeResult(VerificationScope Scope, IReadOnlyList<VerificationTaskResult> Results);
 
-  interface IVerificationResultFormatLogger {
+  interface IVerificationResultFormatLogger : IDisposable {
     void LogScopeResults(VerificationScopeResult result);
     Task Flush();
   }
@@ -33,44 +33,54 @@ namespace Microsoft.Dafny {
   ///  * CSV files, which are easier to parse and summarize. 
   ///  * human-readable text output.
   /// </summary>
-  public class VerificationResultLogger {
+  public class VerificationResultLogger : IDisposable {
     private readonly DafnyOptions options;
+    private readonly Func<string, string> sourcePathMapper;
 
     public static TestProperty RandomSeedProperty = TestProperty.Register("TestResult.RandomSeed", "TestResult.RandomSeed", typeof(int), typeof(TestResult));
 
     private readonly IList<IVerificationResultFormatLogger> formatLoggers = new List<IVerificationResultFormatLogger>();
     private readonly LocalTestLoggerEvents events;
+    private bool completedEvents;
+    private bool disposed;
 
-    public VerificationResultLogger(DafnyOptions options, ProofDependencyManager depManager) {
+    public VerificationResultLogger(DafnyOptions options, ProofDependencyManager depManager,
+      Func<string, string>? sourcePathMapper = null) {
       this.options = options;
+      this.sourcePathMapper = sourcePathMapper ?? (path => path);
       var loggerConfigs = options.Get(CommonOptionBag.VerificationLogFormat);
 
       events = new LocalTestLoggerEvents();
       events.EnableEvents();
-      foreach (var loggerConfig in loggerConfigs) {
-        ParseParametersAndLoggerName(loggerConfig, out var parameters, out var loggerName);
+      try {
+        foreach (var loggerConfig in loggerConfigs) {
+          ParseParametersAndLoggerName(loggerConfig, out var parameters, out var loggerName);
 
-        if (loggerName == "trx") {
-          var logger = new TrxLogger();
-          logger.Initialize(events, parameters!);
-        } else if (loggerName == "csv") {
-          var csvLogger = new CSVTestLogger(options.OutputWriter);
-          csvLogger.Initialize(events, parameters);
-        } else if (loggerName == "json") {
-          // This logger doesn't implement the ITestLogger interface because
-          // it uses information that's tricky to encode in a TestResult.
-          var jsonLogger = new JsonVerificationLogger(depManager, options.OutputWriter);
-          jsonLogger.Initialize(parameters);
-          formatLoggers.Add(jsonLogger);
-        } else if (loggerName == "text") {
-          // This logger doesn't implement the ITestLogger interface because
-          // it uses information that's tricky to encode in a TestResult.
-          var textLogger = new TextVerificationLogger(depManager, options.OutputWriter);
-          textLogger.Initialize(parameters);
-          formatLoggers.Add(textLogger);
-        } else {
-          throw new ArgumentException($"unsupported verification logger config: {loggerConfig}");
+          if (loggerName == "trx") {
+            var logger = new TrxLogger();
+            logger.Initialize(events, parameters!);
+          } else if (loggerName == "csv") {
+            var csvLogger = new CSVTestLogger(options.OutputWriter);
+            csvLogger.Initialize(events, parameters);
+          } else if (loggerName == "json") {
+            // This logger doesn't implement the ITestLogger interface because
+            // it uses information that's tricky to encode in a TestResult.
+            var jsonLogger = new JsonVerificationLogger(depManager, options.OutputWriter, sourcePathMapper);
+            jsonLogger.Initialize(parameters);
+            formatLoggers.Add(jsonLogger);
+          } else if (loggerName == "text") {
+            // This logger doesn't implement the ITestLogger interface because
+            // it uses information that's tricky to encode in a TestResult.
+            var textLogger = new TextVerificationLogger(depManager, options.OutputWriter);
+            textLogger.Initialize(parameters);
+            formatLoggers.Add(textLogger);
+          } else {
+            throw new ArgumentException($"unsupported verification logger config: {loggerConfig}");
+          }
         }
+      } catch {
+        Dispose();
+        throw;
       }
     }
 
@@ -107,18 +117,48 @@ namespace Microsoft.Dafny {
           formatLogger.LogScopeResults(scopeResult);
         }
         foreach (var result in VerificationToTestResults(scopeResult)) {
+          result.TestCase.Source = sourcePathMapper(result.TestCase.Source);
           events.RaiseTestResult(new TestResultEventArgs(result));
         }
       }
     }
 
     public async Task Finish() {
-      events.RaiseTestRunComplete(new TestRunCompleteEventArgs(
-        new TestRunStatistics(),
-        false, false, null, null, new TimeSpan()
-      ));
-      foreach (var formatLogger in formatLoggers) {
-        await formatLogger.Flush();
+      if (disposed) {
+        return;
+      }
+      try {
+        CompleteEvents();
+        foreach (var formatLogger in formatLoggers) {
+          await formatLogger.Flush();
+        }
+      }
+      finally {
+        Dispose();
+      }
+    }
+
+    private void CompleteEvents() {
+      if (!completedEvents) {
+        completedEvents = true;
+        events.RaiseTestRunComplete(new TestRunCompleteEventArgs(
+          new TestRunStatistics(), false, false, null, null, new TimeSpan()));
+      }
+    }
+
+    public void Dispose() {
+      if (disposed) {
+        return;
+      }
+      disposed = true;
+      try {
+        CompleteEvents();
+      }
+      finally {
+        events.Dispose();
+        foreach (var logger in formatLoggers) {
+          logger.Dispose();
+        }
       }
     }
 

@@ -53,6 +53,7 @@ public static class DafnyNewCli {
     AddCommand(ExtractCommand.Create());
     AddCommand(SimplifyCommand.Create());
     AddCommand(DefinitionAnalysisCommand.Create());
+    AddCommand(AnalysisSessionCommand.Create());
     AddCommand(SourceFingerprintCommand.Create());
     AddCommand(ContractRuntimeLibraryCommand.Create());
     AddCommand(TestContractsCommand.Create());

@@ -76,6 +76,7 @@ public class Compilation : IDisposable {
   public Task<IReadOnlyList<DafnyFile>> RootFiles { get; set; }
   public bool HasErrors { get; private set; }
   public bool ShouldProcessSolverOptions { get; set; } = true;
+  public bool ShouldResolve { get; set; } = true;
 
   public Compilation(
     ILogger<Compilation> logger,
@@ -273,6 +274,9 @@ public class Compilation : IDisposable {
     if (transformedProgram == null) {
       return null;
     }
+    if (!ShouldResolve) {
+      return null;
+    }
     var resolution = await documentLoader.ResolveAsync(this, transformedProgram!, cancellationSource.Token);
     if (resolution == null) {
       return null;
@@ -295,6 +299,9 @@ public class Compilation : IDisposable {
 
     return prefix;
   }
+
+  public static ICanVerify? GetTaskOwner(IVerificationTask task) =>
+    (task.ScopeToken as CanVerifyOrigin)?.CanVerify;
 
   // When verifying a symbol, a ticket must be acquired before the SMT part of verification may start.
   private readonly AsyncQueue<Unit> verificationTickets = new();

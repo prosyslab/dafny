@@ -9,6 +9,7 @@ using VC;
 namespace Microsoft.Dafny;
 
 public class TextVerificationLogger : IVerificationResultFormatLogger {
+  public void Dispose() => output?.Dispose();
   private TextWriter output;
   private IDafnyOutputWriter fallbackWriter;
   private ProofDependencyManager depManager;

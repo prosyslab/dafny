@@ -32,6 +32,24 @@ public class CliCompilation {
   private int internalExceptionsFound;
   public bool DidVerification { get; private set; }
 
+  internal CliCompilation(Compilation compilation, DafnyOptions options) {
+    Compilation = compilation;
+    Options = options;
+  }
+
+  internal void ReportDiagnostic(DafnyDiagnostic diagnostic) {
+    if (diagnostic.Level == ErrorLevel.Error) {
+      errorsPerSource.AddOrUpdate(diagnostic.Source, _ => 1, (_, previous) => previous + 1);
+      Interlocked.Increment(ref errorCount);
+    }
+    if (diagnostic.Level == ErrorLevel.Warning) {
+      Interlocked.Increment(ref warningCount);
+    }
+    ErrorReporter reporter = Options.DiagnosticsFormat == DafnyOptions.DiagnosticsFormats.JSON
+      ? new JsonConsoleErrorReporter(Options) : new ConsoleErrorReporter(Options);
+    reporter.MessageCore(diagnostic);
+  }
+
   internal CliCompilation(
     CreateCompilation createCompilation,
     DafnyOptions options) {
@@ -315,7 +333,7 @@ public class CliCompilation {
     };
   }
 
-  class LineRange(int start, int end) {
+  internal class LineRange(int start, int end) {
     public int Start { get; } = start;
     public int End { get; } = end;
 
@@ -325,7 +343,7 @@ public class CliCompilation {
     public bool Filters => Start != int.MinValue || End != int.MaxValue;
   }
 
-  private IReadOnlyList<ICanVerify> FilterCanVerifies(IDictionary<Uri, IIntervalTree<DafnyPosition, ICanVerify>> canVerifies, out LineRange range) {
+  internal IReadOnlyList<ICanVerify> FilterCanVerifies(IDictionary<Uri, IIntervalTree<DafnyPosition, ICanVerify>> canVerifies, out LineRange range) {
     int start = int.MinValue;
     int end = int.MaxValue;
     var filterPosition = Options.Get(VerifyCommand.FilterPosition);
@@ -379,7 +397,7 @@ public class CliCompilation {
 
   }
 
-  private bool KeepVerificationTask(IVerificationTask task, LineRange range) {
+  internal bool KeepVerificationTask(IVerificationTask task, LineRange range) {
     return range.Contains(task.ScopeToken.line) || range.Contains(task.Token.line);
   }
 }

@@ -12,13 +12,17 @@ using VC;
 namespace Microsoft.Dafny;
 
 public class JsonVerificationLogger : IVerificationResultFormatLogger {
+  public void Dispose() => output?.Dispose();
   private TextWriter output;
   private readonly IDafnyOutputWriter fallbackOutput;
   private readonly ProofDependencyManager dependencyManager;
+  private readonly Func<string, string> sourcePathMapper;
 
-  public JsonVerificationLogger(ProofDependencyManager dependencyManager, IDafnyOutputWriter fallbackOutput) {
+  public JsonVerificationLogger(ProofDependencyManager dependencyManager, IDafnyOutputWriter fallbackOutput,
+    Func<string, string> sourcePathMapper = null) {
     this.dependencyManager = dependencyManager;
     this.fallbackOutput = fallbackOutput;
+    this.sourcePathMapper = sourcePathMapper ?? (path => path);
   }
 
   public void Initialize(Dictionary<string, string> parameters) {
@@ -136,7 +140,28 @@ public class JsonVerificationLogger : IVerificationResultFormatLogger {
   }
 
   public void LogScopeResults(VerificationScopeResult scopeResult) {
-    verificationResultNode.Add(SerializeVerificationResult(scopeResult.Scope, scopeResult.Results.ToList()));
+    var result = SerializeVerificationResult(scopeResult.Scope, scopeResult.Results.ToList());
+    MapSourcePaths(result);
+    verificationResultNode.Add(result);
+  }
+
+  private void MapSourcePaths(JsonNode node) {
+    if (node is JsonObject value) {
+      foreach (var property in value.ToList()) {
+        if (property.Key is "filename" or "startFile" or "endFile" && property.Value is JsonValue text &&
+            text.TryGetValue<string>(out var path)) {
+          value[property.Key] = sourcePathMapper(path);
+        } else if (property.Value != null) {
+          MapSourcePaths(property.Value);
+        }
+      }
+    } else if (node is JsonArray array) {
+      foreach (var child in array) {
+        if (child != null) {
+          MapSourcePaths(child);
+        }
+      }
+    }
   }
 
   private readonly IList<JsonNode> verificationResultNode = new List<JsonNode>();
