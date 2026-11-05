@@ -1,6 +1,9 @@
 #nullable enable
 using System;
 using System.Collections.Generic;
+using System.Collections;
+using System.CommandLine;
+using System.CommandLine.Binding;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -28,18 +31,57 @@ public static partial class DefinitionAnalysis {
   /// <summary>Identifies effective resolver and verifier settings, including native solver options.</summary>
   public static string ContextOptionsIdentity(DafnyOptions options) => ProofOptionsHash(options);
 
+  public static string ResolutionOptionsIdentity(DafnyOptions options) => ProofHash(JsonSerializer.Serialize(new {
+    Arguments = DafnyCommands.ResolverOptions.Concat(new Option[] {
+      CommonOptionBag.UnrollBoundedQuantifiers, CommonOptionBag.RelaxDefiniteAssignment,
+      CommonOptionBag.VerifyIncludedFiles, CommonOptionBag.ManualLemmaInduction,
+      CommonOptionBag.DefaultFunctionOpacity, CommonOptionBag.ManualTriggerOption,
+      BoogieOptionBag.VerificationTimeLimit, BoogieOptionBag.SolverResourceLimit
+    }).Distinct().Where(option => option != CommonOptionBag.LogLocation &&
+      option != CommonOptionBag.LogLevelOption && option != BoogieOptionBag.Cores &&
+      option != CommonOptionBag.Libraries)
+      .OrderBy(option => option.Name, StringComparer.Ordinal)
+      .Select(option => new { option.Name, Value = EffectiveOption(options, option) }).ToList(),
+    options.TimeLimit,
+    options.ResourceLimit,
+    options.AutoTriggers
+  }));
+
+  private static object? EffectiveOption(DafnyOptions options, Option option) {
+    if (!options.Options.OptionArguments.TryGetValue(option, out var value)) {
+      var descriptor = (IValueDescriptor)option;
+      value = descriptor.HasDefaultValue ? descriptor.GetDefaultValue() :
+        option.ValueType == typeof(bool) ? false : option.ValueType == typeof(uint) ? 0U :
+        option.ValueType == typeof(int) ? 0 : null;
+    }
+    if (value is IEnumerable sequence and not string) {
+      return sequence.Cast<object>().ToArray();
+    }
+    if (value == null && (option.ValueType == typeof(IEnumerable<string>) || option.ValueType == typeof(IList<string>))) {
+      return Array.Empty<string>();
+    }
+    return value is FileSystemInfo file ? file.FullName : value;
+  }
+
   /// <summary>Rejects transformations whose dependency semantics are outside native diagnostic binding.</summary>
-  public static bool SupportsDiagnosticContext(DafnyOptions options) =>
+  public static bool SupportsDiagnosticContext(DafnyOptions options, bool allowSourceLibraries = false) =>
     !(options.Get(CommonOptionBag.PluginOption)?.Count is > 0 ||
       options.AdditionalPlugins.Count > 0 || options.AdditionalPluginArguments.Count > 0 ||
       !options.Plugins.SequenceEqual(DafnyOptions.DefaultPlugins) ||
-      options.Get(BoogieOptionBag.BoogieArguments)?.Any() == true ||
+      !SupportedProofBoogieArguments(options) ||
       options.InlineDepth != DafnyOptions.Default.InlineDepth ||
       options.StratifiedInlining != DafnyOptions.Default.StratifiedInlining ||
       options.ProcedureInlining != DafnyOptions.Default.ProcedureInlining || options.InferModifies ||
       options.LoopUnrollCount != DafnyOptions.Default.LoopUnrollCount ||
       options.SoundLoopUnrolling != DafnyOptions.Default.SoundLoopUnrolling ||
-      options.Get(CommonOptionBag.Libraries)?.Any() == true || options.Get(CommonOptionBag.Prelude) != null);
+      !allowSourceLibraries && options.Get(CommonOptionBag.Libraries)?.Any() == true || options.Get(CommonOptionBag.Prelude) != null);
+
+  private static bool SupportedProofBoogieArguments(DafnyOptions options) {
+    var arguments = options.Get(BoogieOptionBag.BoogieArguments)?.ToList() ?? new List<string>();
+    return arguments.Count == 0 || arguments.Count == 1 &&
+      arguments[0].StartsWith("/randomSeed:", StringComparison.Ordinal) &&
+      int.TryParse(arguments[0]["/randomSeed:".Length..], out var seed) && seed == options.RandomSeed;
+  }
   private sealed record TranslatedProofDeclaration(
     string Module,
     string Sha256,
@@ -50,6 +92,83 @@ public static partial class DefinitionAnalysis {
     ProofInputsFor(program, analysisSourceUris,
       input => BoogieGenerator.Translate(input, input.Reporter), () => ProofToolchainIdentity.Value);
 
+  /// <summary>Hash fresh native translations before Boogie prepares mutable verification tasks.</summary>
+  public static DafnyProofInputs? ProofInputsFromTranslations(Program program,
+    IReadOnlySet<Uri> analysisSourceUris, IReadOnlyList<Tuple<string, Bpl.Program>> translations) =>
+    ProofInputsFor(program, analysisSourceUris, _ => translations, () => ProofToolchainIdentity.Value);
+
+  /// <summary>Bind native result-cache checksums to the complete existing translated input identity.</summary>
+  /// <remarks>
+  /// The key is position-free: the base checksum is an MD5 of the printed declaration, the fingerprint hashes
+  /// the printed translation, and <see cref="AssertionShape"/> guards the ordered assertion sequence. Cached
+  /// results are rebased onto the current split assertions when they are replayed, so reports use current tokens.
+  /// </remarks>
+  public static void BindNativeVerificationChecksums(IReadOnlyList<Tuple<string, Bpl.Program>> translations,
+    DafnyProofInputs? proofInputs) {
+    var fingerprints = proofInputs?.Definitions.GroupBy(definition => (definition.SourcePath, definition.FullName))
+      .Where(group => group.Count() == 1).ToDictionary(group => group.Key, group => group.Single().Sha256);
+    foreach (var (_, translation) in translations) {
+      var procedures = translation.Procedures.GroupBy(procedure => procedure.Name, StringComparer.Ordinal)
+        .Where(group => group.Count() == 1).ToDictionary(group => group.Key, group => group.Single(), StringComparer.Ordinal);
+      foreach (var implementation in translation.Implementations) {
+        string? fingerprint = null;
+        if (implementation.tok is CanVerifyOrigin { CanVerify: INode node } origin) {
+          fingerprints?.TryGetValue((SourcePath(node), origin.CanVerify.FullDafnyName), out fingerprint);
+        }
+        // Boogie's dependency collector covers functions and procedures, but arbitrary
+        // translated axioms can also affect a VC. Unsupported certificate owners retain
+        // same-state task reuse, with a fresh checksum preventing cross-state cache replay.
+        var checksum = ProofHash(implementation.Checksum + "\0" + (fingerprint != null
+          ? fingerprint + "\0" + AssertionShape(implementation, procedures) : Guid.NewGuid().ToString("N")));
+        implementation.Attributes = new Bpl.QKeyValue(implementation.tok, "checksum", new List<object> { checksum },
+          implementation.Attributes);
+      }
+    }
+  }
+
+  /// <summary>
+  /// Hash the ordered proof obligations of a fresh translation without any token or position. Native cached
+  /// results retain assertion objects; the same shape lets a reused result be mapped onto the current assertions
+  /// by ordinal. Boogie later desugars non-free call preconditions and procedure postconditions into assertions,
+  /// so those are listed from the contracts they come from, in the order of the commands that use them.
+  /// A fresh translation has unresolved callee and procedure references, so contracts are found by name.
+  /// </summary>
+  internal static string AssertionShape(Bpl.Implementation implementation, IReadOnlyDictionary<string, Bpl.Procedure> procedures) {
+    var shape = new List<object>();
+    void Add(string kind, Bpl.ProofObligationDescription? description) =>
+      shape.Add(new { Kind = kind, Ordinal = shape.Count, Success = description?.SuccessDescription, Failure = description?.FailureDescription });
+    void Visit(IEnumerable<Bpl.Cmd> commands) {
+      foreach (var command in commands) {
+        switch (command) {
+          case Bpl.AssertCmd assert:
+            Add(assert.GetType().Name, assert.Description);
+            break;
+          case Bpl.CallCmd call:
+            // An unknown callee still contributes its name, so the key cannot ignore the call.
+            Add("Call:" + call.callee, null);
+            if (procedures.TryGetValue(call.callee, out var callee)) {
+              foreach (var requires in callee.Requires.Where(requires => !requires.Free)) {
+                Add("CallRequires", requires.Description);
+              }
+            }
+            break;
+          case Bpl.StateCmd state:
+            Visit(state.Cmds);
+            break;
+        }
+      }
+    }
+    foreach (var block in implementation.Blocks) {
+      Visit(block.Cmds);
+    }
+    if (procedures.TryGetValue(implementation.Name, out var own)) {
+      foreach (var ensures in own.Ensures.Where(ensures => !ensures.Free)) {
+        Add("ProcedureEnsures", ensures.Description);
+      }
+    }
+    return ProofHash(JsonSerializer.Serialize(shape));
+  }
+
   // Let memory tests supply the translation environment and toolchain identity; keep fingerprinting here.
   internal static DafnyProofInputs? ProofInputsFor(Program program, IReadOnlySet<Uri> analysisSourceUris,
     Func<Program, IEnumerable<Tuple<string, Bpl.Program>>> translate, Func<string?> toolchainIdentity) {
@@ -59,7 +178,7 @@ public static partial class DefinitionAnalysis {
     if (options.Get(CommonOptionBag.PluginOption)?.Count is > 0 ||
         options.AdditionalPlugins.Count > 0 || options.AdditionalPluginArguments.Count > 0 ||
         !options.Plugins.SequenceEqual(DafnyOptions.DefaultPlugins) ||
-        options.Get(BoogieOptionBag.BoogieArguments)?.Any() == true ||
+        !SupportedProofBoogieArguments(options) ||
         options.InlineDepth != DafnyOptions.Default.InlineDepth ||
         options.StratifiedInlining != DafnyOptions.Default.StratifiedInlining ||
         options.ProcedureInlining != DafnyOptions.Default.ProcedureInlining ||
@@ -69,7 +188,7 @@ public static partial class DefinitionAnalysis {
       return null;
     }
 
-    var sourceDefinitions = SourceDefinitions(program, spansOnly: false, analysisSourceUris);
+    var sourceDefinitions = SourceDefinitions(program, spansOnly: false, analysisSourceUris, identitiesOnly: true);
     var declarationIndex = SourceDeclarationIndex(program, sourceDefinitions);
     var printOptions = new DafnyOptions(options) {
       PrintInstrumented = true,
@@ -86,6 +205,7 @@ public static partial class DefinitionAnalysis {
       var procedures = boogieProgram.TopLevelDeclarations.OfType<Bpl.Procedure>()
         .GroupBy(procedure => procedure.Name, StringComparer.Ordinal)
         .ToDictionary(group => group.Key, group => group.ToList(), StringComparer.Ordinal);
+      var declarations = new List<(Bpl.Declaration Declaration, DefinitionNode? Owner, bool Excludable)>();
       foreach (var declaration in boogieProgram.TopLevelDeclarations) {
         DefinitionNode? owner = null;
         var excludable = false;
@@ -104,8 +224,11 @@ public static partial class DefinitionAnalysis {
               !HasInlineAttribute(matches[0].Attributes);
           }
         }
+        declarations.Add((declaration, owner, excludable));
+      }
+      foreach (var declaration in declarations) {
         translated.Add(new TranslatedProofDeclaration(moduleName,
-          ProofDeclarationHash(printOptions, declaration), owner, excludable));
+          ProofDeclarationHash(printOptions, declaration.Declaration), declaration.Owner, declaration.Excludable));
       }
     }
     if (program.Reporter.ErrorCount != errorCount || translated.Count == 0) {
@@ -153,7 +276,9 @@ public static partial class DefinitionAnalysis {
 
   private static string ProofDeclarationHash(DafnyOptions options, Bpl.Declaration declaration) {
     using var text = new StringWriter();
-    using (var writer = new Bpl.TokenTextWriter(text, options)) {
+    // The short constructor changes source tokens. Keep task ownership and diagnostics
+    // intact when this translation will subsequently be prepared for verification.
+    using (var writer = new Bpl.TokenTextWriter("proof-input", text, false, false, options)) {
       declaration.Emit(writer, 0);
     }
     // Boogie's own lexer drops whitespace and comments without touching string
@@ -217,10 +342,14 @@ public static partial class DefinitionAnalysis {
 
   private static string ProofOptionsHash(DafnyOptions options) {
     var arguments = DafnyCommands.VerificationOptions.Concat(DafnyCommands.ResolverOptions).Distinct()
-      .Where(option => option != CommonOptionBag.Libraries && option != CommonOptionBag.Prelude)
+      .Where(option => option != CommonOptionBag.Libraries && option != CommonOptionBag.Prelude &&
+        option != CommonOptionBag.VerificationLogFormat && option != CommonOptionBag.ProgressOption &&
+        option != CommonOptionBag.VerificationCoverageReport && option != CommonOptionBag.NoTimeStampForCoverageReport &&
+        option != CommonOptionBag.JsonOutput && option != CommonOptionBag.JsonDiagnostics &&
+        option != CommonOptionBag.LogLocation && option != CommonOptionBag.LogLevelOption)
       .OrderBy(option => option.Name, StringComparer.Ordinal)
       .Select(option => {
-        var value = options.Options.OptionArguments.GetValueOrDefault(option);
+        var value = EffectiveOption(options, option);
         return new {
           option.Name,
           Value = value is FileSystemInfo file ? file.FullName : value
@@ -246,6 +375,9 @@ public static partial class DefinitionAnalysis {
       options.VcsSplitOnEveryAssert,
       options.RelaxFocus,
       options.RandomSeed,
+      options.TimeLimit,
+      options.ResourceLimit,
+      options.AutoTriggers,
       options.RandomizeVcIterations,
       options.ProverOptions,
       options.VerifySnapshots

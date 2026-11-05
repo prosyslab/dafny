@@ -278,9 +278,12 @@ public static partial class DefinitionAnalysis {
     bool includeSemanticFacts = false,
     bool includeProofInputs = false,
     IEnumerable<ICanVerify>? verificationTargets = null,
-    IReadOnlyDictionary<string, string>? sourceSnapshots = null) {
+    IReadOnlyDictionary<string, string>? sourceSnapshots = null,
+    SessionCache? sessionCache = null,
+    Func<DafnyProofInputs?>? preparedProofInputs = null) {
+    sessionCache?.Begin(analysisSourceUris, includeStatements);
     var (sourceFacts, programFacts) = SourceFacts.ForDocument(program, analysisSourceUris);
-    var definitions = Analyze(program, sourceFacts, analysisSourceUris, includeStatements);
+    var definitions = Analyze(program, sourceFacts, analysisSourceUris, includeStatements, sessionCache);
     if (includeSemanticFacts) {
       programFacts = programFacts with {
         SemanticFacts = SemanticFactsFor(program.Options, analysisSourceUris, definitions, programFacts, sourceSnapshots)
@@ -293,7 +296,7 @@ public static partial class DefinitionAnalysis {
     }
     if (includeProofInputs) {
       programFacts = programFacts with {
-        ProofInputs = ProofInputsFor(program, analysisSourceUris)
+        ProofInputs = preparedProofInputs == null ? ProofInputsFor(program, analysisSourceUris) : preparedProofInputs()
       };
     }
     return new DefinitionAnalysisDocument(
@@ -305,11 +308,13 @@ public static partial class DefinitionAnalysis {
     Program program,
     SourceFacts sourceFacts,
     IReadOnlySet<Uri> analysisSourceUris,
-    bool includeStatements = false) {
+    bool includeStatements = false,
+    SessionCache? sessionCache = null) {
     var allDeclarations = SourceDefinitions(
       program,
       spansOnly: false,
-      analysisSourceUris: analysisSourceUris);
+      analysisSourceUris: analysisSourceUris,
+      sessionCache: sessionCache);
     var declarations = allDeclarations
       .Where(declaration => analysisSourceUris.Contains(declaration.Declaration.StartToken.Uri))
       .ToList();
@@ -323,20 +328,35 @@ public static partial class DefinitionAnalysis {
     var callTargetIndex = CallTargetIndex.For(callableDeclarations, declarationNodes);
     var callFacts = declarations.ToDictionary(
       declaration => declaration,
-      declaration => CalledDefinitions(declaration, callTargetIndex));
+      declaration => sessionCache?.Calls(declaration, () => CalledDefinitions(declaration, callTargetIndex)) ??
+        CalledDefinitions(declaration, callTargetIndex));
     var graph = callFacts.ToDictionary(
       item => item.Key,
       item => item.Value.UniqueCallees);
     var recursionGraph = graph.ToDictionary(
       item => item.Key,
       item => item.Value.Where(callFacts.ContainsKey).ToHashSet());
-    var resolvedDeclarationFacts = ResolvedDeclarationFacts.For(declarations, declarationNodes);
+    var uncachedDeclarations = declarations.Where(declaration => sessionCache == null || !sessionCache.HasResult(declaration)).ToList();
+    var resolvedDeclarationFacts = ResolvedDeclarationFacts.For(uncachedDeclarations, declarationNodes);
     var recursionFacts = AnalyzeRecursion(recursionGraph);
 
     var bodyVisibility = new BodyVisibilityAnalysis(program.Options);
     var results = declarations
       .OrderBy(declaration => declaration.Start)
-      .Select(declaration => ResultFor(
+      .Select(declaration => (sessionCache?.Result(declaration, () => Create(declaration)) ?? Create(declaration)) with {
+        Recursive = recursionFacts.RecursiveDeclarations.Contains(declaration),
+        RecursiveGroup = recursionFacts.GroupNames.GetValueOrDefault(declaration) ?? Array.Empty<string>(),
+        SourceModules = sourceFacts.SourceModules,
+        IncludedFiles = sourceFacts.IncludedFiles,
+        LocalIncludedModules = sourceFacts.LocalIncludedModulesFor(declaration.SourcePath),
+        ImportedModules = sourceFacts.ImportedModulesFor(declaration.SourcePath),
+        LocalIncludes = sourceFacts.LocalIncludesFor(declaration.SourcePath)
+      })
+      .ToList();
+    sessionCache?.Prune(allDeclarations);
+    return results;
+
+    DefinitionAnalysisResult Create(DefinitionNode declaration) => ResultFor(
         declaration,
         sourceFacts,
         recursionFacts,
@@ -346,9 +366,7 @@ public static partial class DefinitionAnalysis {
         resolvedDeclarationFacts,
         includeStatements) with {
         BodyVisibility = bodyVisibility.For(declaration.Declaration)
-      })
-      .ToList();
-    return results;
+      };
   }
 
   public static IReadOnlyList<DefinitionAnalysisResult> AnalyzeSpans(
@@ -877,10 +895,17 @@ public static partial class DefinitionAnalysis {
   private static List<DefinitionNode> SourceDefinitions(
     Program program,
     bool spansOnly,
-    IReadOnlySet<Uri> analysisSourceUris) {
+    IReadOnlySet<Uri> analysisSourceUris,
+    SessionCache? sessionCache = null,
+    bool identitiesOnly = false) {
     var declarations = new List<DefinitionNode>();
     var modules = ParsedModules(program);
     foreach (var moduleDefinition in modules) {
+      if (sessionCache != null && sessionCache.TryModule(moduleDefinition, out var cachedDeclarations)) {
+        declarations.AddRange(cachedDeclarations!);
+        continue;
+      }
+      var moduleStart = declarations.Count;
       foreach (var topLevelDecl in moduleDefinition.TopLevelDecls) {
         if (topLevelDecl is LiteralModuleDecl literal && literal.ModuleDef.BodyStartTok == Token.NoToken) {
           continue;
@@ -891,7 +916,7 @@ public static partial class DefinitionAnalysis {
           continue;
         }
         var enclosingName = moduleDefinition.FullDafnyName;
-        var purpose = NodePurpose(spansOnly, topLevelIsTarget);
+        var purpose = identitiesOnly ? DefinitionNodePurpose.ResolvedInclude : NodePurpose(spansOnly, topLevelIsTarget);
         var kind = topLevelDecl switch {
           DatatypeDecl => "datatype",
           SubsetTypeDecl => "subset type",
@@ -929,7 +954,7 @@ public static partial class DefinitionAnalysis {
             continue;
           }
 
-          var memberPurpose = NodePurpose(spansOnly, memberIsTarget);
+          var memberPurpose = identitiesOnly ? DefinitionNodePurpose.ResolvedInclude : NodePurpose(spansOnly, memberIsTarget);
           if (member is Function function) {
             declarations.Add(DefinitionNode.ForFunction(function, memberEnclosingName, memberPurpose));
             if (!spansOnly && function.ByMethodBody != null) {
@@ -960,6 +985,7 @@ public static partial class DefinitionAnalysis {
         }
         SetSourceGroup(group);
       }
+      sessionCache?.StoreModule(moduleDefinition, declarations.Skip(moduleStart).ToList());
     }
 
     return declarations;
@@ -1088,7 +1114,7 @@ public static partial class DefinitionAnalysis {
     }
   }
 
-  private sealed record CallFacts(
+  internal sealed record CallFacts(
     IReadOnlyList<DefinitionNode> Sequence,
     HashSet<DefinitionNode> UniqueCallees
   );
