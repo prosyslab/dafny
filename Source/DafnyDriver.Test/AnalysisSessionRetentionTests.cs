@@ -105,6 +105,81 @@ public class AnalysisSessionRetentionTests {
     }
   }
 
+  // An edit confined to one method keeps the other target's modular key, so its result is reused across
+  // compilations while the edited method is proved again.
+  [Fact]
+  public async Task UnrelatedEditKeepsOtherTargetsReusable() {
+    var edited = Source.Replace("invariant r <= n", "invariant r <= n && r >= 0");
+    Assert.NotEqual(Source, edited);
+    using var session = new AnalysisSessionCommand.Session();
+    var cold = await Run(session, Verify, "cold");
+    Assert.Equal(0, cold.Code);
+    var warm = await Run(session, Verify, "edited", source: edited);
+    Assert.Equal(0, warm.Code);
+    Assert.Equal(cold.Count("taskCount"), warm.Count("taskCount"));
+    Assert.True(warm.Count("cacheHitCount") > 0, warm.Evidence.ToString());
+    Assert.True(warm.Count("solverRunCount") > 0, warm.Evidence.ToString());
+    Assert.True(warm.Count("cacheHitCount") < warm.Count("taskCount"), warm.Evidence.ToString());
+  }
+
+  private const string ReusePath = Cwd + "/Reuse.dfy";
+  // Target's live set does not reach Helper, but Boogie's dependency collector reaches it through the datatype's
+  // constructor functions (the Cat shape: a discriminator, constructors, a predicate over a constructor, a helper).
+  private const string ReuseSource = """
+    module Reuse {
+      datatype Mode = Help | Run(n: nat)
+      function Helper(x: int): int { x + 1 }
+      ghost predicate Witness(m: Mode, x: int) { m == Help ==> Helper(x) > x }
+      lemma Target(m: Mode) ensures m.Help? || m.Run? { }
+      lemma Other(x: int) ensures Witness(Help, x) { }
+    }
+    """;
+
+  private static async Task<Reply> RunReuse(AnalysisSessionCommand.Session session, string target, string id,
+    string source, params string[] extra) {
+    var arguments = new[] { "verify", "--log-format:json", $"--filter-symbol={target}" }.Concat(extra).Append(ReusePath).ToArray();
+    var response = await session.Execute(new AnalysisSessionCommand.Request(id, arguments, Cwd, "default",
+      new Dictionary<string, string> { [ReusePath] = source }), CancellationToken.None);
+    return new Reply(response.Returncode, response.Stdout, response.Stderr,
+      JsonSerializer.SerializeToElement(response.NativeEvidence, AnalysisSessionCommand.JsonOptions));
+  }
+
+  // The native cache reuses a result when the modular key matches, whatever Boogie's own dependency checksum says:
+  // an edit outside the target's live set hits, an edit inside another target's live set misses there.
+  [Fact]
+  public async Task NativeLookupFollowsTheModularKey() {
+    var edited = ReuseSource.Replace("x + 1 }", "x + 2 }");
+    Assert.NotEqual(ReuseSource, edited);
+    using var session = new AnalysisSessionCommand.Session();
+    var target = await RunReuse(session, "Reuse.Target", "t1", ReuseSource);
+    var other = await RunReuse(session, "Reuse.Other", "o1", ReuseSource);
+    Assert.True(target.Code == 0, target.Stdout + target.Stderr);
+    Assert.True(other.Code == 0, other.Stdout + other.Stderr);
+    Assert.True(target.Count("solverRunCount") > 0);
+    var targetAgain = await RunReuse(session, "Reuse.Target", "t2", edited);
+    var otherAgain = await RunReuse(session, "Reuse.Other", "o2", edited);
+    Assert.Equal(0, targetAgain.Code);
+    Assert.Equal(targetAgain.Count("taskCount"), targetAgain.Count("cacheHitCount"));
+    Assert.True(targetAgain.Count("solverRunCount") == 0, targetAgain.Evidence.ToString());
+    Assert.Equal(0, otherAgain.Code);
+    Assert.True(otherAgain.Count("solverRunCount") > 0, otherAgain.Evidence.ToString());
+  }
+
+  // Session proof inputs are schema 3 and certify a target without proof obligations.
+  [Fact]
+  public async Task SessionProofInputsCertifyZeroObligationTargets() {
+    var source = Source.Replace("module Retention {", "module Retention {\n  function Id(x: int): int { x }");
+    using var session = new AnalysisSessionCommand.Session();
+    var reply = await Run(session, ["definition-analysis", "--include-proof-inputs", Path], "inputs", source: source);
+    Assert.True(reply.Code == 0, reply.Stdout + reply.Stderr);
+    var inputs = Json(reply.Stdout)["sourceFacts"]!["proofInputs"]!;
+    Assert.Equal(3, inputs["schemaVersion"]!.GetValue<int>());
+    var rows = inputs["definitions"]!.AsArray().ToDictionary(row => row!["fullName"]!.GetValue<string>(), row => row!);
+    Assert.Equal(0, rows["Retention.Id"]["implementations"]!.GetValue<int>());
+    Assert.True(rows["Retention.Sound"]["implementations"]!.GetValue<int>() > 0);
+    Assert.NotNull(rows["Retention.Count"]["closureOrigins"]);
+  }
+
   // Retained contexts are capped: the least recently used context is evicted and cleared.
   [Fact]
   public async Task LeastRecentlyUsedContextsAreEvicted() {
@@ -189,6 +264,43 @@ public class AnalysisSessionRetentionTests {
     .SelectMany(scope => scope!["vcResults"]!.AsArray())
     .SelectMany(result => result!["assertions"]!.AsArray())
     .Select(assertion => $"{assertion!["line"]}:{assertion["col"]}:{assertion["description"]}"));
+
+  // The verifier's fake-solver case: a request naming another solver path never reuses the state whose engine starts
+  // the first path, even when both files have equal content (injected; the two bundled Z3 builds stand in for byte
+  // copies). The proof options stay path-free, and the same path reuses its state.
+  [Fact]
+  public async Task AnotherSolverPathNeverReusesTheState() {
+    var directory = System.IO.Path.Combine(System.IO.Path.GetDirectoryName(typeof(DafnyOptions).Assembly.Location)!, "z3", "bin");
+    var first = System.IO.Path.Combine(directory, $"z3-{DafnyOptions.DefaultZ3Version}");
+    var second = System.IO.Path.Combine(directory, "z3-4.12.1");
+    Assert.True(File.Exists(first) && File.Exists(second) && first != second);
+    using var session = new AnalysisSessionCommand.Session { ToolFileHash = _ => "equal-bytes" };
+    string[] Analyze(string solver) => ["definition-analysis", "--include-proof-inputs", "--solver-path", solver, Path];
+    var a = await Run(session, Analyze(first), "a");
+    var b = await Run(session, Analyze(second), "b");
+    var again = await Run(session, Analyze(second), "again");
+    foreach (var reply in new[] { a, b, again }) {
+      Assert.True(reply.Code == 0, reply.Stderr);
+    }
+    string Identity(Reply reply) => reply.Evidence.GetProperty("optionsIdentity").GetString()!;
+    Assert.NotEqual(Identity(a), Identity(b));
+    Assert.True(b.Count("generation") > a.Count("generation"), b.Evidence.ToString());
+    Assert.Equal(Identity(b), Identity(again));
+    Assert.Equal(b.Count("generation"), again.Count("generation"));
+    string OptionsSha(Reply reply) => Json(reply.Stdout)["sourceFacts"]!["proofInputs"]!["optionsSha256"]!.GetValue<string>();
+    Assert.Equal(OptionsSha(a), OptionsSha(b));
+  }
+
+  // The session refuses a relative or unnormalized solver path instead of hashing one file while starting another.
+  [Theory]
+  [InlineData("z3/bin/z3-4.16.0")]
+  [InlineData("/workspace/session-retention/link/../z3")]
+  public async Task InexactSolverPathIsUnsupported(string solver) {
+    using var session = new AnalysisSessionCommand.Session();
+    var reply = await Run(session, ["verify", "--solver-option", "PROVER_PATH=" + solver, Path], "inexact");
+    Assert.Equal(7, reply.Code);
+    Assert.Contains("DAFNY_SESSION_UNSUPPORTED", reply.Stderr);
+  }
 
   // Timing fields differ between a cold run and a replayed one; every other logged field must not.
   private static string Normalize(string stdout) {

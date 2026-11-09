@@ -486,8 +486,20 @@ static class AnalysisSessionCommand {
     internal int ImportedSeedsBound { get; private set; }
     /// <summary>Imported parser sources dropped because their resolver identity did not match the request.</summary>
     internal int ImportedSeedsDiscarded { get; private set; }
+    /// <summary>Test seam: the solver content hash used by the context identity (default: the file's bytes).</summary>
+    internal Func<string, string?>? ToolFileHash { get; init; }
 
-    private readonly int compilationsPerResultWindow;
+    /// <summary>
+    /// The session's identities hash the solver file that the engine starts, so every solver path must name the
+    /// same file for both (<see cref="DafnyOptions.IsExactSolverPath"/>): absolute and normalized.
+    /// <c>--solver-path</c> is absolutized against the request directory and qualifies.
+    /// </summary>
+    private static void RejectInexactSolverPaths(DafnyOptions options) {
+      if (options.ProverOptions.Select(DafnyOptions.ProverPathValue)
+          .Any(path => path != null && !DafnyOptions.IsExactSolverPath(path))) {
+        throw new NotSupportedException("Session solver paths must be absolute and normalized; use --solver-path or such a PROVER_PATH.");
+      }
+    }
 
     public Session() {
       var root = new RootCommand();
@@ -771,6 +783,7 @@ static class AnalysisSessionCommand {
         // CLI command parsing does not materialize this server-only option default.
         // The resident parser and resolver must explicitly enable native caching.
         options.Set(DafnyLangSymbolResolver.UseCaching, true);
+        RejectInexactSolverPaths(options);
         if (arguments[0] == "verify" || options.Get(DefinitionAnalysisCommand.IncludeProofInputs)) {
           var solverReporter = new BatchErrorReporter(options);
           options.ProcessSolverOptions(solverReporter, Token.Cli);
@@ -780,9 +793,13 @@ static class AnalysisSessionCommand {
           if (solverReporter.ErrorCount != 0) {
             throw new IOException("Native solver configuration failed.");
           }
+          RejectInexactSolverPaths(options);
         }
         var parseOnly = arguments[0] == "definition-analysis" && options.Get(DefinitionAnalysisCommand.SpansOnly);
-        var optionsIdentity = DefinitionAnalysis.ContextOptionsIdentity(options);
+        // The context names each solver by path and content, so a state (and its engine, which starts that path)
+        // is never reused for a request that names another solver path.
+        var optionsIdentity = ToolFileHash == null ? DefinitionAnalysis.ContextOptionsIdentity(options)
+          : DefinitionAnalysis.ContextOptionsIdentity(options, ToolFileHash);
         var capture = new CapturedFileSystem(request);
         // Native checksum dependencies do not cover every Dafny source-library axiom.
         // Bind the declared library closure conservatively before reusing native results.

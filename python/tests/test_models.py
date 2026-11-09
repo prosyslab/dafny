@@ -15,6 +15,7 @@ from dafny_analysis.models import (
     DafnyFingerprintRegion,
     DafnyFingerprintSpan,
     DafnyProject,
+    DafnyProofInputs,
     DefinitionAnalysisDocument,
     DefinitionInfo,
     DefinitionSourceFacts,
@@ -168,6 +169,61 @@ def test_document_accepts_all_optional_source_facts() -> None:
     assert project.verification_targets is not None
     assert project.verification_targets[0].attributes[0].name == "timeLimit"
     assert project.proof_inputs.definitions[0].full_name == "Toy.M"
+
+
+def _proof_inputs(schema: int, **definition: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "sourcePath": "/workspace/Toy.dfy",
+        "fullName": "Toy.M",
+        "sha256": HEX_A,
+    }
+    row.update(definition)
+    return {
+        "schemaVersion": schema,
+        "toolchainSha256": HEX_A,
+        "optionsSha256": HEX_B,
+        "definitions": [row],
+    }
+
+
+MODULAR_ROW = {
+    "implementations": 0,
+    "closureOrigins": {
+        "sources": [{"sourcePath": "/workspace/Toy.dfy", "spans": [{"start": 3, "end": 9}]}],
+        "toolchain": 2,
+    },
+}
+
+
+# Modular rows (schemas 2 and 3) carry the implementation count (zero: no obligations) and origins.
+@pytest.mark.parametrize("schema", [2, 3])
+def test_modular_proof_inputs_decode_counts_and_origins(schema: int) -> None:
+    inputs = DafnyProofInputs.model_validate_json(json.dumps(_proof_inputs(schema, **MODULAR_ROW)))
+
+    row = inputs.definitions[0]
+    assert row.implementations == 0
+    assert row.closure_origins is not None and row.closure_origins.toolchain == 2
+    assert row.closure_origins.sources[0].spans[0] == DafnyFingerprintSpan(start=3, end=9)
+    assert DafnyProofInputs.model_validate_json(inputs.model_dump_json(by_alias=True)) == inputs
+
+
+# A row must match its document's schema, and unknown origin fields are still rejected.
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _proof_inputs(2),
+        _proof_inputs(3),
+        _proof_inputs(2, implementations=1),
+        _proof_inputs(1, **MODULAR_ROW),
+        _proof_inputs(2, **{**MODULAR_ROW, "implementations": -1}),
+        _proof_inputs(
+            2, **{**MODULAR_ROW, "closureOrigins": {"sources": [], "toolchain": 0, "extra": 1}}
+        ),
+    ],
+)
+def test_proof_input_rows_must_match_schema(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        DafnyProofInputs.model_validate_json(json.dumps(payload))
 
 
 # The strict document type requires the parameter and contract-header fields.

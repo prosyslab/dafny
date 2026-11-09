@@ -29,6 +29,183 @@ with NativeDafnySession(["/absolute/Dafny"], cwd=workspace,
     assert result.native_evidence.completed
 ```
 
+## Modular proof-input fingerprints (2026-11-06)
+
+Plan: [modular proof-input fingerprints](../plan/2026-11-06-modular-proof-fingerprints.md).
+Status: native source and local checks done, real Cat measurements done; first independent
+review accepted with fixes (order-insensitive key, native lookup by key, solver path rule),
+fixes implemented 2026-11-07; second review pending. Options hash made
+location independent on 2026-11-07 (see the key bullets); session context bound to the
+solver path again, toolchain widened to all Boogie/Dafny assemblies the same day. Uncommitted, base 650e6db3 (dirty tree). Consumers:
+[root shared scope](../../plan/2026-11-06-shared-given-declaration-scope.md),
+[Cosyn reuse key](../../cosyn/plan/2026-11-06-modular-proof-reuse-key.md).
+
+Proof inputs are schema 2 (schema 3 since the [stable seeded order](#stable-seeded-order-2026-11-08)).
+Each Boogie implementation gets a key over what the solver
+can see for it, and a definition's `sha256` hashes the sorted `(implementation name,
+key)` list of the implementations it owns (owner: the `CanVerifyOrigin`, as for
+session tasks). Code: `Source/DafnyCore/DefinitionAnalysis.ModularProofKeys.cs` and
+`DefinitionAnalysis.ProofInputs.cs`.
+
+Key, computed once per module translation on the program the engine will verify:
+- The translation is lifted first (`DefinitionAnalysis.LiftLambdasOnce`, idempotent per
+  program, VerifySnapshots 0 semantics). The session's pre-engine lift reuses it.
+- Content: the printed implementation, its own procedure, the sorted multiset of called
+  procedures, and the sorted multiset of `(kind, hash)` of the live list from
+  `Pruner.GetLiveDeclarations` over one synthetic block (order-insensitive since the
+  2026-11-06 review follow-up). That block holds `assert true` (initial all-revealed state, so no CanHide edge
+  is cut), every implementation command except scope push/pop, and assumes of the own
+  and called contracts, formal and local where clauses and all global where clauses.
+- Hashing is token-based (Boogie lexer, length-framed) and drops `{:id}`,
+  `{:captureState}` and `{:checksum}`. Lifted `lambda#N` names become
+  `lambda@<hash of the function and its defining axiom, own name masked>`. The unprinted
+  `Axiom.CanHide` flags are appended.
+- Final key: `{schema 2, toolchain, optionsHash, content}`. Toolchain = producer
+  assemblies plus `z3:<sha256 of the solver binary>`, resolved by
+  `DafnyOptions.ResolveZ3ExecutablePath`: the single distinct `PROVER_PATH`, else the
+  bundled copy, else PATH. Several distinct `PROVER_PATH` values (Boogie runs the last,
+  Dafny checks the first), a missing file, a path that is not absolute and normalized
+  (2026-11-07, `DafnyOptions.IsExactSolverPath`: a relative path is read against the current
+  directory but `Process.Start` tries the executable's directory first; .NET file APIs collapse
+  `..` lexically while the kernel resolves it after symbolic links) or a non-Z3 solver give no
+  proof inputs.
+  `PROVER_PATH` is recognized in every form Boogie parses (`=`, `:`, bare).
+- Producer assemblies (2026-11-07, `DefinitionAnalysis.ToolchainAssemblyFiles`): the Boogie
+  and Dafny assemblies statically reachable from DafnyCore and Boogie's execution engine,
+  plus every `Boogie*.dll` and `Dafny*.dll` in the directories they load from, named by file
+  name and content (sorted, location-free). This covers Boogie.Provers.SMTLib (SMT text, Z3
+  defaults, answer parsing), AbstractInterpretation, Houdini, Graph, Model, Concurrency and
+  the install's DafnyDriver, DafnyLanguageServer and DafnyPipeline. Before, only DafnyCore and
+  five Boogie assemblies were hashed, so a changed SMTLib kept certificates valid.
+- Tool file hashes (`ToolFileHashes`) are cached per resolved path while the stamp (size,
+  write time, change time, device and inode from Linux `statx`; creation time elsewhere) is
+  unchanged. An in-place rewrite that keeps size and write time (`cp -p`, `touch -r`) changes
+  the change time, so it is read again; a file changed in the last 2 s is not cached.
+- The options hash names no host location (2026-11-07). Before, the session's
+  `ProverOptions` carried `PROVER_PATH=<absolute z3 path>`, so the same Binaries bytes at
+  another directory gave another `optionsSha256`, other keys and other bound checksums
+  (Cat certificates matched only at the certifying path:
+  `/workspace/tmp/experiment/cat-topdown-modular/blocker-certificate-path.json`, temporary).
+  `ProofOptionsHash` now drops `PROVER_PATH`, `LOG_FILE` and `INSPECTOR` from the prover
+  options and from `--solver-option`, and drops `--solver-path` and `--solver-log`;
+  `--solver-plugin` enters by file content. `ContextOptionsIdentity` (session state,
+  result-cache and transfer context, evidence `optionsIdentity`, contract screening) is that
+  hash plus, for each `PROVER_PATH` (last occurrence order, duplicates collapsed), its
+  normalized absolute path and its content hash. The path is required (2026-11-07 review):
+  a content-only context let a request with `--solver-path B` reuse a state whose engine
+  started `PROVER_PATH=A`; with A swapped for a fake that answers unsat, `assert x > x`
+  verified and the false result was then served from the native cache. So native result
+  transfer between installs at different paths misses again, while proof keys and
+  certificates stay location-free. Sessions reject a relative or unnormalized `PROVER_PATH`
+  (`DAFNY_SESSION_UNSUPPORTED`); `--solver-path` is absolutized against the request
+  directory. Real-binary check (`/workspace/tmp/identity-round2/out/chain-*.json`, temporary):
+  the fake chain now fails `assert x > x` (rc 4) and never starts the fake; the previous
+  build returned rc 0 and then served the false result from the cache (2 hits). Test `ProofOptionsHaveNoPathTypedArgument` rejects any new
+  file-typed option in the hash. Not changed, by design: the session context's library
+  identity (library `FullName` plus content; the resolver retains library URIs),
+  `ResolutionOptionsIdentity` (its only path options, `--prelude` and `--plugin`, are
+  rejected by `SupportsDiagnosticContext`), and the absolute `sourcePath`/`closureOrigins`
+  paths in the document, which are not part of any key. Implementation `{:id}` uses the
+  file base name and is dropped from keys.
+- Fail closed (no key): a callee with `{:inline}`, a missing or ambiguous procedure,
+  any other desugared command, ill-formed Boogie, or lambda name/content collisions.
+
+Superset argument. A split's solver declarations are `Pruner.GetLiveDeclarations` of
+its blocks. Reachability is monotone in the roots and in the revealed set, and the
+roots above contain everything preparation adds. So the live list contains every
+split's declared list. Equal content of the reachable declarations, as a multiset, then
+fixes every split's declaration set, since the reachable sub-graph and its edges are
+functions of that content. Checked on Cat: 3447 real splits of 154 implementations,
+0 violations.
+
+An equal key means a logically identical solver formula set, not identical SMT text
+(stale for seeded runs since 2026-11-08: under the [stable seeded order](#stable-seeded-order-2026-11-08)
+an equal key gives identical SMT). `Checker.GetReorderedDeclarations` shuffles the whole pruned list (it also holds
+unrelated procedures and implementations), so the declaration order, and solver time,
+can differ. A success reused near the 30 s limit can time out when grading proves it
+again. Program order was in the key at first; root measured that filling the release
+skeleton's empty proof modules changed 6 of 7 given `Cat.dfy` keys only through order.
+Filling a module adds imports, which changes the module translation order, so the
+blocks of unchanged modules swap places.
+
+Pitfall (Boogie 3.5.5). `AxiomVisitor` computes `Expr.pos` from the previous value of
+the same object, so a second dependency-graph computation over one program can differ
+(it matters for quantifiers in `{:include_dep}` axioms). Key computation records and
+restores quantifier positions and `DeclarationDependencies`. Without that, the engine
+could declare an axiom the key never saw.
+
+Zero-obligation targets. Dafny emits no implementation when a declaration has no
+obligations. All such rows of one toolchain and options share one digest, so consumers
+must key by source path plus full name plus digest. Such a target gets a row with `implementations: 0` only if every
+implementation has a known owner and the translation contains its scope marker
+(`CheckWellformed$$<f>` or `Impl$$<m>`). This covers `CatCore.InputDataPiece`,
+`CatCore.InputFailed` and `CatCoreModel.InitState`, which schema 1 never certified.
+
+Document fields for consumers, per definition: `sourcePath`, `fullName`, `sha256`,
+`implementations` (count; 0 = certified), `closureOrigins` (`sources[{sourcePath,
+spans[{start,end}]}]`, `toolchain` count). Spans use the offsets that definitions
+report and cover the whole origin range of each implementation, procedure and live
+declaration. They are not part of any key. Top level: `schemaVersion` 2,
+`toolchainSha256`, `optionsSha256`.
+
+Measured on a Cat copy (outputs temporary in `/workspace/tmp/modular-fingerprints/out`):
+- Stability: 134 of 134 rows equal across two one-shot runs and across two sessions.
+  Session and one-shot `optionsSha256` differ. Since 2026-11-07 this is no longer the
+  prover path; the likely remaining cause is the Z3 option defaults that only the session
+  adds (`SetZ3Options`; the one-shot skips the solver-version subprocess). Compare within
+  one mode.
+- Install location (2026-11-07, session, Cat release skeleton and reference candidate,
+  outputs temporary in `/workspace/tmp/prover-path-hash/out`): two byte copies of one
+  Binaries tree (with bundled z3) at different directories, and a moved workspace, give one
+  `optionsSha256`, one toolchain, 82 of 82 skeleton rows and 134 of 134 reference rows equal,
+  and 7 of 7 given `Cat.dfy` keys equal (also skeleton to reference). The previous binary
+  gave two options hashes and 0 equal rows across the two copies. Rechecked after the
+  path-bound context and the wider toolchain (2026-11-07, `/workspace/tmp/identity-round2/out`,
+  temporary): options `8a51a04c` and toolchain `d76812c8` at both copies and with a moved
+  workspace, 82 of 82 and 134 of 134 rows, 7 of 7 given keys; evidence `optionsIdentity`
+  now differs per install (`05f3ea40`, `a1fbb3cf`).
+- Unrelated merge (one `CatCore.InputErrorPiece` body edit): 46 of 60 final-gate targets
+  keep their fingerprint (schema 1: 0). All 60 targets have a proof input. With native
+  lookup by key and the bounded store below, a whole-Cat session verify after the edit hit
+  2935 of 3451 tasks (274 s against 966 s cold; unchanged implementations own 2931 splits).
+
+Idle expiration (2026-11-07). Boogie's `VerificationResultCache` keeps results in a
+`MemoryCache` with a fixed 10-minute sliding expiration. Results of a long cold run, or of
+a session idle during a long model turn, were dropped by idle time alone (a session with
+changed bytes after 660 s idle: 0 of 2 hits). `NativeVerificationCache` now keeps its own
+store, bounded by entry count (4096) with least-recently-used eviction, and reproduces
+Boogie's lookup priorities exactly (differential test). Evicted entries leave the
+transfer journal. Context LRU, clear on eviction and dispose are unchanged. The former
+32-compilation window, which cleared a context's whole cache, was removed on 2026-11-07:
+the entry bound is the memory limit, and a goal lease easily makes more than 32
+compilations in one turn. A context now keeps hits across 33+ compilations (test
+`ResultsSurviveManyCompilationsOfOneContext`).
+Pitfall: with identical bytes the session reuses its own compilation state and never asks
+the cache, so cache experiments must change the bytes.
+- Release skeleton to reference candidate: all 7 given `Cat.dfy` keys stay equal
+  (schema 1: 0; ordered schema 2: 1).
+- Live list over the union of an implementation's split lists: median 1.01, max 12.5.
+- Cold analysis with proof inputs got faster: one-shot 30 to 31 s against 36 to 38 s.
+  The key itself costs about 5.4 s plus 6.9 s of lifting, which the verify path already paid.
+
+Limits:
+- Native lookup follows the key (2026-11-06 decision). Boogie's result cache compares
+  the checksum and a dependency identity. Boogie's own dependency identity combines the
+  Dafny `{:checksum}` of transitively mentioned functions; it reaches, for example, a
+  datatype's constructor functions and every predicate they appear in (1580 functions
+  for `CatCore.ExpectedStdinAtExtend`). It therefore missed after unrelated edits. For a
+  key-bound implementation, `BindNativeVerificationChecksums` now sets
+  `MD5DependencyChecksum_` to a digest of the bound checksum, so lookup and insert
+  compare key plus assertion shape only. Implementations without a key keep Boogie's
+  identity and a fresh checksum. Completeness rules and rebasing are unchanged.
+- Retention bound: 4096 results per verifier context; a larger working set evicts the
+  least recently used results (safe misses).
+- Dafny does not translate a method's `{:random_seed}`. Per-implementation limits that reach
+  Boogie are in the implementation text; since schema 3 a Boogie `{:random_seed}` makes the
+  implementation unsupported.
+- A reuse is for a solver input equal up to the dropped labels and the lambda renaming
+  (Dafny sets `NormalizeNames`, so symbol names do not reach the SMT text).
+
 ## Independent native branch cache cloning (2026-11-05)
 
 Status: local implementation and fresh independent verification accepted. Verified
@@ -291,6 +468,9 @@ translation has unresolved callees and procedures, so contracts are found by nam
 the translated program. Boogie desugars call preconditions and postconditions into
 assertions only later, which is why they are listed from their contracts. The
 fresh-GUID checksum for implementations without a certificate owner is unchanged.
+Superseded 2026-11-06: the base checksum and owner fingerprint were replaced by the
+per-implementation modular key; see
+[modular proof-input fingerprints](#modular-proof-input-fingerprints-2026-11-06).
 
 Rebasing. `NativeTaskEntry` rebases every result of a task whose `CacheStatus` was
 `Completed` (whether Boogie hands it back with no stream or through one) with
@@ -432,7 +612,10 @@ ordered assertion kinds and descriptions. Cached results retain the assertion
 objects of the compilation that produced them, so a cache hit is rebased onto the
 current split's assertions before it is reported.
 Unsupported certificate owners get a fresh checksum, disabling cross-compilation
-replay while preserving same-state completed task reuse. Boogie's own cache
+replay while preserving same-state completed task reuse. (Stale since 2026-11-06:
+checksums now bind each implementation's modular key; implementations without a key
+get the fresh checksum. See
+[modular proof-input fingerprints](#modular-proof-input-fingerprints-2026-11-06).) Boogie's own cache
 remains the result store and checksum/dependency lookup authority. The session
 keeps one cache per verifier context (at most four, least recently used first).
 A context's cache is cleared when it is evicted and at shutdown (the 32-compilation

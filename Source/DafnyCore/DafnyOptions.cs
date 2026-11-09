@@ -1561,31 +1561,8 @@ namespace Microsoft.Dafny {
         confirmedProverPath = proverPath;
       }
 
-      var platform = System.Environment.OSVersion.Platform;
-      var isUnix = platform == PlatformID.Unix || platform == PlatformID.MacOSX;
-
-      // Next, try looking in a directory relative to Dafny itself.
-      if (confirmedProverPath is null) {
-        var dafnyBinDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-        var z3LocalBinName = isUnix
-          ? $"z3-{DefaultZ3Version}"
-          : $"z3-{DefaultZ3Version}.exe";
-        var z3BinPath = Path.Combine(dafnyBinDir, "z3", "bin", z3LocalBinName);
-
-        if (File.Exists(z3BinPath)) {
-          confirmedProverPath = z3BinPath;
-        }
-      }
-
-      // Finally, try looking in the system PATH variable.
-      var z3GlobalBinName = isUnix ? "z3" : "z3.exe";
-      if (confirmedProverPath is null) {
-        confirmedProverPath = System.Environment
-          .GetEnvironmentVariable("PATH")?
-          .Split(isUnix ? ':' : ';')
-          .Select(s => Path.Combine(s, z3GlobalBinName))
-          .FirstOrDefault(File.Exists);
-      }
+      // Next, try looking in a directory relative to Dafny itself, and finally in the system PATH variable.
+      confirmedProverPath ??= FindBundledOrSystemZ3();
 
       if (confirmedProverPath is not null) {
         ProverOptions.Add($"{pp}{confirmedProverPath}");
@@ -1594,6 +1571,72 @@ namespace Microsoft.Dafny {
 
       errorReporter.Error(MessageSource.Verifier, DafnyProject.StartingToken, "Z3 is not found. " + nextStepsMessage);
       return null;
+    }
+
+    private static string FindBundledOrSystemZ3() {
+      var platform = System.Environment.OSVersion.Platform;
+      var isUnix = platform == PlatformID.Unix || platform == PlatformID.MacOSX;
+
+      // Next, try looking in a directory relative to Dafny itself.
+      var dafnyBinDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
+      var z3LocalBinName = isUnix
+        ? $"z3-{DefaultZ3Version}"
+        : $"z3-{DefaultZ3Version}.exe";
+      var z3BinPath = Path.Combine(dafnyBinDir, "z3", "bin", z3LocalBinName);
+
+      if (File.Exists(z3BinPath)) {
+        return z3BinPath;
+      }
+
+      // Finally, try looking in the system PATH variable.
+      var z3GlobalBinName = isUnix ? "z3" : "z3.exe";
+      return System.Environment
+        .GetEnvironmentVariable("PATH")?
+        .Split(isUnix ? ':' : ';')
+        .Select(s => Path.Combine(s, z3GlobalBinName))
+        .FirstOrDefault(File.Exists);
+    }
+
+    /// <summary>
+    /// The Z3 executable the solver would run, resolved like <see cref="ProcessSolverOptions"/> without
+    /// reporting or changing any option. One rule: the explicit prover path if there is exactly one distinct
+    /// value, otherwise the copy next to Dafny, otherwise the first one on PATH. Boogie applies the last
+    /// <c>PROVER_PATH</c> while <see cref="SetZ3ExecutablePath"/> checks the first, so several distinct values
+    /// give null (no identity), as does a missing executable. So does a path that is not
+    /// <see cref="IsExactSolverPath"/>: the file that would run need not be the one a hash would read.
+    /// </summary>
+    public string ResolveZ3ExecutablePath() {
+      var explicitPaths = ProverOptions.Select(ProverPathValue).Where(path => path != null)
+        .Distinct(StringComparer.Ordinal).ToList();
+      if (explicitPaths.Count > 1) {
+        return null;
+      }
+      var path = explicitPaths.Count == 1 ? explicitPaths[0] : FindBundledOrSystemZ3();
+      return path != null && IsExactSolverPath(path) && File.Exists(path) ? path : null;
+    }
+
+    /// <summary>
+    /// Whether a solver path names the same file for the process start and for a file read. A relative path is
+    /// read against the current directory but started from the executable's directory first; .NET file APIs
+    /// collapse <c>.</c> and <c>..</c> lexically while the kernel resolves <c>..</c> after symbolic links. Only a
+    /// fully qualified, already normalized path is exact.
+    /// </summary>
+    public static bool IsExactSolverPath(string path) =>
+      Path.IsPathFullyQualified(path) && string.Equals(Path.GetFullPath(path), path, StringComparison.Ordinal);
+
+    /// <summary>
+    /// The solver path of one prover option in every form Boogie's prover options accept
+    /// (<c>PROVER_PATH=p</c>, <c>PROVER_PATH:p</c> or a bare <c>PROVER_PATH</c>), or null for any other option.
+    /// </summary>
+    public static string ProverPathValue(string proverOption) {
+      const string name = "PROVER_PATH";
+      if (!proverOption.StartsWith(name, StringComparison.Ordinal)) {
+        return null;
+      }
+      if (proverOption.Length == name.Length) {
+        return "";
+      }
+      return proverOption[name.Length] is '=' or ':' ? proverOption[(name.Length + 1)..] : null;
     }
 
     private static readonly Regex Z3VersionRegex = new Regex(@"Z3 version (?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)");

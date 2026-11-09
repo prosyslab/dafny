@@ -23,6 +23,7 @@ from pydantic import (
     StrictStr,
     TypeAdapter,
     field_validator,
+    model_validator,
 )
 
 from .kinds import DefinitionKind
@@ -183,14 +184,44 @@ class DafnySemanticFacts(BaseModel):
         return {key: tuple(items) for key, items in found.items()}
 
 
+class DafnyProofOriginSource(BaseModel):
+    """Merged half-open source ranges of proof-input closure declarations in one file."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    source_path: StrictStr = Field(alias="sourcePath")
+    spans: tuple[DafnyFingerprintSpan, ...]
+
+
+class DafnyProofClosureOrigins(BaseModel):
+    """Where the declarations behind a schema-2 proof input come from; never part of the key.
+
+    ``toolchain`` counts closure declarations without a source origin (prelude,
+    generated or token-free declarations).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    sources: tuple[DafnyProofOriginSource, ...]
+    toolchain: StrictInt = Field(ge=0)
+
+
 class DafnyDefinitionProofInput(BaseModel):
-    """Identify the complete native translation inputs for one declaration's proof."""
+    """Identify the native solver inputs for one declaration's proof.
+
+    Schema 1 hashes the whole translation. Schema 2 hashes the modular keys of the
+    Boogie implementations the declaration owns and also reports their count
+    (``implementations``; zero certifies a target without proof obligations) and
+    ``closure_origins``.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
     source_path: Path = Field(alias="sourcePath", strict=True)
     full_name: StrictStr = Field(alias="fullName")
     sha256: SHA256
+    implementations: StrictInt | None = Field(default=None, ge=0)
+    closure_origins: DafnyProofClosureOrigins | None = Field(default=None, alias="closureOrigins")
 
 
 class DafnyProofInputs(BaseModel):
@@ -202,6 +233,24 @@ class DafnyProofInputs(BaseModel):
     toolchain_sha256: SHA256 = Field(alias="toolchainSha256")
     options_sha256: SHA256 = Field(alias="optionsSha256")
     definitions: tuple[DafnyDefinitionProofInput, ...]
+
+    @model_validator(mode="after")
+    def _schema_fields(self) -> DafnyProofInputs:
+        """Modular rows (schema 2 and later) carry their implementation count and origins.
+
+        Schema 1 rows never do.
+        """
+
+        modular = self.schema_version >= 2
+        for definition in self.definitions:
+            present = (
+                definition.implementations is not None,
+                definition.closure_origins is not None,
+            )
+            if present != (modular, modular):
+                name, schema = definition.full_name, self.schema_version
+                raise ValueError(f"proof input {name} does not match schema {schema}")
+        return self
 
 
 class DefinitionAttribute(BaseModel):

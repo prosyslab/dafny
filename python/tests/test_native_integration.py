@@ -98,4 +98,29 @@ def test_native_proof_inputs_validate(native_runner) -> None:
 
     proof_inputs = document.source_facts.proof_inputs
     assert proof_inputs is not None
-    assert [item.full_name for item in proof_inputs.definitions] == ["Toy.M"]
+    # Schema 3 certifies every verification target, including ones with no Boogie implementation.
+    assert proof_inputs.schema_version == 3
+    assert sorted(item.full_name for item in proof_inputs.definitions) == ["Toy.Double", "Toy.M"]
+    assert all(item.implementations is not None for item in proof_inputs.definitions)
+    assert all(item.closure_origins is not None for item in proof_inputs.definitions)
+
+
+# A relative solver path gives no proof inputs: the started file need not be the hashed one.
+def test_native_relative_solver_path_has_no_proof_inputs(native_runner) -> None:
+    install = Path(_NATIVE).resolve().parent
+    solvers = sorted(install.glob("z3/bin/z3-*"))
+    if not solvers:
+        pytest.skip("the native install has no bundled z3")
+    relative = solvers[0].relative_to(install)
+
+    def proof_inputs(solver: Path) -> object:
+        document = definition_analysis_document_from_paths(
+            [TOY_SOURCE],
+            runner=native_runner,
+            proof_input_options=("--solver-option", f"PROVER_PATH={solver}"),
+            cwd=install,
+        )
+        return document.source_facts.proof_inputs
+
+    assert proof_inputs(solvers[0]) is not None
+    assert proof_inputs(relative) is None
