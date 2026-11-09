@@ -155,6 +155,76 @@ public class ParserCacheCloneTests {
     Assert.Equal(2, child.Count);
   }
 
+  // Exported URI/text seeds rebuild a parser that hits exactly the entries a clone hits, with no file reads.
+  [Fact]
+  public async Task ParserSeedsRebuildTheSameHitsAsAClone() {
+    var parentFiles = Files();
+    var parentLogger = new CacheLogger();
+    var parent = new CachingParser(parentLogger, parentFiles, Telemetry());
+    var parentOptions = Options();
+    await Parse(parent, parentFiles, parentOptions);
+    var seeds = parent.ExportSeeds();
+    Assert.Equal(2, parent.CachedParseCount);
+    Assert.Equal([Helper, Root], seeds.Select(seed => seed.Uri).OrderBy(uri => uri.ToString()).ToArray());
+    Assert.Equal(Source, seeds.Single(seed => seed.Uri == Root).Source);
+
+    var seededFiles = Files();
+    var seededLogger = new CacheLogger();
+    var seededOptions = Options();
+    var seeded = CachingParser.FromSeeds(seededLogger, seededFiles, Telemetry(), seeds, seededOptions);
+    var cloned = parent.Clone(Options(), Files(), Telemetry());
+    Assert.Equal(0, seededFiles.ReadCount);
+    Assert.Equal(2, seeded.CachedParseCount);
+    Assert.Equal(cloned.CachedParseCount, seeded.CachedParseCount);
+    var program = await Parse(seeded, seededFiles, seededOptions);
+    Assert.Equal(2, seededLogger.Hits);
+    Assert.Equal(0, seededLogger.Misses);
+    Assert.Contains(program.DefaultModuleDef.Descendants().OfType<ModuleDecl>(), m => m.Name == "Helper");
+    Assert.NotSame(MainModule(program).Options, parentOptions);
+    // Changed text misses; the parent is unaffected by either child.
+    Assert.Equal(2, parent.CachedParseCount);
+    Assert.Equal(2, parent.ExportSeeds().Count);
+  }
+
+  // The transferable URI form reproduces the cache key for paths with spaces and non-ASCII characters.
+  [Fact]
+  public async Task TransferredUrisRebuildTheSameCacheKeys() {
+    var uri = new Uri("file:///parser-clone/my dir/caf\u00e9 \u65e5\u672c.dfy");
+    var files = new MemoryFiles(new Dictionary<Uri, string> { [uri] = "module Odd { function F(): int { 1 } }" });
+    var parent = new CachingParser(NullLogger<ProgramParser>.Instance, files, Telemetry());
+    var options = Options();
+    await Parse(parent, files, options, uri);
+    var entries = parent.ExportSeeds().Select(NativeSessionTransfer.ToEntry).ToArray();
+    Assert.Equal(uri.AbsoluteUri, entries.Single().Uri);
+    var logger = new CacheLogger();
+    var childFiles = new MemoryFiles(new Dictionary<Uri, string> { [uri] = "module Odd { function F(): int { 1 } }" });
+    var child = CachingParser.FromSeeds(logger, childFiles, Telemetry(), entries.Select(NativeSessionTransfer.ToSeed), Options());
+    await Parse(child, childFiles, Options(), uri);
+    Assert.Equal(1, logger.Hits);
+    Assert.Equal(0, logger.Misses);
+  }
+
+  // Seeded entries start unused, like a drained parent, so the first pass prunes what it does not use.
+  [Fact]
+  public async Task SeededCacheEntriesStartUnusedAndExportChangesNothing() {
+    var cache = new PruneIfNotUsedSinceLastPruneCache<int, Box>(EqualityComparer<int>.Default);
+    cache.Seed(1, new Box(1));
+    cache.Seed(2, new Box(2));
+    Assert.Equal([1, 2], cache.Export((key, _) => key).OrderBy(key => key).ToArray());
+    Assert.Equal(2, cache.Count);
+    await cache.UseAndPrune(async () => { cache.TryGet(1, out _); await Task.CompletedTask; return 0; }, CancellationToken.None);
+    Assert.Equal(1, cache.Count);
+    var release = new TaskCompletionSource();
+    var running = cache.UseAndPrune(async () => { await release.Task; return 0; }, CancellationToken.None);
+    try {
+      Assert.Throws<InvalidOperationException>(() => cache.Export((key, _) => key));
+    }
+    finally {
+      release.SetResult();
+      await running;
+    }
+  }
+
   private static ModuleDecl MainModule(Program program) => program.DefaultModuleDef.SourceDecls.OfType<ModuleDecl>()
     .Single(module => module.NameNode.Value == "Main");
 
@@ -172,10 +242,11 @@ public class ParserCacheCloneTests {
     [Helper] = "module Helper { function One(): int { 1 } }"
   });
 
-  private static async Task<Program> Parse(CachingParser parser, MemoryFiles files, DafnyOptions options) {
+  private static async Task<Program> Parse(CachingParser parser, MemoryFiles files, DafnyOptions options, Uri? root = null) {
+    root ??= Root;
     var reporter = new BatchErrorReporter(options);
-    var file = DafnyFile.HandleDafnyFile(files, reporter, options, Root, Token.NoToken)!;
-    var result = await parser.ParseFiles(Root.ToString(), [file], reporter, CancellationToken.None);
+    var file = DafnyFile.HandleDafnyFile(files, reporter, options, root, Token.NoToken)!;
+    var result = await parser.ParseFiles(root.ToString(), [file], reporter, CancellationToken.None);
     Assert.True(reporter.ErrorCount == 0, string.Join("\n", reporter.AllMessages.Select(m => m.Message)));
     return result.Program;
   }

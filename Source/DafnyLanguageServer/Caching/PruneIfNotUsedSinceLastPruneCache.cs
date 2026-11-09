@@ -62,6 +62,38 @@ public class PruneIfNotUsedSinceLastPruneCache<TKey, TValue>
     }
   }
 
+  /// <summary>
+  /// Reads every entry through <paramref name="select"/> without changing the cache. Like Clone, it
+  /// rejects a cache that is in use, so the entries are a consistent drained snapshot.
+  /// </summary>
+  public IReadOnlyList<TResult> Export<TResult>(Func<TKey, TValue, TResult> select,
+    CancellationToken cancellationToken = default) {
+    if (!semaphoreSlim.Wait(0, cancellationToken)) {
+      throw new InvalidOperationException("Cannot export a cache while it is in use.");
+    }
+
+    try {
+      var exported = new List<TResult>(items.Count);
+      foreach (var (key, item) in items) {
+        cancellationToken.ThrowIfCancellationRequested();
+        exported.Add(select(key, item.Value));
+      }
+
+      return exported;
+    }
+    finally {
+      semaphoreSlim.Release();
+    }
+  }
+
+  /// <summary>
+  /// Adds an entry that no prune cycle has used yet. This is the state every entry of a drained
+  /// cache is in, because each pruning pass clears the access marker of the entries it keeps.
+  /// </summary>
+  public void Seed(TKey key, TValue value) {
+    items.TryAdd(key, new Item(value) { Accessed = false });
+  }
+
   public async Task<PruneResult<T>> UseAndPrune<T>(Func<Task<T>> use, CancellationToken cancellationToken) {
     await semaphoreSlim.WaitAsync(cancellationToken);
     try {

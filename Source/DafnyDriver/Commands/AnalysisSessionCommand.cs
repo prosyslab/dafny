@@ -30,7 +30,7 @@ static class AnalysisSessionCommand {
     PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     PropertyNameCaseInsensitive = true
   };
-  private const int RequestLimit = 8 * 1024 * 1024;
+  internal const int RequestLimit = 8 * 1024 * 1024;
   private const int ResponseLimit = 16 * 1024 * 1024;
 
   public static Command Create() {
@@ -49,7 +49,7 @@ static class AnalysisSessionCommand {
   internal sealed record Request(string Id, string[]? Arguments = null, string? Cwd = null,
     string ContextId = "default", Dictionary<string, string>? SourceSnapshots = null, int? Generation = null,
     string? SourceRoot = null, string? LogicalRoot = null, string? Operation = null, string? TargetId = null,
-    string SessionId = "default");
+    string SessionId = "default", string? Payload = null);
 
   internal sealed record Response(string Id, int Returncode, string Stdout, string Stderr, object? NativeEvidence);
 
@@ -188,7 +188,7 @@ static class AnalysisSessionCommand {
     string SessionId, string SessionEpoch, int ParsedEntries, int VerificationEntries);
 
   /// <summary>Branch lifetimes are independent; the protocol reader never waits for a clone or branch drain.</summary>
-  internal sealed class SessionRegistry : IAsyncDisposable {
+  internal sealed class SessionRegistry(int transferFrameLimit = RequestLimit) : IAsyncDisposable {
     private sealed class Branch(Session session) {
       public Session Session { get; } = session;
       public CancellationTokenSource Lifetime { get; } = new();
@@ -212,7 +212,7 @@ static class AnalysisSessionCommand {
       if (request.Operation == "close-session") {
         return await Close(request, token);
       }
-      if (request.Operation is not (null or "clone")) {
+      if (request.Operation is not (null or "clone" or "export-session" or "import-session")) {
         return new Response(request.Id, 7, "", "DAFNY_SESSION_UNSUPPORTED: Unknown native session operation.", null);
       }
       Branch branch;
@@ -227,6 +227,12 @@ static class AnalysisSessionCommand {
       try {
         if (request.Operation == "clone") {
           return await Clone(request, branch, linked.Token);
+        }
+        if (request.Operation == "export-session") {
+          return await Export(request, branch, linked.Token);
+        }
+        if (request.Operation == "import-session") {
+          return await Import(request, branch, linked.Token);
         }
         return await branch.Session.Execute(request, linked.Token);
       }
@@ -278,6 +284,47 @@ static class AnalysisSessionCommand {
             branches.Remove(request.TargetId);
           }
         }
+      }
+    }
+
+    /// <summary>Serializes the branch's reusable caches at the clone boundary; the branch is left unchanged.</summary>
+    private async Task<Response> Export(Request request, Branch source, CancellationToken token) {
+      try {
+        var toolchain = DefinitionAnalysis.ContextToolchainIdentity();
+        if (toolchain == null) {
+          return new Response(request.Id, 6, "", "The native toolchain identity is unavailable, so the session cannot be exported.", null);
+        }
+        var (resolverContexts, resultContexts) = await source.Session.ExportTransfer(token);
+        var payload = NativeSessionTransfer.Serialize(new NativeSessionTransfer.TransferDocument(NativeSessionTransfer.SchemaVersion,
+          daemonEpoch, request.SessionId, source.Session.Epoch, toolchain, resolverContexts, resultContexts));
+        NativeSessionTransfer.CheckFrame(payload, transferFrameLimit);
+        return new Response(request.Id, 0, payload, "", null);
+      } catch (NativeSessionTransfer.TransferTooLargeException exception) {
+        return new Response(request.Id, 6, "", "DAFNY_SESSION_TRANSFER_TOO_LARGE: " + exception.Message, null);
+      } catch (OperationCanceledException) {
+        return new Response(request.Id, 130, "", "Native session export cancelled.", null);
+      } catch (NotSupportedException exception) {
+        return new Response(request.Id, 7, "", "DAFNY_SESSION_UNSUPPORTED: " + exception.Message, null);
+      } catch (Exception exception) {
+        return new Response(request.Id, 6, "", exception.Message, null);
+      }
+    }
+
+    /// <summary>Validates a transfer document and installs it into a fresh branch, or installs nothing.</summary>
+    private async Task<Response> Import(Request request, Branch target, CancellationToken token) {
+      try {
+        var document = NativeSessionTransfer.Parse(request.Payload, DefinitionAnalysis.ContextToolchainIdentity(),
+          Session.ResolverContextCapacity, Session.ResultContextCapacity);
+        var (parsed, verification) = await target.Session.Import(document, token);
+        var receipt = new NativeSessionTransfer.ImportReceipt(NativeSessionTransfer.SchemaVersion, daemonEpoch, request.SessionId,
+          target.Session.Epoch, parsed, verification);
+        return new Response(request.Id, 0, JsonSerializer.Serialize(receipt, JsonOptions), "", null);
+      } catch (NativeSessionTransfer.TransferRejectedException exception) {
+        return new Response(request.Id, 2, "", "DAFNY_SESSION_TRANSFER_REJECTED: " + exception.Message, null);
+      } catch (OperationCanceledException) {
+        return new Response(request.Id, 130, "", "Native session import cancelled.", null);
+      } catch (Exception exception) {
+        return new Response(request.Id, 6, "", exception.Message, null);
       }
     }
 
@@ -408,7 +455,6 @@ static class AnalysisSessionCommand {
   internal sealed class Session : IDisposable {
     internal const int ResultContextCapacity = 4;
     internal const int ResolverContextCapacity = 2;
-    internal const int CompilationsPerResultWindow = 32;
     // Resolver/translation internals include process-static state. Solvers run outside this gate.
     private static readonly SemaphoreSlim CompilerPreparation = new(1);
     private readonly SemaphoreSlim preparation = new(1);
@@ -419,7 +465,10 @@ static class AnalysisSessionCommand {
     private readonly ConcurrentQueue<DafnyDiagnostic> diagnostics = new();
     private readonly RetentionMap<ResolverRetention> resolvers = new(ResolverContextCapacity);
     private readonly RetentionMap<ResultRetention> results = new(ResultContextCapacity);
-    private int resultCacheClears;
+    private sealed record PendingResolver(string OptionsIdentity, IReadOnlyList<CachingParser.ParsedSeed> Seeds);
+    // Imported parser sources wait here, keyed by resolver context, until a request can parse them.
+    private readonly Dictionary<string, PendingResolver> pendingResolvers = new(StringComparer.Ordinal);
+    private bool imported;
     private State? state;
     private string? configuration;
     private readonly SemaphoreSlim admission = new(1);
@@ -432,11 +481,14 @@ static class AnalysisSessionCommand {
     internal int RetainedResultContexts => results.Count;
     internal int RetainedResolverContexts => resolvers.Count;
     internal string Epoch => epoch;
+    /// <summary>Imported parser sources that seeded a resolver context's parser.</summary>
+    internal int ImportedSeedsBound { get; private set; }
+    /// <summary>Imported parser sources dropped because their resolver identity did not match the request.</summary>
+    internal int ImportedSeedsDiscarded { get; private set; }
 
     private readonly int compilationsPerResultWindow;
 
-    public Session(int compilationsPerResultWindow = CompilationsPerResultWindow) {
-      this.compilationsPerResultWindow = compilationsPerResultWindow;
+    public Session() {
       var root = new RootCommand();
       foreach (var command in new[] { ResolveCommand.Create(), VerifyCommand.Create(), DefinitionAnalysisCommand.Create() }) {
         DafnyNewCli.SetHandlerUsingDafnyOptionsContinuation(command, (options, _) => {
@@ -467,29 +519,54 @@ static class AnalysisSessionCommand {
       return detached;
     }
 
-    internal async Task<(Session Child, int ParsedEntries, int VerificationEntries)> Clone(CancellationToken token) {
+    /// <summary>
+    /// Runs <paramref name="work"/> at a safe drained boundary: admitted, preparation held, no reader active.
+    /// Clone, export and import share it. Only work that parses sources needs the process-wide compiler gate.
+    /// </summary>
+    private async Task<T> AtDrainedBoundary<T>(bool compilerGate, Func<T> work, CancellationToken token) {
       await admission.WaitAsync(token);
       var compilerAdmitted = false;
       var preparing = false;
       try {
-        await CompilerPreparation.WaitAsync(token);
-        compilerAdmitted = true;
+        if (compilerGate) {
+          await CompilerPreparation.WaitAsync(token);
+          compilerAdmitted = true;
+        }
         await preparation.WaitAsync(token);
         preparing = true;
         while (readers != 0) {
           var wait = drained.Task;
           preparation.Release();
           preparing = false;
-          CompilerPreparation.Release();
-          compilerAdmitted = false;
+          if (compilerAdmitted) {
+            CompilerPreparation.Release();
+            compilerAdmitted = false;
+          }
           await wait.WaitAsync(token);
-          await CompilerPreparation.WaitAsync(token);
-          compilerAdmitted = true;
+          if (compilerGate) {
+            await CompilerPreparation.WaitAsync(token);
+            compilerAdmitted = true;
+          }
           await preparation.WaitAsync(token);
           preparing = true;
         }
         token.ThrowIfCancellationRequested();
-        var child = new Session(compilationsPerResultWindow);
+        return work();
+      }
+      finally {
+        if (preparing) {
+          preparation.Release();
+        }
+        if (compilerAdmitted) {
+          CompilerPreparation.Release();
+        }
+        admission.Release();
+      }
+    }
+
+    internal Task<(Session Child, int ParsedEntries, int VerificationEntries)> Clone(CancellationToken token) =>
+      AtDrainedBoundary(true, () => {
+        var child = new Session();
         try {
           var parsedEntries = 0;
           foreach (var entry in resolvers.Snapshot()) {
@@ -500,6 +577,11 @@ static class AnalysisSessionCommand {
             child.resolvers.Acquire(entry.Key, _ => new ResolverRetention(parser,
               new DafnyLangSymbolResolver(NullLogger<DafnyLangSymbolResolver>.Instance,
                 NullLogger<CachingResolver>.Instance, child.telemetry), new DefinitionAnalysis.SessionCache(), options));
+          }
+          // Seeds an imported session has not bound to a request yet are immutable text and carry over.
+          foreach (var pending in pendingResolvers) {
+            child.pendingResolvers[pending.Key] = pending.Value;
+            parsedEntries += pending.Value.Seeds.Count;
           }
           var verificationEntries = 0;
           foreach (var entry in results.Snapshot()) {
@@ -516,17 +598,105 @@ static class AnalysisSessionCommand {
           child.Dispose();
           throw;
         }
-      }
-      finally {
-        if (preparing) {
-          preparation.Release();
+      }, token);
+
+    /// <summary>
+    /// The same data a clone copies, in detached transferable form. Reads the retained parser sources and
+    /// native result journals at the drained boundary and changes nothing else. It needs no compiler gate
+    /// because no source is parsed.
+    /// </summary>
+    internal Task<(NativeSessionTransfer.ResolverTransfer[] Resolvers, NativeSessionTransfer.ResultTransfer[] Results)>
+      ExportTransfer(CancellationToken token) =>
+      AtDrainedBoundary(false, () => {
+        var exported = new List<NativeSessionTransfer.ResolverTransfer>();
+        foreach (var pending in pendingResolvers) {
+          exported.Add(new NativeSessionTransfer.ResolverTransfer(pending.Key, pending.Value.OptionsIdentity,
+            pending.Value.Seeds.Select(NativeSessionTransfer.ToEntry).ToArray()));
         }
-        if (compilerAdmitted) {
-          CompilerPreparation.Release();
+        foreach (var entry in resolvers.Snapshot()) {
+          token.ThrowIfCancellationRequested();
+          exported.Add(new NativeSessionTransfer.ResolverTransfer(entry.Key,
+            DefinitionAnalysis.ResolutionOptionsIdentity(entry.Value.Options),
+            entry.Value.Parser.ExportSeeds(token).Select(NativeSessionTransfer.ToEntry).ToArray()));
         }
-        admission.Release();
+        // The receiver retains at most this many contexts; the oldest ones would be evicted there first.
+        var resolverContexts = exported.Skip(Math.Max(0, exported.Count - ResolverContextCapacity)).ToArray();
+        var resultContexts = results.Snapshot().Select(entry => {
+          token.ThrowIfCancellationRequested();
+          return new NativeSessionTransfer.ResultTransfer(entry.Key, entry.Value.Compilations,
+            entry.Value.Cache.ExportSnapshots(token).ToArray());
+        }).ToArray();
+        return (resolverContexts, resultContexts);
+      }, token);
+
+    /// <summary>
+    /// Installs a validated document into this fresh session: result caches now, parser sources parked until
+    /// the first request that creates the matching resolver context (a fresh process has no options to parse
+    /// them with). All or nothing; a session that already served a request or imported is rejected.
+    /// </summary>
+    internal Task<(int ParsedEntries, int VerificationEntries)> Import(NativeSessionTransfer.TransferDocument document,
+      CancellationToken token) =>
+      AtDrainedBoundary(false, () => {
+        if (state != null || imported || resolvers.Count != 0 || results.Count != 0 || pendingResolvers.Count != 0) {
+          throw new NativeSessionTransfer.TransferRejectedException("An import needs a fresh session that has served no request.");
+        }
+        var built = new List<(string Key, ResultRetention Retention)>();
+        try {
+          var verificationEntries = 0;
+          foreach (var result in document.Results) {
+            token.ThrowIfCancellationRequested();
+            var cache = NativeVerificationCache.Restore(result.Entries, out var count, token);
+            verificationEntries += count;
+            built.Add((result.Key, new ResultRetention(cache) { Compilations = result.Compilations }));
+          }
+          token.ThrowIfCancellationRequested();
+          var parsedEntries = 0;
+          foreach (var (key, retention) in built) {
+            results.Acquire(key, _ => retention);
+          }
+          built.Clear();
+          foreach (var resolver in document.Resolvers) {
+            pendingResolvers[resolver.Key] = new PendingResolver(resolver.OptionsIdentity,
+              resolver.Entries.Select(NativeSessionTransfer.ToSeed).ToArray());
+            parsedEntries += resolver.Entries.Length;
+          }
+          imported = true;
+          return (parsedEntries, verificationEntries);
+        }
+        finally {
+          foreach (var (_, retention) in built) {
+            retention.Cache.Dispose();
+          }
+        }
+      }, token);
+
+    /// <summary>
+    /// Creates a resolver context's parser, from parked imported sources when they were exported for exactly
+    /// this resolver identity. A mismatch or an option set that cannot be detached parses cold.
+    /// </summary>
+    private DafnyLangParser CreateParser(DafnyOptions options, string resolverContext, string resolutionIdentity,
+      CancellationToken token) {
+      if (pendingResolvers.TryGetValue(resolverContext, out var pending)) {
+        if (pending.OptionsIdentity == resolutionIdentity && pending.Seeds.Count != 0) {
+          try {
+            var parser = DafnyLangParser.FromSeeds(options, DetachedParserOptions(options), fileSystem, telemetry,
+              NullLogger<DafnyLangParser>.Instance, NullLogger<CachingParser>.Instance, pending.Seeds, token);
+            pendingResolvers.Remove(resolverContext);
+            ImportedSeedsBound += pending.Seeds.Count;
+            return parser;
+          } catch (NotSupportedException) {
+            // Parse cold below; the seeds stay parked for a request whose options can be detached.
+            return ColdParser(options);
+          }
+        }
+        pendingResolvers.Remove(resolverContext);
+        ImportedSeedsDiscarded += pending.Seeds.Count;
       }
+      return ColdParser(options);
     }
+
+    private DafnyLangParser ColdParser(DafnyOptions options) => new(options, fileSystem, telemetry,
+      NullLogger<DafnyLangParser>.Instance, NullLogger<CachingParser>.Instance);
 
     public async Task<Response> Execute(Request request, CancellationToken cancellationToken) {
       var stdout = new StringWriter();
@@ -618,7 +788,8 @@ static class AnalysisSessionCommand {
         var libraryIdentity = string.Join("\0", options.Get(CommonOptionBag.Libraries)
           .Select(file => file.FullName + "\0" + capture.Fingerprint(new Uri(file.FullName))));
         var context = Hash(request.ContextId + "\0" + optionsIdentity + "\0" + libraryIdentity + parseOnly);
-        var resolverContext = Hash(request.ContextId + "\0" + DefinitionAnalysis.ResolutionOptionsIdentity(options) + "\0" + libraryIdentity);
+        var resolutionIdentity = DefinitionAnalysis.ResolutionOptionsIdentity(options);
+        var resolverContext = Hash(request.ContextId + "\0" + resolutionIdentity + "\0" + libraryIdentity);
         var roots = options.CliRootSourceUris.ToList();
         await preparation.WaitAsync(cancellationToken);
         preparing = true;
@@ -650,15 +821,14 @@ static class AnalysisSessionCommand {
             // contexts keep their resolved modules. Only an evicted context's facts are dropped.
             var retained = resolvers.Acquire(resolverContext, evicted => {
               evicted?.Facts.Reset();
-              return new ResolverRetention(new DafnyLangParser(options, fileSystem, telemetry,
-                NullLogger<DafnyLangParser>.Instance, NullLogger<CachingParser>.Instance),
+              return new ResolverRetention(CreateParser(options, resolverContext, resolutionIdentity, cancellationToken),
                 new DafnyLangSymbolResolver(NullLogger<DafnyLangSymbolResolver>.Instance,
                   NullLogger<CachingResolver>.Instance, telemetry),
                 new DefinitionAnalysis.SessionCache(), options);
             });
             // Native results are retained per option context and are never cleared by another context.
-            // A context's cache is cleared when evicted (the instance is recycled, so no timer owner is
-            // abandoned) and after each window of compilations, which is a memory bound, not a correctness rule.
+            // A context's cache is cleared when the context is evicted and at shutdown. Memory is bounded by
+            // the cache's own entry bound (least recently used first), never by a count of compilations.
             var retainedResults = results.Acquire(context, evicted => {
               if (evicted == null) {
                 return new ResultRetention(new NativeVerificationCache());
@@ -667,10 +837,6 @@ static class AnalysisSessionCommand {
               evicted.Compilations = 0;
               return evicted;
             });
-            if (retainedResults.Compilations != 0 && retainedResults.Compilations % compilationsPerResultWindow == 0) {
-              retainedResults.Cache.Clear();
-              resultCacheClears++;
-            }
             retainedResults.Compilations++;
             configuration = context;
             fileSystem.Current = capture;
@@ -887,7 +1053,6 @@ static class AnalysisSessionCommand {
         SolverRunCount = solverRuns,
         AnalysisModuleHits = moduleHits,
         AnalysisModuleMisses = moduleMisses,
-        ResultCacheClears = resultCacheClears,
         ResultCacheEvictions = results.Evictions,
         ResolverEvictions = resolvers.Evictions
       };
@@ -976,6 +1141,7 @@ static class AnalysisSessionCommand {
         retained.Facts.Reset();
       }
       resolvers.Clear();
+      pendingResolvers.Clear();
       translator.Dispose();
       preparation.Dispose();
       admission.Dispose();

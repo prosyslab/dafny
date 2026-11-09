@@ -31,6 +31,9 @@ public class CachingParser : ProgramParser {
     this.parseCache = parseCache;
   }
 
+  /// <summary>One retained parse template in its transferable form: the logical URI and the exact source text.</summary>
+  public sealed record ParsedSeed(Uri Uri, string Source);
+
   /// <summary>
   /// Requires a drained source parser and independently owned child options. Each inherited template
   /// is parsed once from retained immutable text, without consulting either filesystem. Cloner alone
@@ -39,12 +42,44 @@ public class CachingParser : ProgramParser {
   /// </summary>
   public CachingParser Clone(DafnyOptions options, IFileSystem fileSystem,
     TelemetryPublisherBase telemetryPublisher, CancellationToken cancellationToken = default) {
-    var cache = parseCache.Clone(key => (byte[])key.Clone(), entry => {
-      var result = base.ParseFile(options, new FileSnapshot(new StringReader(entry.Source), entry.Result.Version),
-        entry.Result.Uri, cancellationToken);
-      return new CachedParseFile(result, entry.Source);
-    }, cancellationToken);
+    var cache = parseCache.Clone(key => (byte[])key.Clone(),
+      entry => ParseTemplate(options, entry.Result.Uri, entry.Result.Version, entry.Source, cancellationToken),
+      cancellationToken);
     return new CachingParser(logger, fileSystem, telemetryPublisher, cache);
+  }
+
+  /// <summary>Lists the retained templates as URI and text. Requires a drained parser; changes nothing.</summary>
+  public IReadOnlyList<ParsedSeed> ExportSeeds(CancellationToken cancellationToken = default) =>
+    parseCache.Export((_, entry) => new ParsedSeed(entry.Result.Uri, entry.Source), cancellationToken);
+
+  /// <summary>
+  /// Builds a parser whose cache holds one private template per seed, parsed from the seed text with the
+  /// supplied detached options, exactly as <see cref="Clone"/> rebuilds inherited templates. Keys are
+  /// derived from URI and text with the same hash a parse miss uses, so a later parse of equal text hits.
+  /// </summary>
+  public static CachingParser FromSeeds(ILogger<ProgramParser> logger, IFileSystem fileSystem,
+    TelemetryPublisherBase telemetryPublisher, IEnumerable<ParsedSeed> seeds, DafnyOptions options,
+    CancellationToken cancellationToken = default) {
+    var parser = new CachingParser(logger, fileSystem, telemetryPublisher);
+    foreach (var seed in seeds) {
+      cancellationToken.ThrowIfCancellationRequested();
+      var key = ComputeKey(seed.Uri, seed.Source);
+      parser.parseCache.Seed(key, parser.ParseTemplate(options, seed.Uri, null, seed.Source, cancellationToken));
+    }
+    return parser;
+  }
+
+  private CachedParseFile ParseTemplate(DafnyOptions options, Uri uri, int? version, string source,
+    CancellationToken cancellationToken) {
+    var result = base.ParseFile(options, new FileSnapshot(new StringReader(source), version), uri, cancellationToken);
+    return new CachedParseFile(result, source);
+  }
+
+  private static byte[] ComputeKey(Uri uri, string source) {
+    using var hashAlgorithm = SHA256.Create();
+    var (reader, hash) = ComputeHashFromReader(Encoding.UTF8.GetBytes(uri + "\0"), new StringReader(source), hashAlgorithm);
+    reader.Dispose();
+    return hash;
   }
 
   public override Task<ProgramParseResult> ParseFiles(string programName, IReadOnlyList<DafnyFile> files,

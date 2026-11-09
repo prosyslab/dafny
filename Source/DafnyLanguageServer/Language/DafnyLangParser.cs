@@ -67,6 +67,33 @@ namespace Microsoft.Dafny.LanguageServer.Language {
       }
     }
 
+    /// <summary>Lists retained parse templates as URI and text; empty without a caching parser. Changes nothing.</summary>
+    public IReadOnlyList<CachingParser.ParsedSeed> ExportSeeds(CancellationToken cancellationToken = default) {
+      if (!mutex.Wait(0, cancellationToken)) {
+        throw new InvalidOperationException("Cannot export a parser while it is in use.");
+      }
+
+      try {
+        return programParser is CachingParser cached ? cached.ExportSeeds(cancellationToken) : [];
+      }
+      finally {
+        mutex.Release();
+      }
+    }
+
+    /// <summary>
+    /// Creates a parser bound to <paramref name="options"/> whose cache is seeded from exported text.
+    /// Seeds are parsed with <paramref name="seedOptions"/>, which must be detached from any request.
+    /// </summary>
+    public static DafnyLangParser FromSeeds(DafnyOptions options, DafnyOptions seedOptions, IFileSystem fileSystem,
+      TelemetryPublisherBase telemetryPublisher, ILogger<DafnyLangParser> logger, ILogger<CachingParser> innerParserLogger,
+      IEnumerable<CachingParser.ParsedSeed> seeds, CancellationToken cancellationToken = default) {
+      var seeded = options.Get(DafnyLangSymbolResolver.UseCaching)
+        ? CachingParser.FromSeeds(innerParserLogger, fileSystem, telemetryPublisher, seeds, seedOptions, cancellationToken)
+        : null;
+      return new DafnyLangParser(options, fileSystem, telemetryPublisher, logger, innerParserLogger, seeded);
+    }
+
     public async Task<ProgramParseResult> Parse(Compilation compilation, CancellationToken cancellationToken) {
       await mutex.WaitAsync(cancellationToken);
 

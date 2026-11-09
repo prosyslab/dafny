@@ -1,3 +1,5 @@
+- [Transfer clonable session caches to a new native process](2026-11-05-cross-process-session-transfer.md) — in-progress; export/import protocol so cloned children run in their own processes; parent: [cross-process child sessions](../../cosyn/plan/2026-11-05-cross-process-child-sessions.md).
+
 - [Clone reusable native caches into independent sessions](2026-11-05-native-cache-cloning.md) — done; private parser templates/detached native proof snapshots, branch lifecycle and bounded native backing ownership;27native cases/59client units/17fake integrations and independent review pass.
 
 - [Map session diagnostic locations per physical request](2026-11-05-review-diagnostic-locations.md) — done; request-local human/JSON paths preserve logical cached ranges and captured excerpts; fresh scoped assemblies, 18 synthetic tests and independent source review pass; full dependency rebuild blocked by Gradle lock.

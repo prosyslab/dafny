@@ -1,3 +1,5 @@
+- [Cross-process session transfer](native-analysis-session.md#cross-process-session-transfer-2026-11-05) — `export-session`/`import-session` move detached parser sources and proof results to a fresh native process; strict validation, frame bound, parked parser seeds; real Cat check with 0 solver runs in two concurrent processes. [Plan](../plan/2026-11-05-cross-process-session-transfer.md).
+
 - [Independent native branch cache cloning](native-analysis-session.md#independent-native-branch-cache-cloning-2026-11-05) — retained parent/multiple child epochs, private parser templates and detached authoritative proof caches;59client units/17fake integrations/27native cases and independent reviews. [Plan](../plan/2026-11-05-native-cache-cloning.md).
 
 - [Request-local diagnostic locations](native-analysis-session.md#request-local-diagnostic-locations-2026-11-05) — logical cached ranges and captured excerpts stay unchanged; request-local filename/JSON URI presentation maps to physical sources. [Plan](../plan/2026-11-05-review-diagnostic-locations.md).

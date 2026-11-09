@@ -144,19 +144,74 @@ public class NativeVerificationCacheTests {
     cache.Dispose();
   }
 
-  // The export journal expires conservatively with the native cache's ten-minute retention window.
+  // The cause pinned: Boogie's own result cache drops entries after ten idle minutes. A session that waits for a
+  // long model turn, or a cold run longer than that, lost results this way; the session store does not use it.
   [Fact]
-  public void ExpiredJournalDoesNotResurrectNativeResults() {
-    var now = DateTime.UtcNow;
-    using var parent = new NativeVerificationCache(() => now);
-    var identity = Identity();
-    parent.PublishSuccessful(identity, Success(identity));
-    now = now.AddMinutes(10);
-    using var child = parent.Clone(out var count);
-    Assert.Equal(0, count);
-    Assert.Null(child.Lookup(Identity(), false, out _));
-    parent.Dispose();
-    child.Dispose();
+  public void BoogieResultCacheExpiresByIdleTime() {
+    var policy = (System.Runtime.Caching.CacheItemPolicy)typeof(VerificationResultCache)
+      .GetField("Policy", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+      .GetValue(new VerificationResultCache())!;
+    Assert.Equal(TimeSpan.FromMinutes(10), policy.SlidingExpiration);
+  }
+
+  // Retention is bounded by entry count, least recently used first; idle time plays no part. A lookup counts as
+  // use, and an evicted result also leaves the transfer journal.
+  [Fact]
+  public void EntryBoundEvictsLeastRecentlyUsed() {
+    using var cache = new NativeVerificationCache(capacity: 2);
+    Implementation Named(string id) => new(Microsoft.Boogie.Token.NoToken, id, [], [], [], [], new List<Block>(),
+      new QKeyValue(Microsoft.Boogie.Token.NoToken, "id", [id],
+        new QKeyValue(Microsoft.Boogie.Token.NoToken, "checksum", ["body"], null))) {
+      DependenciesCollected = true,
+      MD5DependencyChecksum_ = [1]
+    };
+    foreach (var id in new[] { "a", "b" }) {
+      var implementation = Named(id);
+      cache.PublishSuccessful(implementation, Success(implementation));
+    }
+    Assert.NotNull(cache.Lookup(Named("a"), false, out _));
+    Assert.Equal((2, true), cache.Journal);
+    var third = Named("c");
+    cache.PublishSuccessful(third, Success(third));
+    Assert.Equal(2, cache.Count);
+    // The evicted result leaves the transfer journal too: it shrinks to the store and never outlives it.
+    Assert.Equal((2, true), cache.Journal);
+    Assert.Null(cache.Lookup(Named("b"), false, out var evicted));
+    Assert.Equal(NativeVerificationCache.MissingPriority, evicted);
+    Assert.NotNull(cache.Lookup(Named("a"), false, out var kept));
+    Assert.Equal(NativeVerificationCache.ReusePriority, kept);
+    using var child = cache.Clone(out var copied);
+    Assert.Equal(2, copied);
+    Assert.Null(child.Lookup(Named("b"), false, out _));
+  }
+
+  // What counts as a hit is unchanged: every lookup case gives Boogie's own result and priority.
+  [Theory]
+  [InlineData("body", (byte)1, false, false)]
+  [InlineData("changed", (byte)1, false, false)]
+  [InlineData("body", (byte)2, false, false)]
+  [InlineData("body", (byte)1, true, false)]
+  [InlineData("body", (byte)1, true, true)]
+  [InlineData("missing", (byte)1, false, false)]
+  public void LookupMatchesBoogieResultCache(string checksum, byte dependency, bool timedOut, bool diagnostics) {
+    var stored = Identity();
+    var result = Success(stored);
+    if (timedOut) {
+      result.VcOutcome = VcOutcome.TimedOut;
+    }
+    using var native = new NativeVerificationCache();
+    var boogie = new VerificationResultCache();
+    native.Insert(stored, result);
+    boogie.Insert(stored, result);
+    var probe = checksum == "missing"
+      ? new Implementation(Microsoft.Boogie.Token.NoToken, "other", [], [], [], [], new List<Block>(),
+        new QKeyValue(Microsoft.Boogie.Token.NoToken, "id", ["other-id"], null)) { DependenciesCollected = true, MD5DependencyChecksum_ = [1] }
+      : Identity(checksum, dependency);
+    var expected = boogie.Lookup(probe, diagnostics, out var expectedPriority);
+    var actual = native.Lookup(probe, diagnostics, out var actualPriority);
+    Assert.Same(expected, actual);
+    Assert.Equal(expectedPriority, actualPriority);
+    Assert.Equal(boogie.VerificationPriority(probe, diagnostics), native.VerificationPriority(probe, diagnostics));
   }
 
   // The copied dependency checksum bytes cannot be changed by mutating a parent's implementation later.
@@ -188,22 +243,6 @@ public class NativeVerificationCacheTests {
     Assert.NotNull(parent.Lookup(Identity(), false, out var priority));
     Assert.Equal(NativeVerificationCache.ReusePriority, priority);
     parent.Dispose();
-  }
-
-  // Repeated clone/close cycles allocate cache timer owners only up to the concurrent owner count.
-  [Fact]
-  public void RepeatedCloneDisposalReusesNativeTimerOwners() {
-    using var parent = new NativeVerificationCache();
-    var identity = Identity();
-    parent.PublishSuccessful(identity, Success(identity));
-    var before = NativeVerificationCache.AllocatedCaches;
-    for (var index = 0; index < 16; index++) {
-      using var child = parent.Clone(out var count);
-      Assert.Equal(1, count);
-      Assert.NotNull(child.Lookup(Identity(), false, out var priority));
-      Assert.Equal(NativeVerificationCache.ReusePriority, priority);
-    }
-    Assert.InRange(NativeVerificationCache.AllocatedCaches, before, before + 1);
   }
 
   // An idempotent return cannot give two live wrappers the same cache or leak a prior owner's result.

@@ -83,6 +83,53 @@ process, hidden task, provider or paid run. Commands, build dependency limits an
 source audits are in the plan. No end-to-end proof, speedup, image/pinned-install
 or process-crash-isolation claim is made.
 
+## Cross-process session transfer (2026-11-05)
+
+Status: implemented and locally tested; independent verification and the host side
+pending. Verified 2026-11-05 on dirty native base `650e6db3`. Owner plan:
+[cross-process session transfer](../plan/2026-11-05-cross-process-session-transfer.md);
+host plan: [cross-process child sessions](../../cosyn/plan/2026-11-05-cross-process-child-sessions.md).
+
+In-process clones share one daemon, and the process-static compiler gate serializes
+their compilations. `export-session` and `import-session` move the same detached cache
+data into a new process instead. Both run at the clone's drained boundary (admission,
+preparation, readers drained); neither takes the compiler gate, because nothing is parsed.
+
+Protocol, version 1 (Python: `NativeDafnySession.export_session` and `import_session`):
+- `export-session` returns, as stdout, one JSON document: `schemaVersion`, `daemonEpoch`,
+  `sessionId`, `sessionEpoch`, `toolchain` (the native toolchain identity of result
+  checksums), `resolvers[]` (`key`, `optionsIdentity`, `entries[{uri, text}]`) and
+  `results[]` (`key`, `compilations`, `entries[]` of detached successful snapshots with
+  base64 dependency bytes and scalar split and assertion shapes). `nativeEvidence` is null.
+- `import-session` carries that exact string in the request field `payload` and returns
+  a receipt (`schemaVersion`, `daemonEpoch`, `sessionId`, `sessionEpoch`, `parsedEntries`,
+  `verificationEntries`).
+- Import validates strictly (no unknown members, required fields, toolchain equal, 64-hex
+  keys, canonical absolute URIs, unique entries, bounded dependency bytes and counts,
+  named enum values, at most two resolver and four result contexts) and installs nothing
+  on failure (code 2, `DAFNY_SESSION_TRANSFER_REJECTED`). It needs a fresh branch.
+- A response line may be at most 128 MiB (`ResponseLimit`, newline excluded; the Python
+  client's `MAX_RESPONSE_BYTES`); a longer one becomes a code-6 response, never truncated.
+  Requests stay at 8 MiB. The payload must fit the 8 MiB import request frame (binding) and
+  the 128 MiB export response
+  frame, each with a 4096-byte reserve; otherwise code 6,
+  `DAFNY_SESSION_TRANSFER_TOO_LARGE`. Never truncated.
+
+Limits and a deviation from the contract text: a fresh process has no `DafnyOptions` for
+a retained resolver context and cannot rebuild them from an identity. Parser sources are
+parked at import and parsed with the first request that creates the matching resolver
+context, only if its `ResolutionOptionsIdentity` equals the exported one; otherwise they
+are dropped and that request parses cold. Result caches are built at import time and
+remain authoritative only through native checksum lookup. `clone` is unchanged except
+that it also carries parked sources.
+
+Evidence: 49 new driver cases (real solver on a tiny program for the session-level round
+trip, a fake solver for the wire-level one) and 22 + 3 new Python cases; a real check on
+copies of public Cat with the rebuilt binary: payload 1.41 MB, export 0.15 s, import 0.7
+s, two fresh processes with 3 of 3 hits and 0 solver runs, resolves overlapping 7.8 s,
+wall 50.9 s against 91.7 s for two in-process clones. Children still need about 41 s to
+prepare the compilation. One workload, one run; no speedup claim beyond it.
+
 ## Request-local diagnostic locations (2026-11-05)
 
 Status: local source checks and independent source review accepted. Owner: [diagnostic repair](../plan/2026-11-05-review-diagnostic-locations.md);
@@ -228,9 +275,10 @@ context (LRU, 4), instead of recreating them and clearing results whenever the
 options differ. Cosyn alternates option sets (`certificates` omits
 `--allow-external-contracts`; isolated verifies add or drop `--extract-counterexample`),
 so a single slot was cold on every request. An evicted result cache is cleared and
-its instance recycled. `resultCacheClears` counts the per-context 32-compilation
-window, `resultCacheEvictions` and `resolverEvictions` count LRU evictions; all
-three are optional fields of `NativeEvidence`. State replacement still waits for
+its instance recycled. `resultCacheClears` counted the per-context 32-compilation
+window (stale since 2026-11-07: the window and the field were removed; the client still
+accepts it from older natives). `resultCacheEvictions` and `resolverEvictions` count LRU
+evictions; they are optional fields of `NativeEvidence`. State replacement still waits for
 readers to drain, and error/faulted/cancelled compilations and library identity
 behave as before. The compilation `State` (resolution, translation, prepared tasks)
 is still single and is rebuilt when the context changes.
@@ -387,8 +435,9 @@ Unsupported certificate owners get a fresh checksum, disabling cross-compilation
 replay while preserving same-state completed task reuse. Boogie's own cache
 remains the result store and checksum/dependency lookup authority. The session
 keeps one cache per verifier context (at most four, least recently used first).
-A context's cache is cleared when it is evicted, after 32 new compilations of that
-context, and at shutdown; another context's requests never clear it.
+A context's cache is cleared when it is evicted and at shutdown (the 32-compilation
+clear was removed on 2026-11-07); another context's requests never clear it. Its size is
+bounded by 4096 results, least recently used first.
 
 Requests share prepared native task futures, with independent subscribers and
 cancellation. The last cancelled subscriber retires the state, cancels the actual

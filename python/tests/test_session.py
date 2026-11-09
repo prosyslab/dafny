@@ -1214,3 +1214,349 @@ def test_cancel_queued_clone_does_not_cancel_admitted_job(make_session: Callable
         assert len(peer.requests) == 1
         peer.emit(_response(request))
         assert job.result(timeout=1).returncode == 0
+
+
+_TOOLCHAIN = "c" * 64
+
+
+def _export_document(request: dict[str, Any], **updates: Any) -> dict[str, Any]:
+    document = {
+        "schemaVersion": 1,
+        "daemonEpoch": "d" * 32,
+        "sessionId": request["sessionId"],
+        "sessionEpoch": "e" * 32,
+        "toolchain": _TOOLCHAIN,
+        "resolvers": [{"key": "1" * 64, "optionsIdentity": "2" * 64, "entries": []}],
+        "results": [],
+    }
+    document.update(updates)
+    return document
+
+
+def _import_receipt(request: dict[str, Any], **updates: Any) -> dict[str, Any]:
+    receipt = {
+        "schemaVersion": 1,
+        "daemonEpoch": "1" * 32,
+        "sessionId": request["sessionId"],
+        "sessionEpoch": "2" * 32,
+        "parsedEntries": 3,
+        "verificationEntries": 2,
+    }
+    receipt.update(updates)
+    return receipt
+
+
+def _control_reply(request: dict[str, Any], stdout: str, **updates: Any) -> dict[str, Any]:
+    reply = {
+        "id": request["id"],
+        "returncode": 0,
+        "stdout": stdout,
+        "stderr": "",
+        "nativeEvidence": None,
+    }
+    reply.update(updates)
+    return reply
+
+
+def _transfer_daemon(
+    export: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    receipt: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    job_epoch: str = "2" * 32,
+) -> Callable[[_Process, dict[str, Any]], None]:
+    def respond(peer: _Process, request: dict[str, Any]) -> None:
+        operation = request.get("operation")
+        if operation == "export-session":
+            peer.emit(
+                _control_reply(
+                    request, json.dumps((export or _export_document)(request), ensure_ascii=False)
+                )
+            )
+        elif operation == "import-session":
+            peer.emit(_control_reply(request, json.dumps((receipt or _import_receipt)(request))))
+        elif operation in {"close-session", "cancel"}:
+            peer.control_response(request)
+        else:
+            peer.emit(_response(request, sessionEpoch=job_epoch))
+
+    return respond
+
+
+# The exported bytes are exactly the daemon's document and reach the second process unchanged.
+def test_export_bytes_reach_a_fresh_process_unchanged(make_session: Callable[..., Any]) -> None:
+    parent, parent_peer = make_session(
+        _transfer_daemon(
+            export=lambda request: _export_document(request, note='café 日本 "q"'),
+            job_epoch="e" * 32,
+        )
+    )
+    parent.run(_invocation())
+    payload = parent.export_session(timeout_seconds=1)
+    export_request = [r for r in parent_peer.requests if r.get("operation") == "export-session"]
+    assert len(export_request) == 1
+    assert set(export_request[0]) == {"id", "operation", "sessionId"}
+    assert json.loads(payload)["note"] == 'café 日本 "q"'
+    assert parent.run(_invocation()).returncode == 0
+
+    child, child_peer = make_session(_transfer_daemon())
+    receipt = child.import_session(payload, timeout_seconds=1)
+    sent = [r for r in child_peer.requests if r.get("operation") == "import-session"]
+    assert len(sent) == 1
+    assert sent[0]["payload"].encode("utf-8") == payload
+    assert set(sent[0]) == {"id", "operation", "sessionId", "payload"}
+    assert (receipt.parsed_entries, receipt.verification_entries) == (3, 2)
+    assert child.import_receipt == receipt
+    assert child.run(_invocation()).native_evidence.session_epoch == "2" * 32
+    assert not child_peer.exited.is_set()
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"sessionId": "other"},
+        {"sessionEpoch": "f" * 32},
+        {"daemonEpoch": "nope"},
+        {"schemaVersion": 2},
+        {"toolchain": "short"},
+    ],
+)
+def test_invalid_export_header_fails_shared_transport(
+    make_session: Callable[..., Any], updates: dict[str, Any]
+) -> None:
+    parent, peer = make_session(
+        _transfer_daemon(export=lambda request: _export_document(request, **updates))
+    )
+    parent.run(_invocation())
+    with pytest.raises(SessionProtocolError):
+        parent.export_session(timeout_seconds=1)
+    assert peer.exited.is_set()
+
+
+def test_export_with_changed_daemon_epoch_is_rejected(make_session: Callable[..., Any]) -> None:
+    parent, peer = make_session(_transfer_daemon(job_epoch="e" * 32))
+    parent.run(_invocation())
+    parent.export_session(timeout_seconds=1)
+    peer.respond = _transfer_daemon(
+        export=lambda request: _export_document(request, daemonEpoch="f" * 32),
+        job_epoch="e" * 32,
+    )
+    with pytest.raises(SessionProtocolError, match="daemon epoch"):
+        parent.export_session(timeout_seconds=1)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"sessionId": "other"},
+        {"daemonEpoch": "nope"},
+        {"parsedEntries": -1},
+        {"extra": 1},
+        {"schemaVersion": 3},
+    ],
+)
+def test_invalid_import_receipt_fails_shared_transport(
+    make_session: Callable[..., Any], updates: dict[str, Any]
+) -> None:
+    child, peer = make_session(
+        _transfer_daemon(receipt=lambda request: _import_receipt(request, **updates))
+    )
+    with pytest.raises(SessionProtocolError):
+        child.import_session(b"{}", timeout_seconds=1)
+    assert peer.exited.is_set()
+
+
+# Native rejection keeps the process usable, with the native reason and no receipt.
+def test_rejected_import_reports_native_reason_and_stays_usable(
+    make_session: Callable[..., Any],
+) -> None:
+    def respond(peer: _Process, request: dict[str, Any]) -> None:
+        if request.get("operation") == "import-session":
+            peer.emit(
+                _control_reply(
+                    request,
+                    "",
+                    returncode=2,
+                    stderr="DAFNY_SESSION_TRANSFER_REJECTED: toolchain differs",
+                )
+            )
+        else:
+            _transfer_daemon()(peer, request)
+
+    child, peer = make_session(respond)
+    with pytest.raises(NativeSessionError, match="toolchain differs"):
+        child.import_session(b"{}", timeout_seconds=1)
+    assert child.import_receipt is None
+    assert child.run(_invocation()).returncode == 0
+    assert not peer.exited.is_set()
+
+
+def test_export_too_large_error_is_explicit(make_session: Callable[..., Any]) -> None:
+    def respond(peer: _Process, request: dict[str, Any]) -> None:
+        if request.get("operation") == "export-session":
+            peer.emit(
+                _control_reply(
+                    request,
+                    "",
+                    returncode=6,
+                    stderr="DAFNY_SESSION_TRANSFER_TOO_LARGE: needs 9000000 bytes",
+                )
+            )
+        else:
+            _transfer_daemon()(peer, request)
+
+    parent, peer = make_session(respond)
+    with pytest.raises(NativeSessionError, match="TRANSFER_TOO_LARGE"):
+        parent.export_session(timeout_seconds=1)
+    assert parent.run(_invocation()).returncode == 0
+    assert not peer.exited.is_set()
+
+
+@pytest.mark.parametrize("operation", ["export-session", "import-session"])
+def test_missing_transfer_support_is_explicit(
+    make_session: Callable[..., Any], operation: str
+) -> None:
+    def respond(peer: _Process, request: dict[str, Any]) -> None:
+        if request.get("operation") == operation:
+            peer.emit(
+                _control_reply(
+                    request,
+                    "",
+                    returncode=7,
+                    stderr="DAFNY_SESSION_UNSUPPORTED: Unknown native session operation.",
+                )
+            )
+        else:
+            _transfer_daemon()(peer, request)
+
+    session, peer = make_session(respond)
+    with pytest.raises(SessionUnsupportedError):
+        if operation == "export-session":
+            session.export_session(timeout_seconds=1)
+        else:
+            session.import_session(b"{}", timeout_seconds=1)
+    assert session.run(_invocation()).returncode == 0
+
+
+def test_oversized_import_payload_is_refused_before_writing(
+    make_session: Callable[..., Any],
+) -> None:
+    child, peer = make_session(_transfer_daemon())
+    with pytest.raises(SessionProtocolError, match="byte limit"):
+        child.import_session(b"x" * session_module.MAX_REQUEST_BYTES, timeout_seconds=1)
+    assert peer.requests == []
+    assert child.run(_invocation()).returncode == 0
+
+
+def test_import_payload_must_be_utf8(make_session: Callable[..., Any]) -> None:
+    child, peer = make_session(_transfer_daemon())
+    with pytest.raises(ValueError, match="UTF-8"):
+        child.import_session(b"\xff\xfe", timeout_seconds=1)
+    assert peer.requests == []
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
+def test_transfer_timeout_must_be_finite_and_positive(
+    make_session: Callable[..., Any], timeout: float
+) -> None:
+    session, peer = make_session(_transfer_daemon())
+    with pytest.raises(ValueError):
+        session.export_session(timeout_seconds=timeout)
+    with pytest.raises(ValueError):
+        session.import_session(b"{}", timeout_seconds=timeout)
+    assert peer.requests == []
+
+
+# A timed-out export is cancelled and drained; the process stays usable, as after a clone timeout.
+@pytest.mark.integration
+def test_export_timeout_cancels_and_drains(make_session: Callable[..., Any]) -> None:
+    saved: dict[str, Any] = {}
+
+    def respond(peer: _Process, request: dict[str, Any]) -> None:
+        if request.get("operation") == "export-session":
+            saved.update(request)
+        elif request.get("operation") == "cancel":
+            peer.control_response(request)
+            peer.emit(_control_reply(saved, "", returncode=130, stderr="cancelled"))
+        else:
+            _transfer_daemon()(peer, request)
+
+    parent, peer = make_session(respond)
+    with pytest.raises(NativeSessionError) as caught:
+        parent.export_session(timeout_seconds=0.02)
+    assert isinstance(caught.value.__cause__, subprocess.TimeoutExpired)
+    cancels = [item for item in peer.requests if item.get("operation") == "cancel"]
+    assert [item["targetId"] for item in cancels] == [saved["id"]]
+    assert parent.run(_invocation()).returncode == 0
+    assert not peer.exited.is_set()
+
+
+@pytest.mark.integration
+def test_cancelled_import_is_cancelled_natively_and_reports_cancellation(
+    make_session: Callable[..., Any],
+) -> None:
+    seen: queue.Queue[dict[str, Any]] = queue.Queue()
+
+    def respond(peer: _Process, request: dict[str, Any]) -> None:
+        if request.get("operation") == "import-session":
+            seen.put(request)
+        elif request.get("operation") == "cancel":
+            peer.control_response(request)
+            peer.emit(_control_reply(seen.get_nowait(), "", returncode=130, stderr="cancelled"))
+        else:
+            _transfer_daemon()(peer, request)
+
+    child, peer = make_session(respond)
+    cancel = threading.Event()
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(child.import_session, b"{}", timeout_seconds=2, cancel_event=cancel)
+        request_id = seen.get(timeout=1)["id"]
+        seen.put({"id": request_id})
+        cancel.set()
+        with pytest.raises(SessionCancelledError):
+            future.result(timeout=2)
+    assert child.import_receipt is None
+    assert [r["targetId"] for r in peer.requests if r.get("operation") == "cancel"] == [request_id]
+    assert child.run(_invocation()).returncode == 0
+
+
+# Transfers share the normal lane with jobs; cancelling a queued one leaves the admitted job alone.
+@pytest.mark.integration
+def test_transfer_waits_for_the_normal_lane_and_cancel_keeps_the_job(
+    make_session: Callable[..., Any],
+) -> None:
+    parent, peer = make_session(lambda process, request: None, max_pending=1)
+    cancel = threading.Event()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        job = pool.submit(parent.run, _invocation())
+        request = peer.jobs.get(timeout=1)
+        export = pool.submit(parent.export_session, timeout_seconds=1, cancel_event=cancel)
+        cancel.set()
+        with pytest.raises(SessionCancelledError):
+            export.result(timeout=1)
+        assert len(peer.requests) == 1
+        peer.emit(_response(request))
+        assert job.result(timeout=1).returncode == 0
+
+
+# A refused oversized import registers nothing: repeated refusals cannot fill the normal lane.
+def test_repeated_oversized_imports_do_not_wedge_the_transport(
+    make_session: Callable[..., Any],
+) -> None:
+    child, peer = make_session(
+        _transfer_daemon(
+            export=lambda request: _export_document(
+                request, sessionEpoch="2" * 32, daemonEpoch="1" * 32
+            )
+        ),
+        max_pending=2,
+    )
+    oversized = b"x" * session_module.MAX_REQUEST_BYTES
+    for _ in range(5):
+        with pytest.raises(SessionProtocolError, match="byte limit"):
+            child.import_session(oversized, timeout_seconds=1)
+    assert child._transport._controls == {}
+    assert peer.requests == []
+    assert child.run(_invocation()).returncode == 0
+    assert child.import_session(b"{}", timeout_seconds=1).parsed_entries == 3
+    assert child.export_session(timeout_seconds=1)
+    assert child._transport._controls == {}
+    assert not peer.exited.is_set()

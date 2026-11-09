@@ -62,6 +62,7 @@ class NativeOutcome(StrEnum):
 
 
 _Count = Annotated[StrictInt, Field(ge=0)]
+_SNAPSHOT_OPERATIONS = ("clone", "export-session", "import-session")
 
 
 class NativeEvidence(BaseModel):
@@ -132,6 +133,60 @@ class CloneReceipt(BaseModel):
         return value
 
 
+class ImportReceipt(BaseModel):
+    """Native observations from one completed session import."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: StrictInt = Field(alias="schemaVersion")
+    daemon_epoch: StrictStr = Field(alias="daemonEpoch")
+    session_id: StrictStr = Field(alias="sessionId", min_length=1)
+    session_epoch: StrictStr = Field(alias="sessionEpoch")
+    parsed_entries: _Count = Field(alias="parsedEntries")
+    verification_entries: _Count = Field(alias="verificationEntries")
+
+    @field_validator("schema_version")
+    @classmethod
+    def _supported_schema(cls, value: int) -> int:
+        if value != 1:
+            raise ValueError("unsupported import receipt schema version")
+        return value
+
+    @field_validator("daemon_epoch", "session_epoch")
+    @classmethod
+    def _valid_epoch(cls, value: str) -> str:
+        uuid.UUID(value)
+        return value
+
+
+class _ExportHeader(BaseModel):
+    """The identity fields of an export document the client checks before handing it on.
+
+    The rest of the document is validated by the importing native process.
+    """
+
+    model_config = ConfigDict(extra="allow", frozen=True)
+
+    schema_version: StrictInt = Field(alias="schemaVersion")
+    daemon_epoch: StrictStr = Field(alias="daemonEpoch")
+    session_id: StrictStr = Field(alias="sessionId", min_length=1)
+    session_epoch: StrictStr = Field(alias="sessionEpoch")
+    toolchain: SHA256
+
+    @field_validator("schema_version")
+    @classmethod
+    def _supported_schema(cls, value: int) -> int:
+        if value != 1:
+            raise ValueError("unsupported export document schema version")
+        return value
+
+    @field_validator("daemon_epoch", "session_epoch")
+    @classmethod
+    def _valid_epoch(cls, value: str) -> str:
+        uuid.UUID(value)
+        return value
+
+
 @dataclass
 class _Branch:
     session_id: str
@@ -150,7 +205,8 @@ class _Control:
     target: _Branch | None = None
     ready: threading.Event = field(default_factory=threading.Event)
     response: _Response | None = None
-    receipt: CloneReceipt | None = None
+    receipt: CloneReceipt | ImportReceipt | None = None
+    exported: str | None = None
     error: NativeSessionError | None = None
 
 
@@ -470,8 +526,8 @@ class _SessionTransport:
         return sum(control.operation == operation for control in self._controls.values())
 
     def _normal_count(self) -> int:
-        # Native jobs and cache snapshots share the daemon's normal request lane.
-        return len(self._pending) + self._control_count("clone")
+        # Native jobs and cache snapshots/transfers share the daemon's normal request lane.
+        return len(self._pending) + sum(self._control_count(name) for name in _SNAPSHOT_OPERATIONS)
 
     def _request_cancel(self, request_id: str, branch: _Branch) -> None:
         # Clone/close controls cannot consume the space reserved for cancel ACKs.
@@ -480,17 +536,20 @@ class _SessionTransport:
             self._fail(error)
             raise error
         control_id = uuid.uuid4().hex
-        self._controls[control_id] = _Control("cancel", branch)
-        self._enqueue(
-            self._frame(
-                {
-                    "id": control_id,
-                    "operation": "cancel",
-                    "sessionId": branch.session_id,
-                    "targetId": request_id,
-                }
-            )
+        frame = self._frame(
+            {
+                "id": control_id,
+                "operation": "cancel",
+                "sessionId": branch.session_id,
+                "targetId": request_id,
+            }
         )
+        self._controls[control_id] = _Control("cancel", branch)
+        try:
+            self._enqueue(frame)
+        except NativeSessionError:
+            self._controls.pop(control_id, None)
+            raise
 
     def _cancel(self, request_id: str, pending: _Pending) -> None:
         with self._condition:
@@ -614,8 +673,10 @@ class _SessionTransport:
                     f"native {control.operation} failed ({response.returncode}): {response.stderr}"
                 )
             elif response.nativeEvidence is not None:
-                if control.operation == "clone":
-                    raise SessionUnsupportedError("native daemon does not support clone controls")
+                if control.operation in _SNAPSHOT_OPERATIONS:
+                    raise SessionUnsupportedError(
+                        f"native daemon does not support {control.operation} controls"
+                    )
                 raise SessionProtocolError("invalid native session control acknowledgement")
             elif control.operation == "clone":
                 receipt = CloneReceipt.model_validate(
@@ -641,11 +702,44 @@ class _SessionTransport:
                 target.epoch = receipt.session_epoch
                 self._daemon_epoch = receipt.daemon_epoch
                 control.receipt = receipt
+            elif control.operation == "export-session":
+                header = _ExportHeader.model_validate(
+                    json.loads(response.stdout, object_pairs_hook=_unique_object)
+                )
+                source = control.branch
+                if header.session_id != source.session_id:
+                    raise SessionProtocolError("export document has the wrong session id")
+                if source.epoch is not None and header.session_epoch != source.epoch:
+                    raise SessionProtocolError("export document has a stale session epoch")
+                if self._daemon_epoch is not None and header.daemon_epoch != self._daemon_epoch:
+                    raise SessionProtocolError("export document has changed daemon epoch")
+                source.epoch = header.session_epoch
+                self._daemon_epoch = header.daemon_epoch
+                control.exported = response.stdout
+            elif control.operation == "import-session":
+                imported = ImportReceipt.model_validate(
+                    json.loads(response.stdout, object_pairs_hook=_unique_object)
+                )
+                target_branch = control.branch
+                if imported.session_id != target_branch.session_id:
+                    raise SessionProtocolError("import receipt has the wrong session id")
+                if self._daemon_epoch is not None and imported.daemon_epoch != self._daemon_epoch:
+                    raise SessionProtocolError("import receipt has changed daemon epoch")
+                if any(
+                    item is not target_branch and item.epoch == imported.session_epoch
+                    for item in self._branches.values()
+                ):
+                    raise SessionProtocolError("import receipt reused a session epoch")
+                target_branch.epoch = imported.session_epoch
+                self._daemon_epoch = imported.daemon_epoch
+                control.receipt = imported
             if control.error is not None and control.operation == "cancel":
                 raise control.error
             control.response = response
         except (ValueError, RecursionError) as exc:
-            error = SessionProtocolError(f"invalid native clone receipt: {str(exc)[:4096]}")
+            error = SessionProtocolError(
+                f"invalid native {control.operation} response: {str(exc)[:4096]}"
+            )
             control.error = error
             self._fail(error)
             raise error from exc
@@ -658,15 +752,27 @@ class _SessionTransport:
             self._condition.notify_all()
 
     def _control(
-        self, operation: str, branch: _Branch, target: _Branch | None = None
+        self,
+        operation: str,
+        branch: _Branch,
+        target: _Branch | None = None,
+        payload: str | None = None,
     ) -> tuple[str, _Control]:
         control_id = uuid.uuid4().hex
         control = _Control(operation, branch, target)
         document = {"id": control_id, "operation": operation, "sessionId": branch.session_id}
         if target is not None:
             document["targetId"] = target.session_id
+        if payload is not None:
+            document["payload"] = payload
+        # Build the frame first: an oversized payload must not leave a registered control behind.
+        frame = self._frame(document)
         self._controls[control_id] = control
-        self._enqueue(self._frame(document))
+        try:
+            self._enqueue(frame)
+        except NativeSessionError:
+            self._controls.pop(control_id, None)
+            raise
         return control_id, control
 
     def clone(
@@ -704,7 +810,7 @@ class _SessionTransport:
                 raise control.error
             with self._condition:
                 self._check_open(branch)
-            if control.receipt is None:
+            if not isinstance(control.receipt, CloneReceipt):
                 raise SessionProtocolError("native clone completed without a receipt")
             return target, control.receipt
         except NativeSessionError:
@@ -734,6 +840,97 @@ class _SessionTransport:
                 if last_owner:
                     self.close()
             raise
+
+    def transfer(
+        self,
+        operation: str,
+        branch: _Branch,
+        *,
+        payload: str | None,
+        timeout_seconds: float,
+        cancel_event: threading.Event | None,
+    ) -> _Control:
+        """Run one export-session or import-session control, admitted and drained like clone."""
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be finite and positive")
+        invocation = DafnyInvocation(
+            arguments=(operation,),
+            cwd=self._cwd,
+            operation=f"{operation} native session",
+            timeout_seconds=timeout_seconds,
+            cancel_event=cancel_event,
+        )
+        deadline = time.monotonic() + timeout_seconds
+        with self._condition:
+            while self._normal_count() >= self._max_pending:
+                self._check_open(branch)
+                self._check_wait(invocation, deadline)
+                self._condition.wait(min(_POLL_SECONDS, max(0, deadline - time.monotonic())))
+            self._check_open(branch)
+            self._check_wait(invocation, deadline)
+            control_id, control = self._control(operation, branch, payload=payload)
+        try:
+            while not control.ready.wait(min(_POLL_SECONDS, max(0, deadline - time.monotonic()))):
+                self._check_wait(invocation, deadline)
+            self._check_wait(invocation, deadline)
+            if control.error is not None:
+                raise control.error
+            with self._condition:
+                self._check_open(branch)
+            return control
+        except NativeSessionError:
+            # Drain the original control, even when its cancel ACK arrives first. A transfer
+            # that completes late changes only cache contents the native side re-validates.
+            if not control.ready.is_set() and self._failure is None:
+                try:
+                    with self._condition:
+                        if not control.ready.is_set():
+                            self._request_cancel(control_id, branch)
+                except NativeSessionError:
+                    self.close()
+                if not control.ready.wait(_CLOSE_SECONDS):
+                    self._fail(NativeSessionError(f"native {operation} cancellation did not drain"))
+                    self.close()
+            if self._failure is not None:
+                self.close()
+            raise
+
+    def export_session(
+        self, branch: _Branch, *, timeout_seconds: float, cancel_event: threading.Event | None
+    ) -> bytes:
+        control = self.transfer(
+            "export-session",
+            branch,
+            payload=None,
+            timeout_seconds=timeout_seconds,
+            cancel_event=cancel_event,
+        )
+        if control.exported is None:
+            raise SessionProtocolError("native export completed without a document")
+        return control.exported.encode("utf-8")
+
+    def import_session(
+        self,
+        branch: _Branch,
+        payload: bytes,
+        *,
+        timeout_seconds: float,
+        cancel_event: threading.Event | None,
+    ) -> ImportReceipt:
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("payload must be the UTF-8 document from export_session") from exc
+        control = self.transfer(
+            "import-session",
+            branch,
+            payload=text,
+            timeout_seconds=timeout_seconds,
+            cancel_event=cancel_event,
+        )
+        if not isinstance(control.receipt, ImportReceipt):
+            raise SessionProtocolError("native import completed without a receipt")
+        return control.receipt
 
     def close_branch(self, branch: _Branch) -> None:
         final_owner = False
@@ -927,6 +1124,7 @@ class NativeDafnySession:
             branch=self._branch,
         )
         self.clone_receipt: CloneReceipt | None = None
+        self.import_receipt: ImportReceipt | None = None
 
     def __enter__(self) -> NativeDafnySession:
         return self
@@ -965,7 +1163,39 @@ class NativeDafnySession:
         child._branch = branch
         child._transport = self._transport
         child.clone_receipt = receipt
+        child.import_receipt = None
         return child
+
+    def export_session(
+        self, *, timeout_seconds: float, cancel_event: threading.Event | None = None
+    ) -> bytes:
+        """Return this branch's reusable caches as one bounded document for ``import_session``.
+
+        The branch is unchanged. The bytes stay in memory with the caller; they are the exact
+        UTF-8 document the native process produced; only an identical toolchain accepts it.
+        """
+        return self._transport.export_session(
+            self._branch, timeout_seconds=timeout_seconds, cancel_event=cancel_event
+        )
+
+    def import_session(
+        self,
+        payload: bytes,
+        *,
+        timeout_seconds: float,
+        cancel_event: threading.Event | None = None,
+    ) -> ImportReceipt:
+        """Install an exported document into this fresh native process before any other request.
+
+        The native side validates toolchain, keys and shapes and imports nothing on failure, which
+        raises ``NativeSessionError``. A success leaves results reusable only where native checksum
+        lookup still matches.
+        """
+        receipt = self._transport.import_session(
+            self._branch, payload, timeout_seconds=timeout_seconds, cancel_event=cancel_event
+        )
+        self.import_receipt = receipt
+        return receipt
 
     def close(self) -> None:
         self._transport.close_branch(self._branch)

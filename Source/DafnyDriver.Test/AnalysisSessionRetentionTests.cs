@@ -89,7 +89,6 @@ public class AnalysisSessionRetentionTests {
       Assert.Equal(cold.Count("taskCount"), warm.Count("taskCount"));
       Assert.Equal(warm.Count("taskCount"), warm.Count("cacheHitCount"));
       Assert.Equal(0, warm.Count("solverRunCount"));
-      Assert.Equal(0, warm.Count("resultCacheClears"));
     }
   }
 
@@ -126,28 +125,21 @@ public class AnalysisSessionRetentionTests {
     Assert.Equal(AnalysisSessionCommand.Session.ResultContextCapacity, session.RetainedResultContexts);
   }
 
-  // The per-context window is a memory bound that clears only the context that reached it.
+  // A context keeps its results however many compilations it sees: memory is bounded by the native cache's
+  // entry bound, and only eviction of the context or shutdown clears it. 33 compilations exceed the former
+  // 32-compilation window, which cleared the cache.
   [Fact]
-  public async Task CompilationWindowClearsOnlyItsOwnContext() {
-    const int window = 3;
-    using var session = new AnalysisSessionCommand.Session(window);
+  public async Task ResultsSurviveManyCompilationsOfOneContext() {
+    using var session = new AnalysisSessionCommand.Session();
     Assert.True((await Run(session, Verify, "cold", "bounded")).Count("solverRunCount") > 0);
-    Assert.True((await Run(session, Verify, "other", "other")).Count("solverRunCount") > 0);
-    // Alternating contexts replaces the state each time, so every request is a new compilation.
-    for (var index = 1; index < window; index++) {
-      Assert.Equal(0, (await Run(session, Verify, "r" + index, "bounded")).Count("solverRunCount"));
-      Assert.Equal(0, (await Run(session, Verify, "s" + index, "other")).Count("solverRunCount"));
+    for (var index = 1; index <= 33; index++) {
+      // Different bytes each time, so every request is a new compilation and asks the native cache.
+      var reply = await Run(session, Verify, "r" + index, "bounded", $"// compilation {index}\n" + Source);
+      Assert.True(reply.Code == 0, reply.Stdout + reply.Stderr);
+      Assert.True(reply.Count("solverRunCount") == 0, $"compilation {index}: {reply.Evidence}");
+      Assert.Equal(reply.Count("taskCount"), reply.Count("cacheHitCount"));
     }
-    var kept = await Run(session, Verify, "kept", "bounded");
-    Assert.Equal(1, kept.Count("resultCacheClears"));
-    Assert.True(kept.Count("solverRunCount") > 0);
-    // The other context reached the same count; it clears at its own next compilation, not earlier.
-    var sibling = await Run(session, Verify, "sibling", "other");
-    Assert.Equal(2, sibling.Count("resultCacheClears"));
-    Assert.True(sibling.Count("solverRunCount") > 0);
-    var untouched = await Run(session, Verify, "untouched", "bounded");
-    Assert.Equal(0, untouched.Count("solverRunCount"));
-    Assert.Equal(2, untouched.Count("resultCacheClears"));
+    Assert.Equal(1, session.RetainedResultContexts);
   }
 
   // A reused result is reported against the current source lines, equal to a cold run of that source.
