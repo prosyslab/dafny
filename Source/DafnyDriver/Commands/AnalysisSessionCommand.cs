@@ -1297,6 +1297,23 @@ static class AnalysisSessionCommand {
     }
   }
 
+  /// <summary>
+  /// Lifts lambdas the way the one-shot CLI (VerifySnapshots 0) does, before the engine sees the program.
+  /// With VerifySnapshots &gt; 0, Boogie's lifter attaches a fresh {:checksum} attribute to every lambda, and its
+  /// alpha-equality compares attribute parameter lists by reference, so equal lambdas (for example the same set
+  /// comprehension in a definition and in a proof) would each get their own lifted function and the solver would
+  /// need extensionality to relate them. The lifted functions then get the constant checksum Boogie would have
+  /// given them, so implementation dependency checksums stay defined. The lift happens once per program: proof-input
+  /// preparation already lifts the same translation to compute its modular keys, and the engine's own lifting
+  /// finds no lambda left.
+  /// </summary>
+  internal static void LiftLambdasAsOneShot(ExecutionEngineOptions engineOptions, Bpl.Program program) {
+    if (!engineOptions.ExpandLambdas || engineOptions.VerifySnapshots <= 0 || engineOptions is not DafnyOptions options) {
+      return;
+    }
+    DefinitionAnalysis.LiftLambdasOnce(options, program);
+  }
+
   private sealed class SharedVerifier : IProgramVerifier {
     private readonly DafnyProgramVerifier translator;
     private readonly ExecutionEngine engine;
@@ -1333,9 +1350,12 @@ static class AnalysisSessionCommand {
       }
     }
     public async Task<IReadOnlyList<IVerificationTask>> GetVerificationTasksAsync(ExecutionEngine executionEngine,
-      ResolutionResult resolution, ModuleDefinition moduleDefinition, CancellationToken cancellationToken) =>
-      await translator.GetVerificationTasksFromTranslationAsync(executionEngine, resolution, moduleDefinition,
-        await Translation(resolution, moduleDefinition, cancellationToken), cancellationToken);
+      ResolutionResult resolution, ModuleDefinition moduleDefinition, CancellationToken cancellationToken) {
+      var program = await Translation(resolution, moduleDefinition, cancellationToken);
+      await DafnyMain.LargeStackFactory.StartNew(() => LiftLambdasAsOneShot(executionEngine.Options, program), cancellationToken);
+      return await translator.GetVerificationTasksFromTranslationAsync(executionEngine, resolution, moduleDefinition,
+        program, cancellationToken);
+    }
   }
 
   internal sealed class NativeTaskEntry {

@@ -1,3 +1,5 @@
+- [Lift lambdas in sessions exactly as the one-shot verifier does](2026-11-06-session-lambda-lifting.md) — in-progress; snapshot-mode lambda checksums broke lambda sharing and rejected valid proofs in sessions; parent: [single-proof Cat run](../../plan/2026-11-06-cat-topdown-single-proof.md).
+
 - [Raise the analysis-session response limit to 128 MiB](2026-11-06-session-response-limit.md) — done (local scope); Cat plus bench/core final-gate analysis is 24.3 MB against a 16 MiB frame limit; server and client constants, transfer coherence, boundary tests; parent: [Cat topdown single proof](../../plan/2026-11-06-cat-topdown-single-proof.md).
 
 - [Transfer clonable session caches to a new native process](2026-11-05-cross-process-session-transfer.md) — in-progress; export/import protocol so cloned children run in their own processes; parent: [cross-process child sessions](../../cosyn/plan/2026-11-05-cross-process-child-sessions.md).
