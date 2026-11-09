@@ -136,6 +136,34 @@ public class AnalysisSessionCloneTests {
     Assert.Equal(0, await protocol.WaitAsync(TimeSpan.FromSeconds(5)));
   }
 
+  // The response frame bound is exact on the JSON line: at the limit passes, one byte more is a clean code-6 reply.
+  [Fact]
+  public async Task ProtocolRejectsOnlyResponsesAboveTheLimit() {
+    Assert.Equal(128 * 1024 * 1024, AnalysisSessionCommand.ResponseLimit);
+    const int limit = 4096;
+    int Size(AnalysisSessionCommand.Response response) =>
+      System.Text.Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(response, AnalysisSessionCommand.JsonOptions));
+    var baseSize = Size(new AnalysisSessionCommand.Response("fit", 0, "", "", null));
+    using var input = new ProtocolReader();
+    using var output = new ProtocolWriter();
+    var protocol = AnalysisSessionCommand.RunProtocol(new DafnyOptions(input, TextWriter.Null, TextWriter.Null), output,
+      (request, _) => Task.FromResult(new AnalysisSessionCommand.Response(request.Id, 0,
+        new string('x', limit - baseSize + (request.Id == "over" ? 1 : 0)), "", null)), limit);
+    input.Send(new AnalysisSessionCommand.Request("fit"));
+    var fit = await output.Next();
+    Assert.Equal(0, fit.Returncode);
+    Assert.Equal(limit, Size(fit));
+    input.Send(new AnalysisSessionCommand.Request("over"));
+    var over = await output.Next();
+    Assert.Equal("over", over.Id);
+    Assert.Equal(6, over.Returncode);
+    Assert.Equal("", over.Stdout);
+    Assert.Contains("exceeds the output limit", over.Stderr);
+    input.Send(new AnalysisSessionCommand.Request("shutdown", Operation: "shutdown"));
+    Assert.Equal("shutdown", (await output.Next()).Id);
+    Assert.Equal(0, await protocol.WaitAsync(TimeSpan.FromSeconds(5)));
+  }
+
   // A bounded close-control slot remains available when all eight normal job slots are occupied.
   [Fact]
   public async Task ProtocolAdmitsCloseAtNormalRequestCapacity() {

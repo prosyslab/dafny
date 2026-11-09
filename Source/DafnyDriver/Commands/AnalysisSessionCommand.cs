@@ -31,7 +31,8 @@ static class AnalysisSessionCommand {
     PropertyNameCaseInsensitive = true
   };
   internal const int RequestLimit = 8 * 1024 * 1024;
-  private const int ResponseLimit = 16 * 1024 * 1024;
+  // Bounds one response JSON line (the newline excluded). A final-gate analysis of Cat plus the core scope is 24.3 MB.
+  internal const int ResponseLimit = 128 * 1024 * 1024;
 
   public static Command Create() {
     var command = new Command("analysis-session", "Run an execution-local incremental analysis and verification JSONL session.");
@@ -68,7 +69,7 @@ static class AnalysisSessionCommand {
   }
 
   internal static async Task<int> RunProtocol(DafnyOptions startup, TextWriter output,
-    Func<Request, CancellationToken, Task<Response>>? execute = null) {
+    Func<Request, CancellationToken, Task<Response>>? execute = null, int responseLimit = ResponseLimit) {
     await using var sessions = new SessionRegistry();
     using var outputGate = new SemaphoreSlim(1);
     using var slots = new SemaphoreSlim(8);
@@ -77,7 +78,7 @@ static class AnalysisSessionCommand {
     var operationGate = new object();
     async Task Reply(Response response, Action? beforeWrite = null) {
       var line = JsonSerializer.Serialize(response, JsonOptions);
-      if (Encoding.UTF8.GetByteCount(line) > ResponseLimit) {
+      if (Encoding.UTF8.GetByteCount(line) > responseLimit) {
         line = JsonSerializer.Serialize(new Response(response.Id, 6, "", "Native session response exceeds the output limit.", null), JsonOptions);
       }
       await outputGate.WaitAsync();

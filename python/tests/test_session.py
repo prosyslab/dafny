@@ -554,6 +554,33 @@ def test_response_byte_limit_fails_closed(
         native.run(_invocation())
 
 
+# A response line of exactly the limit (newline excluded) is accepted; one byte more fails closed.
+def test_response_limit_is_exact_and_excludes_the_newline(
+    make_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    limit = 4096
+    monkeypatch.setattr(session_module, "MAX_RESPONSE_BYTES", limit)
+
+    def padded(request: dict[str, Any], excess: int) -> dict[str, Any]:
+        response = _response(request, **{})
+        response["stdout"] = ""
+        size = len(json.dumps(response).encode())
+        response["stdout"] = "x" * (limit - size + excess)
+        assert len(json.dumps(response).encode()) == limit + excess
+        return response
+
+    native, _ = make_session(lambda process, request: process.emit(padded(request, 0)))
+    assert native.run(_invocation()).returncode == 0
+    over, _ = make_session(lambda process, request: process.emit(padded(request, 1)))
+    with pytest.raises(SessionProtocolError, match="limit"):
+        over.run(_invocation())
+
+
+def test_response_limit_admits_a_cat_scale_analysis() -> None:
+    assert session_module.MAX_RESPONSE_BYTES == 128 * 1024 * 1024
+    assert session_module.MAX_REQUEST_BYTES == 8 * 1024 * 1024
+
+
 # Process EOF fails a pending request instead of leaving a waiter blocked.
 def test_process_eof_wakes_waiter(make_session: Callable[..., Any]) -> None:
     native, peer = make_session(lambda process, request: process.finish())

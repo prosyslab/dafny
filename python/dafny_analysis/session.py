@@ -28,7 +28,8 @@ from .models import SHA256
 from .runner import DafnyInvocation
 
 MAX_REQUEST_BYTES = 8 * 1024 * 1024
-MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+# Bounds one response JSON line, newline excluded (matches the native ResponseLimit).
+MAX_RESPONSE_BYTES = 128 * 1024 * 1024
 MAX_PENDING_REQUESTS = 8
 _STDERR_BYTES = 64 * 1024
 _POLL_SECONDS = 0.02
@@ -596,14 +597,14 @@ class _SessionTransport:
         assert stream is not None
         try:
             while True:
-                frame = stream.readline(MAX_RESPONSE_BYTES + 1)
+                frame = stream.readline(MAX_RESPONSE_BYTES + 2)
                 if not frame:
                     with self._condition:
                         if self._closed:
                             return
                         diagnostic = self._stderr.decode("utf-8", errors="replace")
                     raise SessionClosedError(f"native session reached EOF: {diagnostic}")
-                if len(frame) > MAX_RESPONSE_BYTES or not frame.endswith(b"\n"):
+                if len(frame) > MAX_RESPONSE_BYTES + 1 or not frame.endswith(b"\n"):
                     raise SessionProtocolError("native response exceeds limit or is not JSONL")
                 response = _Response.model_validate(
                     json.loads(frame.decode("utf-8"), object_pairs_hook=_unique_object)
