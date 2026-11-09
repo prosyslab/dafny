@@ -680,3 +680,4 @@ round); proof inputs and certificates do not.
   - Not done: rebuild into `/workspace/tmp/session-cache-retention/bin` (in use by other agents; command above). No
     Docker image build, re-certification or criterion 5 replay. Native transfer between installs at different paths
     now misses again (context names the path); not measured this round.
+- 2026-11-09: committed as "[Analysis] key proofs by modular fingerprints" on branch `native-session-optimization`.

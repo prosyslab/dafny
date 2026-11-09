@@ -26,6 +26,8 @@ namespace Microsoft.Dafny;
 
 /// <summary>A host-owned process protocol; all semantic work stays in the existing native pipeline.</summary>
 static class AnalysisSessionCommand {
+  // Verification cores for every session request; see the use in the request options setup.
+  internal const int SessionVerificationCores = 16;
   internal static readonly JsonSerializerOptions JsonOptions = new() {
     PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
     PropertyNameCaseInsensitive = true
@@ -778,8 +780,10 @@ static class AnalysisSessionCommand {
           throw new NotSupportedException("The session supports explicit Dafny source roots and the default native transformation/library context.");
         }
         options.VerifySnapshots = 1;
-        options.VcsCores = 1;
-        options.Set(BoogieOptionBag.Cores, 1U);
+        // One fixed value serves every client (agent goal checks, agent task scripts and grading),
+        // so verification behaves the same wherever a request comes from.
+        options.VcsCores = SessionVerificationCores;
+        options.Set(BoogieOptionBag.Cores, (uint)SessionVerificationCores);
         // CLI command parsing does not materialize this server-only option default.
         // The resident parser and resolver must explicitly enable native caching.
         options.Set(DafnyLangSymbolResolver.UseCaching, true);
@@ -983,17 +987,21 @@ static class AnalysisSessionCommand {
                 foreach (var target in targets) {
                   var prepared = preparedTargets[target];
                   var selectedTasks = prepared.Where(task => !range.Filters || cli.KeepVerificationTask(task, range)).ToList();
-                  var verified = new List<VerificationTaskResult>();
-                  foreach (var task in selectedTasks) {
-                    var entry = selected.TaskEntry(task);
-                    taskCount++;
-                    var observation = await entry.Wait(cancellationToken, () => selected.Retired = true,
-                      (reused, started) => {
-                        if (reused) { cacheHits++; }
-                        if (started) { solverRuns++; }
-                      });
-                    selected.Complete(task, observation.Result);
-                    verified.Add(new VerificationTaskResult(task, observation.Result));
+                  // Start every batch of the target before awaiting any, so the engine's checker pool
+                  // (SessionVerificationCores) runs them in parallel; results are completed and reported in
+                  // task order, as the sequential loop did.
+                  taskCount += selectedTasks.Count;
+                  var waits = selectedTasks.Select(task => selected.TaskEntry(task).Wait(cancellationToken,
+                    () => selected.Retired = true,
+                    (reused, started) => {
+                      if (reused) { Interlocked.Increment(ref cacheHits); }
+                      if (started) { Interlocked.Increment(ref solverRuns); }
+                    })).ToList();
+                  var observations = await Task.WhenAll(waits);
+                  var verified = new List<VerificationTaskResult>(selectedTasks.Count);
+                  for (var index = 0; index < selectedTasks.Count; index++) {
+                    selected.Complete(selectedTasks[index], observations[index].Result);
+                    verified.Add(new VerificationTaskResult(selectedTasks[index], observations[index].Result));
                   }
                   lock (selected.ReportingGate) {
                     foreach (var result in verified) {

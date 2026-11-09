@@ -236,3 +236,4 @@ hits, not by memory inspection.
 
 Durable findings: [wiki](../wiki/native-analysis-session.md#cross-process-session-transfer-2026-11-05).
 Status stays in-progress until the independent verifier and the host plan finish.
+- 2026-11-09: committed as "[Session] transfer clonable caches to a new native process" on branch `native-session-optimization`.

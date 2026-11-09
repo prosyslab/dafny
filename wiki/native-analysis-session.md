@@ -2,7 +2,7 @@
 
 Status: native source/local checks accepted; parent records artifact/image/runtime acceptance
 Verified: 2026-11-03, editable developer source based on
-0776df27c2449bad68e9a28e687bb6c70bf4b401, intentionally uncommitted.
+0776df27c2449bad68e9a28e687bb6c70bf4b401, committed 2026-11-09 on branch `native-session-optimization` after that base.
 Plan: [native implementation](../plan/2026-11-02-native-analysis-session.md).
 Parent: [integration implementation](../../plan/2026-11-02-verifier-optimization-implementation.md).
 
@@ -33,7 +33,7 @@ with NativeDafnySession(["/absolute/Dafny"], cwd=workspace,
 
 Plan: [stable seeded randomization](../plan/2026-11-08-stable-seeded-randomization.md) (design B1,
 fork only; Boogie stays the 3.5.5 package). Status: implemented and checked locally in the
-worktree `/workspace/tmp/dafny-stable-seed-wt` (base 650e6db3, dirty tree, uncommitted). Not
+worktree `/workspace/tmp/dafny-stable-seed-wt` (base 650e6db3; committed 2026-11-09 on `native-session-optimization`). Not
 adopted: the native artifact, `dafny-version.toml`, re-certification, reference re-checks and
 Cosyn's accepted proof-input schemas are a separate approved step.
 
@@ -111,7 +111,7 @@ Status: native source and local checks done, real Cat measurements done; first i
 review accepted with fixes (order-insensitive key, native lookup by key, solver path rule),
 fixes implemented 2026-11-07; second review pending. Options hash made
 location independent on 2026-11-07 (see the key bullets); session context bound to the
-solver path again, toolchain widened to all Boogie/Dafny assemblies the same day. Uncommitted, base 650e6db3 (dirty tree). Consumers:
+solver path again, toolchain widened to all Boogie/Dafny assemblies the same day. Base 650e6db3; committed 2026-11-09 on `native-session-optimization`. Consumers:
 [root shared scope](../../plan/2026-11-06-shared-given-declaration-scope.md),
 [Cosyn reuse key](../../cosyn/plan/2026-11-06-modular-proof-reuse-key.md).
 

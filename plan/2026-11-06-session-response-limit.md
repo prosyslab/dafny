@@ -94,3 +94,4 @@ Found and fixed: the client rejected a frame of exactly `limit` bytes because th
 Memory: the client reads one bounded line (`readline(limit + 2)`, no preallocation); the server holds one serialized string per reply and replaces an oversize reply with a short code-6 response. No truncation anywhere.
 
 Durable finding: recorded in `wiki/native-analysis-session.md` (frame limits).
+- 2026-11-09: committed as "[Session] raise the response limit to 128 MiB" on branch `native-session-optimization`.

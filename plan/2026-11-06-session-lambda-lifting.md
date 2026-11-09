@@ -64,3 +64,4 @@ was produced by the investigation and is applied unchanged.
     (2 cases).
   - Process note: this edit was made before this Progress entry was written.
   - Driver filter after the fix: 165 passed. Format: clean.
+- 2026-11-09: committed as "[Session] lift lambdas as the one-shot verifier does" on branch `native-session-optimization`.
