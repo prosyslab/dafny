@@ -354,6 +354,51 @@ namespace Microsoft.Dafny {
       return true;
     }
 
+    /// <summary>
+    /// The seed of the stable seeded order, or null when Boogie's own seeded randomization (or none) applies. A
+    /// non-zero <c>/randomSeed</c> in <c>--boogie</c> sets it; Boogie then sees no seed, so it neither shuffles the
+    /// whole pruned declaration list nor renames symbols at random. Instead the solver declarations are ordered by
+    /// their content and this seed (<see cref="DefinitionAnalysis.ApplyStableSeededOrder"/>), and the seed reaches
+    /// Z3 as <c>smt.random_seed</c> and <c>sat.random_seed</c>.
+    /// </summary>
+    public int? StableRandomSeed { get; private set; }
+
+    /// <summary>
+    /// Parses the arguments of <c>--boogie</c>. A non-zero <c>/randomSeed</c> among them selects the stable seeded
+    /// order (<see cref="StableRandomSeed"/>) unless <c>/randomizeVcIterations</c> asks for several iterations, which
+    /// keep Boogie's own randomization. A seed set by another option (measure-complexity, test-contracts) stays
+    /// Boogie's. A later call replaces the previous stable seed.
+    /// </summary>
+    public void ParseBoogieArguments(string[] arguments) {
+      var otherSeed = RandomSeed;
+      RandomSeed = null;
+      BaseParse(arguments, false);
+      if (RandomSeed is not { } seed) {
+        RandomSeed = otherSeed;
+        return;
+      }
+      if (StableRandomSeed is { } previous) {
+        var stale = StableSeedProverOptions(previous);
+        ProverOptions.RemoveAll(option => stale.Contains(option));
+        StableRandomSeed = null;
+        NormalizeDeclarationOrder = true;
+      }
+      if (seed == 0 || RandomizeVcIterations > 1) {
+        return;
+      }
+      StableRandomSeed = seed;
+      RandomSeed = null;
+      NormalizeDeclarationOrder = false;
+      // First, so that per VC they follow the time and resource limits where Boogie sent its seed, and a
+      // user-supplied solver option for the same name, which comes later, still wins.
+      ProverOptions.InsertRange(0, StableSeedProverOptions(seed));
+    }
+
+    private static string[] StableSeedProverOptions(int seed) {
+      var value = seed.ToString(CultureInfo.InvariantCulture);
+      return new[] { "O:smt.random_seed=" + value, "O:sat.random_seed=" + value };
+    }
+
     public DafnyOptions(TextReader inputReader, TextWriter outputWriter, TextWriter errorWriter)
       : base(outputWriter, "dafny", "Dafny program verifier", new Bpl.ConsolePrinter()) {
       Input = inputReader;

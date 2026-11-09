@@ -715,6 +715,7 @@ public static partial class DefinitionAnalysis {
       options.VcsSplitOnEveryAssert,
       options.RelaxFocus,
       options.RandomSeed,
+      options.StableRandomSeed,
       options.TimeLimit,
       options.ResourceLimit,
       options.AutoTriggers,

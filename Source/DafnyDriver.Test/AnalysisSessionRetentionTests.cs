@@ -165,6 +165,25 @@ public class AnalysisSessionRetentionTests {
     Assert.True(otherAgain.Count("solverRunCount") > 0, otherAgain.Evidence.ToString());
   }
 
+  // A different seed is a different solver input: it never reuses the other seed's results. The stable seed, which
+  // Boogie never sees, is still logged for every assertion batch.
+  [Fact]
+  public async Task SeedChangeMissesTheNativeCache() {
+    using var session = new AnalysisSessionCommand.Session();
+    var unseeded = await RunReuse(session, "Reuse.Target", "s0", ReuseSource);
+    Assert.Equal(0, unseeded.Code);
+    Assert.All(Seeds(unseeded.Stdout), seed => Assert.Null(seed));
+    var seeded = await RunReuse(session, "Reuse.Target", "s7", ReuseSource, "--boogie=/randomSeed:7");
+    Assert.True(seeded.Code == 0, seeded.Stdout + seeded.Stderr);
+    Assert.Equal(0, seeded.Count("cacheHitCount"));
+    Assert.True(seeded.Count("solverRunCount") > 0);
+    Assert.NotEmpty(Seeds(seeded.Stdout));
+    Assert.All(Seeds(seeded.Stdout), seed => Assert.Equal("7", seed));
+    static List<string?> Seeds(string stdout) => Json(stdout)["verificationResults"]!.AsArray()
+      .SelectMany(scope => scope!["vcResults"]!.AsArray())
+      .Select(result => result!["randomSeed"]?.GetValue<string>()).ToList();
+  }
+
   // Session proof inputs are schema 3 and certify a target without proof obligations.
   [Fact]
   public async Task SessionProofInputsCertifyZeroObligationTargets() {

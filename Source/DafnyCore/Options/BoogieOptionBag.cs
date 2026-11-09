@@ -102,7 +102,7 @@ public static class BoogieOptionBag {
     DafnyOptions.RegisterLegacyBinding(BoogieArguments, (o, boogieOptions) => {
       var splitOptions = boogieOptions.SelectMany(SplitArguments).ToArray();
       if (splitOptions.Any()) {
-        o.BaseParse(splitOptions.ToArray(), false);
+        o.ParseBoogieArguments(splitOptions.ToArray());
       }
     });
     DafnyOptions.RegisterLegacyBinding(Cores,

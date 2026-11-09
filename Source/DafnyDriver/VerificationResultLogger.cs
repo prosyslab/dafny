@@ -39,6 +39,15 @@ namespace Microsoft.Dafny {
 
     public static TestProperty RandomSeedProperty = TestProperty.Register("TestResult.RandomSeed", "TestResult.RandomSeed", typeof(int), typeof(TestResult));
 
+    /// <summary>
+    /// The seed a task ran with: its split's Boogie seed or, under the stable seeded order, the stable seed
+    /// (<see cref="DafnyOptions.StableRandomSeed"/>), which Boogie never sees. Null without a seed.
+    /// </summary>
+    public static int? TaskRandomSeed(IVerificationTask? task) =>
+      task == null ? null
+      : task.Split.RandomSeed != 0 ? task.Split.RandomSeed
+      : (task.Split.Options as DafnyOptions)?.StableRandomSeed;
+
     private readonly IList<IVerificationResultFormatLogger> formatLoggers = new List<IVerificationResultFormatLogger>();
     private readonly LocalTestLoggerEvents events;
     private bool completedEvents;
@@ -180,8 +189,8 @@ namespace Microsoft.Dafny {
           StartTime = vcResult.StartTime,
           Duration = vcResult.RunTime
         };
-        if (task != null && task.Split.RandomSeed != 0) {
-          testResult.SetPropertyValue(RandomSeedProperty, task.Split.RandomSeed);
+        if (TaskRandomSeed(task) is { } randomSeed) {
+          testResult.SetPropertyValue(RandomSeedProperty, randomSeed);
         }
         if (vcResult.Outcome == SolverOutcome.Valid) {
           testResult.Outcome = TestOutcome.Passed;

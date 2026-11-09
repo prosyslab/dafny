@@ -59,8 +59,8 @@ public class JsonVerificationLogger : IVerificationResultFormatLogger {
       ["runTime"] = SerializeTimeSpan(vcResult.RunTime),
       ["assertions"] = new JsonArray(vcResult.Asserts.Select(SerializeAssertion).ToArray()),
     };
-    if (taskResult.Task != null && taskResult.Task.Split.RandomSeed != 0) {
-      result["randomSeed"] = taskResult.Task.Split.RandomSeed.ToString();
+    if (VerificationResultLogger.TaskRandomSeed(taskResult.Task) is { } randomSeed) {
+      result["randomSeed"] = randomSeed.ToString();
     }
     if (potentialDependencies is not null) {
       var fullDependencySet = dependencyManager.GetOrderedFullDependencies(vcResult.CoveredElements).ToHashSet();

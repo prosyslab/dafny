@@ -29,6 +29,81 @@ with NativeDafnySession(["/absolute/Dafny"], cwd=workspace,
     assert result.native_evidence.completed
 ```
 
+## Stable seeded order (2026-11-08)
+
+Plan: [stable seeded randomization](../plan/2026-11-08-stable-seeded-randomization.md) (design B1,
+fork only; Boogie stays the 3.5.5 package). Status: implemented and checked locally in the
+worktree `/workspace/tmp/dafny-stable-seed-wt` (base 650e6db3, dirty tree, uncommitted). Not
+adopted: the native artifact, `dafny-version.toml`, re-certification, reference re-checks and
+Cosyn's accepted proof-input schemas are a separate approved step.
+
+Problem. With Boogie's own `/randomSeed:N`, `Checker.GetReorderedDeclarations` runs a
+Fisher-Yates shuffle over a split's whole pruned list, which also holds every procedure,
+implementation, type and global of the program, and `RandomiseNamer` names symbols by the
+order of the draws. A target's SMT text then depends on unrelated declarations anywhere in the
+program. On Cat, two programs that differed only in sibling declarations gave 0 of 183
+textually identical RenderData VCs and different outcomes (183 verified vs 2 time outs).
+
+What `--boogie=/randomSeed:N` (N not 0) now means:
+- `DafnyOptions.ParseBoogieArguments` (the `--boogie` binding) sets
+  `DafnyOptions.StableRandomSeed = N`, clears Boogie's `RandomSeed`, turns
+  `NormalizeDeclarationOrder` off and puts `O:smt.random_seed=N` and `O:sat.random_seed=N`
+  first in the prover options. Per VC they follow the time and resource limits, where Boogie
+  sent its own seed lines; they also appear in the option block Boogie sends after every full
+  reset. A later
+  `--solver-option` for the same name still wins.
+- `DefinitionAnalysis.ApplyStableSeededOrder` (from `DafnyProgramVerifier` before tasks are
+  prepared, and from `DafnyMain.BoogiePipelineWithRerun` for build/run/test) lifts lambdas
+  once and reorders type constructors, constants, functions and axioms in place by
+  `(SHA-256(seed, key), key)`. The key is the kind plus the position-free declaration hash of
+  the modular keys, with lifted lambdas named by content and, for the order only, the names of
+  bound variables, let-bound names, function formals and type parameters replaced by their
+  first occurrence. Other declarations keep their places.
+- Boogie then sees seed 0 and takes `TopLevelDeclarations` order, so names are
+  `$generated@@k` in first-use order and depend on the seed only through the order.
+- The JSON, CSV/TRX and text loggers report the split's Boogie seed or else the stable seed
+  (`VerificationResultLogger.TaskRandomSeed`); Cosyn reads the optional JSON `randomSeed`.
+
+Two Boogie details that the order must respect:
+- `Checker.Target` numbers the basic types (type tags 0-2) in the order a `BasicTypeVisitor`
+  first meets them over the whole program. Boogie never reorders `TopLevelDeclarations`, so
+  this came from the prelude. The reorder keeps the leading run up to the last first meeting
+  of a basic type in place (for Dafny, the prelude up to `LitReal`); without it, seed 42 gave
+  `int, bool, real` instead of `bool, int, real`.
+- Boogie's lambda lifter shares one function between alpha-equivalent lambdas and keeps the
+  bound names of the first one it meets, which can be a sibling's (`$l#4#y#0` vs
+  `$l#7#z#0`). Normalized solver names never show them, so the order key ignores them; with
+  the exact text, a sibling with the same lambda changed 5 of 9 target VCs.
+
+Guarantee and its limits:
+- Under a stable seed, a split's solver input is a function of its live declarations (as
+  keyed), the seed, the options and the toolchain. An equal modular key (exact text) implies
+  equal order keys, so equal key, seed, options and toolchain give byte-identical SMT.
+- Without a seed, Boogie still orders by `ContentHash` with ties in program order; that SMT
+  can change with unrelated declarations (the tied-handles case).
+- Boogie's own seeded randomization is unchanged and never keyed: an implementation's
+  `{:random_seed N}` (Dafny never emits it) keeps Boogie's shuffle and namer and gets
+  `{:smt_option}` entries so that Z3 still ends with N; `/randomizeVcIterations` above 1 keeps
+  the seed with Boogie and gives no proof inputs. measure-complexity (`--random-seed`,
+  `--mutations`, `task.FromSeed`) is unchanged; combining it with `--boogie /randomSeed` is
+  unsupported. test-contracts' verification seed is also Boogie's.
+- Names from translation-wide counters other than lifted lambdas (Dafny's `$let#N`) are in
+  both keys: renumbering them misses reuse and can change the order.
+- Proof inputs are schema 3 (`ModularProofKeys.SchemaVersion`). The fork's Python client
+  accepts modular rows for every schema from 2. Cosyn's `SUPPORTED_PROOF_INPUT_SCHEMAS`
+  must accept 3 at adoption.
+- Seed-42 outcomes change for every proof (new order, names and tags), so references and
+  given certificates must be re-checked before adoption. Cat RenderData now verifies all 183
+  VCs in both contexts (61.6 s and 63.3 s, host build, one core).
+
+Evidence (2026-11-08, worktree build, CPUs 56-63, z3 4.16.0 behind the tee wrapper; outputs
+temporary in `/workspace/tmp/dafny-stable-seed/out/`): Cat RenderData validated vs candidate at
+seed 42 183 of 183 VCs byte-identical; synthetic unrelated block before/after 5 of 5, shared
+handle and lambda sibling before/after 9 of 9, tied handles 3 of 3; seed 7 vs 42 differs in all
+5 VCs beyond the seed lines. Unit tests: `StableSeedTests` (DafnyCore.Test) capture the exact
+solver input from a no-op solver (`CreateSolver`), so no solver process or file is used; with
+the order disabled four of them fail, without the basic-type prefix one fails.
+
 ## Modular proof-input fingerprints (2026-11-06)
 
 Plan: [modular proof-input fingerprints](../plan/2026-11-06-modular-proof-fingerprints.md).

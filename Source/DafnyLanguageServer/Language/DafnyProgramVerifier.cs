@@ -74,6 +74,11 @@ namespace Microsoft.Dafny.LanguageServer.Language {
 
         cancellationToken.ThrowIfCancellationRequested();
 
+        if (engine.Options is DafnyOptions { StableRandomSeed: not null } dafnyOptions) {
+          await DafnyMain.LargeStackFactory.StartNew(
+            () => DefinitionAnalysis.ApplyStableSeededOrder(dafnyOptions, boogieProgram), cancellationToken);
+        }
+
         if (engine.Options.PrintFile != null) {
           var moduleCount = BoogieGenerator.VerifiableModules(program).Count();
           var fileName = moduleCount > 1 ? DafnyMain.BoogieProgramSuffix(engine.Options.PrintFile, suffix) : engine.Options.PrintFile;

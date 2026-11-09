@@ -194,6 +194,7 @@ namespace Microsoft.Dafny {
           return (outcome, stats);
 
         case PipelineOutcome.ResolvedAndTypeChecked:
+          DefinitionAnalysis.ApplyStableSeededOrder(options, program);
           engine.EliminateDeadVariables(program);
           cancellationToken.ThrowIfCancellationRequested();
           engine.CollectModifies(program);

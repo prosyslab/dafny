@@ -108,3 +108,5 @@
 
 - [Contract screen omitted-body identity](2026-11-02-contract-screen-omitted-body-identity.md) — done (native source phase); independent tests and native controls passed, publication follow-up owned by root.
 - [Persistent native analysis session](2026-11-02-native-analysis-session.md) — native source/local phase done; clone metadata, diagnostic channels and cached export ownership pass Core84/Driver21 and fresh reviews. Parent owns all artifact/image/runtime/experiment acceptance.
+- [Stable seeded randomization](2026-11-08-stable-seeded-randomization.md) — in-progress (phase 2: fork-only B1 implemented and checked locally in `/workspace/tmp/dafny-stable-seed-wt`: Cat RenderData 183/183 identical at seed 42, synthetic cases identical, seed 7 differs; review and adoption open); make each VC's SMT under a fixed seed depend only on the target's own live inputs; whole-program Fisher-Yates input in Boogie 3.5.5 `Checker.GetReorderedDeclarations` is the only cause; Cat RenderData 0/183 identical at seed 42, 183/183 at seed 0.
+
