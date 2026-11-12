@@ -5,6 +5,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.CommandLine;
 using System.CommandLine.Help;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reactive;
@@ -67,6 +68,9 @@ public class Compilation : IDisposable {
 
   private bool disposed;
   private readonly ObservableErrorReporter errorReporter;
+
+  public double? ParseSeconds { get; private set; }
+  public double? ResolveSeconds { get; private set; }
 
   public Task<Program?> ParsedProgram { get; }
   public Task<ResolutionResult?> Resolution { get; }
@@ -232,21 +236,26 @@ public class Compilation : IDisposable {
       return null;
     }
 
-    var parseResult = await documentLoader.ParseAsync(this, cancellationSource.Token);
-    if (Options.Get(CommonOptionBag.CheckSourceLocationConsistency)) {
-      CheckSourceLocationConsistency(null, parseResult.Program);
+    var startedAt = Stopwatch.GetTimestamp();
+    try {
+      var parseResult = await documentLoader.ParseAsync(this, cancellationSource.Token);
+      if (Options.Get(CommonOptionBag.CheckSourceLocationConsistency)) {
+        CheckSourceLocationConsistency(null, parseResult.Program);
+      }
+
+      transformedProgram = parseResult.Program;
+      transformedProgram.HasParseErrors = HasErrors;
+
+      var cloner = new Cloner(true);
+      programAfterParsing = new Program(cloner, transformedProgram);
+
+      updates.OnNext(new FinishedParsing(parseResult with { Program = programAfterParsing }));
+      logger.LogDebug(
+        $"Passed parsedCompilation to documentUpdates.OnNext, resolving ParsedCompilation task for version {Input.Version}.");
+      return programAfterParsing;
+    } finally {
+      ParseSeconds = Stopwatch.GetElapsedTime(startedAt).TotalSeconds;
     }
-
-    transformedProgram = parseResult.Program;
-    transformedProgram.HasParseErrors = HasErrors;
-
-    var cloner = new Cloner(true);
-    programAfterParsing = new Program(cloner, transformedProgram);
-
-    updates.OnNext(new FinishedParsing(parseResult with { Program = programAfterParsing }));
-    logger.LogDebug(
-      $"Passed parsedCompilation to documentUpdates.OnNext, resolving ParsedCompilation task for version {Input.Version}.");
-    return programAfterParsing;
   }
 
   private void CheckSourceLocationConsistency(INode? container, INode node) {
@@ -277,15 +286,20 @@ public class Compilation : IDisposable {
     if (!ShouldResolve) {
       return null;
     }
-    var resolution = await documentLoader.ResolveAsync(this, transformedProgram!, cancellationSource.Token);
-    if (resolution == null) {
-      return null;
-    }
+    var startedAt = Stopwatch.GetTimestamp();
+    try {
+      var resolution = await documentLoader.ResolveAsync(this, transformedProgram!, cancellationSource.Token);
+      if (resolution == null) {
+        return null;
+      }
 
-    updates.OnNext(new FinishedResolution(resolution));
-    staticDiagnosticsSubscription.Dispose();
-    logger.LogDebug($"Passed resolvedCompilation to documentUpdates.OnNext, resolving ResolvedCompilation task for version {Input.Version}.");
-    return resolution;
+      updates.OnNext(new FinishedResolution(resolution));
+      staticDiagnosticsSubscription.Dispose();
+      logger.LogDebug($"Passed resolvedCompilation to documentUpdates.OnNext, resolving ResolvedCompilation task for version {Input.Version}.");
+      return resolution;
+    } finally {
+      ResolveSeconds = Stopwatch.GetElapsedTime(startedAt).TotalSeconds;
+    }
   }
 
   public static string GetTaskName(IVerificationTask task) {

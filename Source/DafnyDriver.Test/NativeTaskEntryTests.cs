@@ -12,6 +12,49 @@ public class NativeTaskEntryTests {
     new VerificationRunResultPartialCopy(1, DateTime.UnixEpoch, TimeSpan.Zero, outcome,
       [], Array.Empty<TrackedNodeComponent>(), Array.Empty<Axiom>(), 0)).Result;
 
+  // Timing evidence is opt-in even when a request fails before compilation.
+  [Fact]
+  public async Task TimingEvidenceRequiresRequestOptIn() {
+    using var session = new AnalysisSessionCommand.Session();
+    var plain = await session.Execute(new AnalysisSessionCommand.Request("plain"), CancellationToken.None);
+    var profiled = await session.Execute(new AnalysisSessionCommand.Request("profiled", ProfileTimings: true), CancellationToken.None);
+    var normal = System.Text.Json.JsonSerializer.SerializeToElement(plain.NativeEvidence, AnalysisSessionCommand.JsonOptions);
+    var timed = System.Text.Json.JsonSerializer.SerializeToElement(profiled.NativeEvidence, AnalysisSessionCommand.JsonOptions);
+    Assert.False(normal.TryGetProperty("timings", out _));
+    var timings = timed.GetProperty("timings");
+    Assert.Equal(1, timings.GetProperty("schemaVersion").GetInt32());
+    Assert.Equal(System.Text.Json.JsonValueKind.Null, timings.GetProperty("compilationReused").ValueKind);
+    Assert.True(timings.GetProperty("durationsSeconds").GetProperty("admission_wait").GetDouble() >= 0);
+  }
+
+  // Fresh snapshot parsing and resolution are measured only for the request that performs them.
+  [Fact]
+  public async Task SnapshotResolutionTimingsDoNotReplayOnReuse() {
+    const string cwd = "/workspace/session-profiling";
+    const string path = cwd + "/Snapshot.dfy";
+    var snapshots = new Dictionary<string, string> { [path] = "method M() {}" };
+    using var session = new AnalysisSessionCommand.Session();
+    async Task<(AnalysisSessionCommand.Response Response, System.Text.Json.JsonElement Timings)> Resolve(string id) {
+      var response = await session.Execute(new AnalysisSessionCommand.Request(id, ["resolve", path], cwd,
+        SourceSnapshots: snapshots, ProfileTimings: true), CancellationToken.None);
+      var evidence = System.Text.Json.JsonSerializer.SerializeToElement(response.NativeEvidence, AnalysisSessionCommand.JsonOptions);
+      return (response, evidence.GetProperty("timings"));
+    }
+    var cold = await Resolve("cold");
+    Assert.True(cold.Response.Returncode == 0, cold.Response.Stderr);
+    Assert.False(cold.Timings.GetProperty("compilationReused").GetBoolean());
+    var phases = cold.Timings.GetProperty("durationsSeconds");
+    Assert.True(phases.GetProperty("parse").GetDouble() >= 0);
+    Assert.True(phases.GetProperty("resolve").GetDouble() >= 0);
+
+    var warm = await Resolve("warm");
+    Assert.True(warm.Response.Returncode == 0, warm.Response.Stderr);
+    Assert.True(warm.Timings.GetProperty("compilationReused").GetBoolean());
+    phases = warm.Timings.GetProperty("durationsSeconds");
+    Assert.False(phases.TryGetProperty("parse", out _));
+    Assert.False(phases.TryGetProperty("resolve", out _));
+  }
+
   // A cancelled subscriber detaches without cancelling another subscriber's native task.
   [Fact]
   public async Task OneSubscriberCancellationPreservesOtherSubscriber() {
@@ -64,6 +107,7 @@ public class NativeTaskEntryTests {
     var warm = await entry.Wait(CancellationToken.None, () => { }).WaitAsync(Timeout);
 
     Assert.True(cold.Started);
+    Assert.True(cold.Fresh);
     Assert.False(cold.Reused);
     Assert.False(warm.Started);
     Assert.True(warm.Reused);
@@ -161,6 +205,7 @@ public class NativeTaskEntryTests {
 
     Assert.True(reused.Reused);
     Assert.False(reused.Started);
+    Assert.False(reused.Fresh);
     Assert.Equal(current, reused.Result.Asserts);
     Assert.Equal(new[] { 13, 15 }, reused.Result.Asserts.Select(assertion => assertion.tok.line));
     Assert.Equal(7, reused.Result.ResourceCount);

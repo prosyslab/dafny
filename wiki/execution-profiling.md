@@ -1,0 +1,7 @@
+# Native session execution timings
+
+Status: verified locally and independently. Verified 2026-11-12 against native source commit `9f281d50a7befa662350be47dd73ff0b2e0bb8d9` with the profiling changes in the [plan](../plan/2026-11-12-native-phase-profiling.md). The source client requests `profileTimings`; older clients receive no additional evidence field, while older servers can omit the optional response.
+
+Native evidence `timings` schema 1 provides nonnegative seconds keyed by bounded phase names. `compilationReused` is null until selection, true for reused compilation, and false for a new compilation. Parse and resolve begin after their respective prerequisites and are omitted for reuse. Admission and compiler wait include repeated compiler gate waits and interrupted waits. Proof input preparation includes translation work; translation and VC preparation measure fresh producers, so these observations overlap and must not be added as disjoint phases. Analysis is request wall time. `solver_runtime` sums the native result runtimes for newly started, noncached producers only; parallel runtimes can overlap and the sum is solver work, not request wall time. Missing phases mean no completed observation and are not evidence of zero work.
+
+Measurements are local source behavior only; no image, deployment, proof correctness, or experiment result is established. The child plan records checks and limitations.

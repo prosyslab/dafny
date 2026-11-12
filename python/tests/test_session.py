@@ -243,6 +243,33 @@ def test_result_has_typed_evidence_and_preserves_diagnostics(
     assert peer.requests[-1]["operation"] == "shutdown"
 
 
+# Profiling is negotiated and typed timing observations survive the transport.
+def test_native_timing_evidence_is_negotiated(make_session: Callable[..., Any]) -> None:
+    timings = {"schemaVersion": 1, "compilationReused": False,
+               "durationsSeconds": {"parse": 0.25, "solver_runtime": 1.5}}
+    native, peer = make_session(lambda process, request: process.emit(_response(request, timings=timings)))
+    evidence = native(_invocation()).native_evidence
+    assert peer.requests[0]["profileTimings"] is True
+    assert evidence.timings is not None
+    assert evidence.timings.compilation_reused is False
+    assert evidence.timings.durations_seconds == {"parse": 0.25, "solver_runtime": 1.5}
+    native.close()
+
+
+# Malformed and unbounded timing data are rejected at the client boundary.
+@pytest.mark.parametrize("timings", [
+    {"schemaVersion": 2, "compilationReused": False, "durationsSeconds": {}},
+    {"schemaVersion": 1, "compilationReused": False, "durationsSeconds": {"parse": -1}},
+    {"schemaVersion": 1, "compilationReused": False, "durationsSeconds": {"parse": 10**1000}},
+    {"schemaVersion": 1, "compilationReused": False, "durationsSeconds": {"parse": float("nan")}},
+    {"schemaVersion": 1, "compilationReused": False, "durationsSeconds": {"other": 1}},
+])
+def test_invalid_native_timings_fail_closed(make_session: Callable[..., Any], timings: dict[str, Any]) -> None:
+    native, _ = make_session(lambda process, request: process.emit(_response(request, timings=timings)))
+    with pytest.raises(SessionProtocolError):
+        native(_invocation())
+
+
 # Retention counters are optional: older executables omit them, newer ones report them.
 def test_retention_counters_are_optional_typed_evidence(make_session: Callable[..., Any]) -> None:
     native, _ = make_session()

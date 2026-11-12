@@ -13,6 +13,7 @@ import os
 import queue
 import signal
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -20,7 +21,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
 
@@ -66,6 +67,38 @@ _Count = Annotated[StrictInt, Field(ge=0)]
 _SNAPSHOT_OPERATIONS = ("clone", "export-session", "import-session")
 
 
+class NativeTimings(BaseModel):
+    """Request-local measured durations; absent phases were not observed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
+
+    schema_version: StrictInt = Field(alias="schemaVersion")
+    compilation_reused: StrictBool | None = Field(alias="compilationReused")
+    durations_seconds: dict[Literal["admission_wait", "compiler_wait", "parse", "resolve",
+                                   "proof_input_preparation", "analysis", "translation",
+                                   "vc_preparation", "solver_runtime"], float] = Field(alias="durationsSeconds")
+
+    @field_validator("schema_version")
+    @classmethod
+    def _supported_schema(cls, value: int) -> int:
+        if value != 1:
+            raise ValueError("unsupported timing schema version")
+        return value
+
+    @field_validator("durations_seconds", mode="before")
+    @classmethod
+    def _valid_durations(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or any(
+            type(duration) not in (int, float)
+            or duration < 0
+            or duration > sys.float_info.max
+            or not math.isfinite(duration)
+            for duration in value.values()
+        ):
+            raise ValueError("timing durations must be finite nonnegative numbers")
+        return value
+
+
 class NativeEvidence(BaseModel):
     """Native provenance and observed reuse counters, without host inference."""
 
@@ -87,6 +120,7 @@ class NativeEvidence(BaseModel):
     solver_run_count: _Count = Field(alias="solverRunCount")
     analysis_module_hits: _Count = Field(alias="analysisModuleHits")
     analysis_module_misses: _Count = Field(alias="analysisModuleMisses")
+    timings: NativeTimings | None = None
     # Session-cumulative retention counters; absent from older native executables.
     result_cache_clears: _Count | None = Field(default=None, alias="resultCacheClears")
     result_cache_evictions: _Count | None = Field(default=None, alias="resultCacheEvictions")
@@ -389,6 +423,7 @@ class _SessionTransport:
                     "sessionId": branch.session_id,
                     "sourceSnapshots": snapshots,
                     "generation": generation,
+                    "profileTimings": True,
                     "sourceRoot": None if roots[0] is None else str(roots[0]),
                     "logicalRoot": None if roots[1] is None else str(roots[1]),
                 }

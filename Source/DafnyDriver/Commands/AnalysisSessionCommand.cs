@@ -4,6 +4,7 @@ using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.CommandLine;
 using System.CommandLine.Parsing;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reactive.Linq;
@@ -52,7 +53,7 @@ static class AnalysisSessionCommand {
   internal sealed record Request(string Id, string[]? Arguments = null, string? Cwd = null,
     string ContextId = "default", Dictionary<string, string>? SourceSnapshots = null, int? Generation = null,
     string? SourceRoot = null, string? LogicalRoot = null, string? Operation = null, string? TargetId = null,
-    string SessionId = "default", string? Payload = null);
+    string SessionId = "default", string? Payload = null, bool ProfileTimings = false);
 
   internal sealed record Response(string Id, int Returncode, string Stdout, string Stderr, object? NativeEvidence);
 
@@ -714,6 +715,19 @@ static class AnalysisSessionCommand {
       NullLogger<DafnyLangParser>.Instance, NullLogger<CachingParser>.Instance);
 
     public async Task<Response> Execute(Request request, CancellationToken cancellationToken) {
+      var durations = new Dictionary<string, double>();
+      bool? compilationReused = null;
+      void Record(string phase, long start) => durations[phase] = Stopwatch.GetElapsedTime(start).TotalSeconds;
+      async Task TimedWait(SemaphoreSlim semaphore, string phase) {
+        var start = Stopwatch.GetTimestamp();
+        try {
+          await semaphore.WaitAsync(cancellationToken);
+        }
+        finally {
+          durations.TryGetValue(phase, out var prior);
+          durations[phase] = prior + Stopwatch.GetElapsedTime(start).TotalSeconds;
+        }
+      }
       var stdout = new StringWriter();
       var stderr = new StringWriter();
       State? selected = null;
@@ -750,9 +764,9 @@ static class AnalysisSessionCommand {
         }
       }
       try {
-        await admission.WaitAsync(cancellationToken);
+        await TimedWait(admission, "admission_wait");
         admissionHeld = true;
-        await CompilerPreparation.WaitAsync(cancellationToken);
+        await TimedWait(CompilerPreparation, "compiler_wait");
         compilerAdmitted = true;
         if (request.Arguments is not { Length: > 0 } arguments || arguments[0] is not ("resolve" or "definition-analysis" or "verify")) {
           throw new NotSupportedException("Only resolve, definition-analysis and verify are supported.");
@@ -826,13 +840,14 @@ static class AnalysisSessionCommand {
             CompilerPreparation.Release();
             compilerAdmitted = false;
             await waitForDrain.WaitAsync(cancellationToken);
-            await CompilerPreparation.WaitAsync(cancellationToken);
+            await TimedWait(CompilerPreparation, "compiler_wait");
             compilerAdmitted = true;
             await preparation.WaitAsync(cancellationToken);
             preparing = true;
             same = state != null && !state.Retired && configuration == context && roots.SequenceEqual(state.Roots) &&
               state.Files.Inputs.All(input => capture.Fingerprint(input.Key) == input.Value.Hash);
           }
+          compilationReused = same;
           if (same) {
             resolvers.Touch(resolverContext, out _);
             results.Touch(context, out _);
@@ -889,10 +904,17 @@ static class AnalysisSessionCommand {
             });
             state = new State(compilation, engine, shared, capture, roots, generation,
               optionsIdentity, diagnostics, recorded, engineDiagnostics, retained.Facts, retainedResults.Cache);
+            selected = state;
             compilation.Start();
             await compilation.Resolution;
           }
           selected = state!;
+          if (!same) {
+            if (selected.Compilation.ParseSeconds is { } parseSeconds) { durations["parse"] = parseSeconds; }
+            if (selected.Compilation.ResolveSeconds is { } resolveSeconds) { durations["resolve"] = resolveSeconds; }
+          }
+          var translationBefore = selected.TranslationSeconds;
+          var vcBefore = selected.VcSeconds;
           responseFiles = new CapturedFileSystem(request);
           responseFiles.CopyInputsFrom(selected.Files);
           // Excerpts under diagnostics show the bytes this request compiled, never the file at the logical path.
@@ -905,7 +927,10 @@ static class AnalysisSessionCommand {
             cli.ReportDiagnostic(RemapDiagnostic(diagnostic, request));
           }
           if (arguments[0] == "verify" || options.Get(DefinitionAnalysisCommand.IncludeProofInputs)) {
+            var proofInputsWerePrepared = selected.ProofInputsPrepared;
+            var phaseStart = Stopwatch.GetTimestamp();
             await selected.PrepareProofInputs(cancellationToken);
+            if (!proofInputsWerePrepared) { Record("proof_input_preparation", phaseStart); }
             foreach (var diagnostic in selected.Diagnostics.Skip(reportedDiagnostics)) {
               cli.ReportDiagnostic(RemapDiagnostic(diagnostic, request));
             }
@@ -920,11 +945,16 @@ static class AnalysisSessionCommand {
               preparedTargets[target] = await selected.VerificationTasks(preparedResolution, target, cancellationToken);
             }
           }
+          var translationElapsed = selected.TranslationSeconds - translationBefore;
+          var vcElapsed = selected.VcSeconds - vcBefore;
+          if (translationElapsed > 0) { durations["translation"] = translationElapsed; }
+          if (vcElapsed > 0) { durations["vc_preparation"] = vcElapsed; }
           if (readers++ == 0) {
             drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
           }
           admitted = true;
           if (arguments[0] == "definition-analysis") {
+            var analysisStart = Stopwatch.GetTimestamp();
             var resolution = await selected.Compilation.Resolution;
             var uris = await selected.SourceUris();
             object? document = null;
@@ -961,6 +991,7 @@ static class AnalysisSessionCommand {
                   options.Get(DefinitionAnalysisCommand.IncludeVerificationFacts) ? analyzed : analyzed.Definitions;
               }
             }
+            Record("analysis", analysisStart);
             if (document != null) {
               await stdout.WriteLineAsync(JsonSerializer.Serialize(document, JsonOptions));
             }
@@ -1000,6 +1031,10 @@ static class AnalysisSessionCommand {
                   var observations = await Task.WhenAll(waits);
                   var verified = new List<VerificationTaskResult>(selectedTasks.Count);
                   for (var index = 0; index < selectedTasks.Count; index++) {
+                    if (observations[index].Started && observations[index].Fresh) {
+                      durations.TryGetValue("solver_runtime", out var solverSeconds);
+                      durations["solver_runtime"] = solverSeconds + observations[index].Result.RunTime.TotalSeconds;
+                    }
                     selected.Complete(selectedTasks[index], observations[index].Result);
                     verified.Add(new VerificationTaskResult(selectedTasks[index], observations[index].Result));
                   }
@@ -1062,26 +1097,36 @@ static class AnalysisSessionCommand {
       }
       return new Response(request.Id, code, stdout.ToString(), stderr.ToString(), Evidence());
 
-      object Evidence() => new {
-        SchemaVersion = 1,
-        SessionEpoch = epoch,
-        request.SessionId,
-        Generation = request.Generation ?? selected?.Generation ?? generation,
-        SourceIdentity = responseFiles?.Identity ?? Hash("unresolved"),
-        request.ContextId,
-        OptionsIdentity = selected?.OptionsIdentity ?? Hash("unresolved"),
-        ToolchainIdentity = DefinitionAnalysis.ContextToolchainIdentity(),
-        ConsumedInputs = responseFiles?.ActualFingerprints ?? new Dictionary<string, string>(),
-        Completed = completed,
-        Outcome = outcome,
-        TaskCount = taskCount,
-        CacheHitCount = cacheHits,
-        SolverRunCount = solverRuns,
-        AnalysisModuleHits = moduleHits,
-        AnalysisModuleMisses = moduleMisses,
-        ResultCacheEvictions = results.Evictions,
-        ResolverEvictions = resolvers.Evictions
-      };
+      object Evidence() {
+        if (compilationReused == false && selected != null) {
+          if (selected.Compilation.ParseSeconds is { } parse) { durations["parse"] = parse; }
+          if (selected.Compilation.ResolveSeconds is { } resolve) { durations["resolve"] = resolve; }
+        }
+        var evidence = new Dictionary<string, object?> {
+          ["schemaVersion"] = 1,
+          ["sessionEpoch"] = epoch,
+          ["sessionId"] = request.SessionId,
+          ["generation"] = request.Generation ?? selected?.Generation ?? generation,
+          ["sourceIdentity"] = responseFiles?.Identity ?? Hash("unresolved"),
+          ["contextId"] = request.ContextId,
+          ["optionsIdentity"] = selected?.OptionsIdentity ?? Hash("unresolved"),
+          ["toolchainIdentity"] = DefinitionAnalysis.ContextToolchainIdentity(),
+          ["consumedInputs"] = responseFiles?.ActualFingerprints ?? new Dictionary<string, string>(),
+          ["completed"] = completed,
+          ["outcome"] = outcome,
+          ["taskCount"] = taskCount,
+          ["cacheHitCount"] = cacheHits,
+          ["solverRunCount"] = solverRuns,
+          ["analysisModuleHits"] = moduleHits,
+          ["analysisModuleMisses"] = moduleMisses,
+          ["resultCacheEvictions"] = results.Evictions,
+          ["resolverEvictions"] = resolvers.Evictions
+        };
+        if (request.ProfileTimings) {
+          evidence["timings"] = new { SchemaVersion = 1, CompilationReused = compilationReused, DurationsSeconds = durations };
+        }
+        return evidence;
+      }
     }
 
     private sealed record LibraryDirectory(string Path, IReadOnlySet<string> Members) {
@@ -1178,6 +1223,8 @@ static class AnalysisSessionCommand {
     public Compilation Compilation { get; }
     private readonly ExecutionEngine engine;
     private readonly SharedVerifier verifier;
+    public double TranslationSeconds => verifier.TranslationSeconds;
+    public double VcSeconds => verifier.VcSeconds;
     public CapturedFileSystem Files { get; }
     public List<Uri> Roots { get; }
     public int Generation { get; }
@@ -1188,6 +1235,7 @@ static class AnalysisSessionCommand {
     private readonly BoundedWriter engineDiagnostics;
     public DafnyProofInputs? ProofInputs { get; private set; }
     private bool proofInputsPrepared;
+    public bool ProofInputsPrepared => proofInputsPrepared;
     private volatile bool retired;
     public bool Retired {
       get => retired || verifier.Failed || Compilation.HasErrors ||
@@ -1344,6 +1392,8 @@ static class AnalysisSessionCommand {
     private readonly ExecutionEngine engine;
     private readonly ConcurrentDictionary<ModuleDefinition, Task<Bpl.Program>> translations = new();
     private readonly LazyConcurrentDictionary<ModuleDefinition, Task<IReadOnlyList<IVerificationTask>>> tasks = new();
+    public double TranslationSeconds { get; private set; }
+    public double VcSeconds { get; private set; }
     private volatile bool failed;
     public bool Failed => failed;
     public SharedVerifier(DafnyProgramVerifier translator, ExecutionEngine engine) {
@@ -1351,7 +1401,16 @@ static class AnalysisSessionCommand {
       this.engine = engine;
     }
     public async Task<Bpl.Program> Translation(ResolutionResult resolution, ModuleDefinition module, CancellationToken token) {
-      var translation = translations.GetOrAdd(module, _ => translator.TranslateModuleAsync(engine, resolution, module, token));
+      var translation = translations.GetOrAdd(module, _ => Translate());
+      async Task<Bpl.Program> Translate() {
+        var start = Stopwatch.GetTimestamp();
+        try {
+          return await translator.TranslateModuleAsync(engine, resolution, module, token);
+        }
+        finally {
+          TranslationSeconds += Stopwatch.GetElapsedTime(start).TotalSeconds;
+        }
+      }
       try {
         return await translation;
       } catch {
@@ -1377,9 +1436,15 @@ static class AnalysisSessionCommand {
     public async Task<IReadOnlyList<IVerificationTask>> GetVerificationTasksAsync(ExecutionEngine executionEngine,
       ResolutionResult resolution, ModuleDefinition moduleDefinition, CancellationToken cancellationToken) {
       var program = await Translation(resolution, moduleDefinition, cancellationToken);
-      await DafnyMain.LargeStackFactory.StartNew(() => LiftLambdasAsOneShot(executionEngine.Options, program), cancellationToken);
-      return await translator.GetVerificationTasksFromTranslationAsync(executionEngine, resolution, moduleDefinition,
-        program, cancellationToken);
+      var start = Stopwatch.GetTimestamp();
+      try {
+        await DafnyMain.LargeStackFactory.StartNew(() => LiftLambdasAsOneShot(executionEngine.Options, program), cancellationToken);
+        return await translator.GetVerificationTasksFromTranslationAsync(executionEngine, resolution, moduleDefinition,
+          program, cancellationToken);
+      }
+      finally {
+        VcSeconds += Stopwatch.GetElapsedTime(start).TotalSeconds;
+      }
     }
   }
 
@@ -1389,6 +1454,7 @@ static class AnalysisSessionCommand {
     private Task<VC.VerificationRunResult>? result;
     private int subscribers;
     private bool cancelling;
+    private bool freshRun;
     public bool Cached { get; }
     private readonly Func<IReadOnlyList<Bpl.AssertCmd>> currentAssertions;
     /// <param name="currentAssertions">The current split's assertions; a seam for tests, normally the task's split.</param>
@@ -1397,7 +1463,7 @@ static class AnalysisSessionCommand {
       this.currentAssertions = currentAssertions ?? (() => task.Split.Asserts);
       Cached = task.CacheStatus is Completed;
     }
-    public async Task<(VC.VerificationRunResult Result, bool Reused, bool Started)> Wait(CancellationToken token, Action retire,
+    public async Task<(VC.VerificationRunResult Result, bool Reused, bool Started, bool Fresh)> Wait(CancellationToken token, Action retire,
       System.Action<bool, bool>? observed = null) {
       Task<VC.VerificationRunResult> producer;
       bool reused;
@@ -1413,7 +1479,7 @@ static class AnalysisSessionCommand {
       }
       observed?.Invoke(reused, started);
       try {
-        return (await producer.WaitAsync(token), reused, started);
+        return (await producer.WaitAsync(token), reused, started, freshRun);
       }
       finally {
         var drain = false;
@@ -1472,6 +1538,7 @@ static class AnalysisSessionCommand {
         }
         throw new InvalidOperationException("A native task has another unowned producer.");
       }
+      freshRun = !Cached;
       var finished = new TaskCompletionSource<VC.VerificationRunResult>(TaskCreationOptions.RunContinuationsAsynchronously);
       VC.VerificationRunResult? completed = null;
       using var subscription = updates.Subscribe(status => {
