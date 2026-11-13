@@ -1,3 +1,5 @@
+- [Native validation before verification](native-analysis-session.md#boogie-validation-before-verification-2026-11-12) — preserved validation diagnostics and detached successful caches; final archived replay and independent native checks accepted; existing images unchanged. [Plan](../plan/2026-11-12-native-verification-oom.md).
+
 - [Native session execution timings](execution-profiling.md) — negotiated request-local timing evidence, cache and overlapping-work semantics; source verified locally and independently 2026-11-12. [Plan](../plan/2026-11-12-native-phase-profiling.md).
 
 - [Stable seeded order](native-analysis-session.md#stable-seeded-order-2026-11-08) — a non-zero `--boogie=/randomSeed:N` hides the seed from Boogie, orders the solver declarations by `(SHA-256(seed, key), key)` over the modular declaration hash (bound names ignored, basic-type prefix kept) and sends N to Z3; equal key, seed, options and toolchain give byte-identical SMT (Cat RenderData 183/183, synthetic cases); schema 3; `{:random_seed}`, `/randomizeVcIterations` and measure-complexity keep Boogie's randomization; not adopted. [Plan](../plan/2026-11-08-stable-seeded-randomization.md).

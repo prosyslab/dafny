@@ -50,6 +50,44 @@ public class AnalysisSessionRetentionTests {
       JsonSerializer.SerializeToElement(response.NativeEvidence, AnalysisSessionCommand.JsonOptions));
   }
 
+  // Invalid Boogie triggers are reported before solver work, including on repeated and proof-input requests.
+  [Fact]
+  public async Task InvalidTriggerIsACompletedSourceFailure() {
+    const string invalid = "lemma L(n: nat) { assert forall k: nat {:trigger k} | k < n :: k < n; }";
+    using var session = new AnalysisSessionCommand.Session();
+    var verify = new[] { "verify", "--boogie=/randomSeed:42", "--isolate-assertions", Path };
+    foreach (var (arguments, id) in new[] {
+               (verify, "first"), (verify, "repeat"), (new[] { "verify", Path }, "unseeded"),
+               (new[] { "definition-analysis", "--include-proof-inputs", "--boogie=/randomSeed:42", Path }, "analysis")
+             }) {
+      var reply = await Run(session, arguments, id, source: invalid);
+      Assert.InRange(reply.Code, 1, 5);
+      Assert.True(reply.Evidence.GetProperty("completed").GetBoolean());
+      Assert.Equal("completed", reply.Evidence.GetProperty("outcome").GetString());
+      Assert.Equal(0, reply.Count("solverRunCount"));
+      Assert.Contains("matching pattern must be more than just a variable", reply.Stdout + reply.Stderr);
+      Assert.Contains("Retention.dfy(1,", reply.Stdout + reply.Stderr);
+    }
+    const string valid = "function F(k: nat): nat { k } lemma L(n: nat) { assert forall k: nat {:trigger F(k)} | k < n :: F(k) == k; }";
+    var corrected = await Run(session, verify, "corrected", source: valid);
+    Assert.Equal(0, corrected.Code);
+    Assert.True(corrected.Count("solverRunCount") > 0);
+    var warm = await Run(session, verify, "warm", source: valid);
+    Assert.Equal(0, warm.Code);
+    Assert.Equal(0, warm.Count("solverRunCount"));
+    Assert.True(warm.Count("cacheHitCount") > 0);
+  }
+
+  // An ordinary failed proof remains a completed verifier result.
+  [Fact]
+  public async Task FailedAssertionRemainsACompletedVerificationFailure() {
+    using var session = new AnalysisSessionCommand.Session();
+    var reply = await Run(session, Verify, "false", source: "lemma L() { assert false; }");
+    Assert.NotEqual(0, reply.Code);
+    Assert.True(reply.Evidence.GetProperty("completed").GetBoolean());
+    Assert.True(reply.Count("solverRunCount") > 0);
+  }
+
   // Alternating option contexts keep each context's resolved modules and analysis facts.
   [Fact]
   public async Task AlternatingAnalysisContextsStayWarm() {

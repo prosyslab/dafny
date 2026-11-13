@@ -154,8 +154,13 @@ public static partial class DefinitionAnalysis {
   /// the per-implementation keys on the program that the engine will verify.
   /// </summary>
   public static DafnyProofInputs? ProofInputsFromTranslations(Program program,
-    IReadOnlySet<Uri> analysisSourceUris, IReadOnlyList<Tuple<string, Bpl.Program>> translations) =>
-    ProofInputsFor(program, analysisSourceUris, _ => translations, () => ProofToolchainIdentity(program.Options));
+    IReadOnlySet<Uri> analysisSourceUris, IReadOnlyList<Tuple<string, Bpl.Program>> translations) {
+    var inputs = ProofInputsFor(program, analysisSourceUris, _ => translations, () => ProofToolchainIdentity(program.Options));
+    foreach (var (_, translation) in translations) {
+      ModularProofKeys.ThrowIfInvalid(translation);
+    }
+    return inputs;
+  }
 
   /// <summary>Bind native result-cache checksums to the modular key of each implementation.</summary>
   /// <remarks>

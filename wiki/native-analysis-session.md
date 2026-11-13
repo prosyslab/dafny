@@ -29,6 +29,52 @@ with NativeDafnySession(["/absolute/Dafny"], cwd=workspace,
     assert result.native_evidence.completed
 ```
 
+## Boogie validation before verification (2026-11-12)
+
+Status: local source repair, final archived-input replay and independent review
+accepted on 2026-11-12. Plan: [native verification failure](../plan/2026-11-12-native-verification-oom.md).
+Base native commit `466072769`; changes were uncommitted when checked.
+
+Proof-input preparation resolves and typechecks the same Boogie program that the
+session later verifies. Boogie resolution mutates that program even when reporting
+an error. A malformed user trigger exposed a defect: proof-key computation treated
+the first validation failure as an unsupported key, and subsequent preparation
+accepted the partially resolved object. A tiny reproduction reached a solver and
+raised `ProverDiedException` although one-shot Boogie preparation rejected it.
+
+Validation now records each original Boogie diagnostic and remembers the failure
+on that program object. The session reports source locations and messages as a
+completed candidate failure before starting verification; repeated preparation
+cannot reinterpret the mutated program as valid. Ordinary proof-key analysis keeps
+its unsupported-key fallback. The normal verifier entry point also reports these
+diagnostics for seeded one-shot and language-server verification; the session's
+direct translation entry point leaves request-local reporting to the session.
+A completed successful result cache entry is now
+stored in the existing detached snapshot representation, so the cache does not
+retain its original verification graph; ordinary native inserts remain unchanged.
+
+The archived cold request before the change started 164 batches and returned
+native code 6; the host process itself exited zero. A solver-observation replay
+reported 18 launches including version checks, 13 exit-code-1 processes, no
+signals, and at most 37.03 MiB per solver. Managed heap was about 0.8 GiB under a
+10 GiB cap. After the source repair the same request returned native code 2,
+completed, with zero tasks and zero solver runs. The misleading out-of-memory
+message did not establish actual exhaustion. Redacted observations are temporary
+under `/workspace/tmp/native-verification-oom/`; source snapshots remain isolated.
+
+Focused source regressions cover invalid and corrected triggers, repeated
+requests, proof-input analysis, proof failure, successful reuse, and retained
+object lifetimes. The archived replay checks this request's rejection only; it
+does not show that the corrected candidate verifies or that a running image has
+been rebuilt or deployed.
+
+Independent checks passed Driver 83 and Core proof-key 75 cases before the final
+CLI follow-up; final affected Driver 26 and stable-seed 14 cases passed after it,
+with no skips. The external seeded stdin negative returns 2 with its original
+source diagnostic and its positive control returns 0. Final compiled-artifact R4
+replay again reports completed rejection and zero solver work. The plan records
+commands, formatter limits and delivery boundaries.
+
 ## Stable seeded order (2026-11-08)
 
 Plan: [stable seeded randomization](../plan/2026-11-08-stable-seeded-randomization.md) (design B1,
@@ -252,7 +298,7 @@ store, bounded by entry count (4096) with least-recently-used eviction, and repr
 Boogie's lookup priorities exactly (differential test). Evicted entries leave the
 transfer journal. Context LRU, clear on eviction and dispose are unchanged. The former
 32-compilation window, which cleared a context's whole cache, was removed on 2026-11-07:
-the entry bound is the memory limit, and a goal lease easily makes more than 32
+the entry bound limits entry count rather than bytes, and a goal lease easily makes more than 32
 compilations in one turn. A context now keeps hits across 33+ compilations (test
 `ResultsSurviveManyCompilationsOfOneContext`).
 Pitfall: with identical bytes the session reuses its own compilation state and never asks

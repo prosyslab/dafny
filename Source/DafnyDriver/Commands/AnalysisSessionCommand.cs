@@ -743,6 +743,7 @@ static class AnalysisSessionCommand {
       var preparedTargets = new Dictionary<ICanVerify, IReadOnlyList<IVerificationTask>>();
       var admitted = false;
       var selectionRejected = false;
+      var validationRejected = false;
       var completed = false;
       var compilerAdmitted = false;
       var admissionHeld = false;
@@ -926,23 +927,39 @@ static class AnalysisSessionCommand {
                      diagnostic.Source is MessageSource.Parser or MessageSource.Project)) {
             cli.ReportDiagnostic(RemapDiagnostic(diagnostic, request));
           }
+          void ReportValidation(DefinitionAnalysis.BoogieValidationException exception) {
+            validationRejected = true;
+            foreach (var (token, message) in exception.Diagnostics) {
+              var origin = BoogieGenerator.ToDafnyToken(token);
+              cli.ReportDiagnostic(RemapDiagnostic(new DafnyDiagnostic(MessageSource.Translator, "",
+                origin.ReportingRange, [message], ErrorLevel.Error, []), request));
+            }
+          }
           if (arguments[0] == "verify" || options.Get(DefinitionAnalysisCommand.IncludeProofInputs)) {
             var proofInputsWerePrepared = selected.ProofInputsPrepared;
             var phaseStart = Stopwatch.GetTimestamp();
-            await selected.PrepareProofInputs(cancellationToken);
+            try {
+              await selected.PrepareProofInputs(cancellationToken);
+            } catch (DefinitionAnalysis.BoogieValidationException exception) {
+              ReportValidation(exception);
+            }
             if (!proofInputsWerePrepared) { Record("proof_input_preparation", phaseStart); }
             foreach (var diagnostic in selected.Diagnostics.Skip(reportedDiagnostics)) {
               cli.ReportDiagnostic(RemapDiagnostic(diagnostic, request));
             }
           }
-          if (arguments[0] == "verify" && await selected.Compilation.Resolution is {
+          if (!validationRejected && arguments[0] == "verify" && await selected.Compilation.Resolution is {
             HasErrors: false, CanVerifies: not null
           } preparedResolution) {
             verificationTargets = cli.FilterCanVerifies(preparedResolution.CanVerifies, out verificationRange);
             // Prepare the whole native module roster before admitting concurrent readers.
             // A queued caller must not join another request's cancellable preparation.
-            foreach (var target in verificationTargets) {
-              preparedTargets[target] = await selected.VerificationTasks(preparedResolution, target, cancellationToken);
+            try {
+              foreach (var target in verificationTargets) {
+                preparedTargets[target] = await selected.VerificationTasks(preparedResolution, target, cancellationToken);
+              }
+            } catch (DefinitionAnalysis.BoogieValidationException exception) {
+              ReportValidation(exception);
             }
           }
           var translationElapsed = selected.TranslationSeconds - translationBefore;
@@ -953,7 +970,7 @@ static class AnalysisSessionCommand {
             drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
           }
           admitted = true;
-          if (arguments[0] == "definition-analysis") {
+          if (arguments[0] == "definition-analysis" && !validationRejected) {
             var analysisStart = Stopwatch.GetTimestamp();
             var resolution = await selected.Compilation.Resolution;
             var uris = await selected.SourceUris();

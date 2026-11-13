@@ -31,7 +31,14 @@ namespace Microsoft.Dafny.LanguageServer.Language {
       ModuleDefinition moduleDefinition,
       CancellationToken cancellationToken) {
       var translation = await TranslateModuleAsync(engine, resolution, moduleDefinition, cancellationToken);
-      return await GetVerificationTasksFromTranslationAsync(engine, resolution, moduleDefinition, translation, cancellationToken);
+      try {
+        return await GetVerificationTasksFromTranslationAsync(engine, resolution, moduleDefinition, translation, cancellationToken);
+      } catch (DefinitionAnalysis.BoogieValidationException exception) {
+        foreach (var (token, message) in exception.Diagnostics) {
+          resolution.ResolvedProgram.Reporter.Error(MessageSource.Translator, "", BoogieGenerator.ToDafnyToken(token), message);
+        }
+        return [];
+      }
     }
 
     public async Task<Microsoft.Boogie.Program> TranslateModuleAsync(ExecutionEngine engine,

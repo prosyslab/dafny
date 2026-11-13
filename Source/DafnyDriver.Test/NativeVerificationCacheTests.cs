@@ -29,6 +29,30 @@ public class NativeVerificationCacheTests {
       Array.Empty<Microsoft.Boogie.Declaration>())]
   };
 
+  [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+  private static (WeakReference Identity, WeakReference Result, WeakReference Assertion) PublishGraph(NativeVerificationCache cache) {
+    var identity = Identity();
+    var result = Success(identity);
+    var references = (new WeakReference(identity), new WeakReference(result), new WeakReference(result.RunResults[0].Asserts[0]));
+    cache.PublishSuccessful(identity, result);
+    return references;
+  }
+
+  // Published successful entries remain reusable without retaining their original verification graph.
+  [Fact]
+  public void PublishedResultDoesNotRetainOriginalGraph() {
+    using var cache = new NativeVerificationCache();
+    var references = PublishGraph(cache);
+    GC.Collect();
+    GC.WaitForPendingFinalizers();
+    GC.Collect();
+    Assert.False(references.Identity.IsAlive);
+    Assert.False(references.Result.IsAlive);
+    Assert.False(references.Assertion.IsAlive);
+    Assert.NotNull(cache.Lookup(Identity(), false, out var priority));
+    Assert.Equal(NativeVerificationCache.ReusePriority, priority);
+  }
+
   // Two inherited caches preserve the original native identity and clear independently.
   [Fact]
   public void TwoChildrenKeepNativeSkipAuthorityAndIndependentOwnership() {

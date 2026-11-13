@@ -851,6 +851,17 @@ public class ModularProofKeyTests {
 
   private static DafnyOptions BoogieOptions() => DafnyOptions.CreateUsingOldParser(TextWriter.Null);
 
+  // A failed resolution remains failed on the same mutated Boogie program.
+  [Fact]
+  public void InvalidTranslationCannotPassRepeatedLambdaPreparation() {
+    var options = BoogieOptions();
+    Assert.Equal(0, Bpl.Parser.Parse("axiom (forall x: int :: { x } x == x);", "invalid.bpl", out var program));
+    var first = Assert.Throws<DefinitionAnalysis.BoogieValidationException>(() => DefinitionAnalysis.LiftLambdasOnce(options, program));
+    var second = Assert.Throws<DefinitionAnalysis.BoogieValidationException>(() => DefinitionAnalysis.LiftLambdasOnce(options, program));
+    Assert.Same(first, second);
+    Assert.Contains(first.Diagnostics, diagnostic => diagnostic.Message.Contains("matching pattern must be more than just a variable"));
+  }
+
   private static Bpl.Program ParseBoogie(string text, DafnyOptions options) {
     Assert.Equal(0, Bpl.Parser.Parse(text, "keys.bpl", out var program));
     Assert.Equal(0, program.Resolve(options));

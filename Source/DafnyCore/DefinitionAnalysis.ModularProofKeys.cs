@@ -10,6 +10,11 @@ using Bpl = Microsoft.Boogie;
 namespace Microsoft.Dafny;
 
 public static partial class DefinitionAnalysis {
+  public sealed class BoogieValidationException(IReadOnlyList<(Bpl.IToken Token, string Message)> diagnostics)
+    : Exception("Boogie program validation failed") {
+    public IReadOnlyList<(Bpl.IToken Token, string Message)> Diagnostics { get; } = diagnostics;
+  }
+
   /// <summary>Lift a translation's lambdas once, as one-shot verification does; see <see cref="ModularProofKeys"/>.</summary>
   public static void LiftLambdasOnce(DafnyOptions options, Bpl.Program program) =>
     ModularProofKeys.LiftLambdas(options, program);
@@ -77,10 +82,17 @@ public static partial class DefinitionAnalysis {
     }
 
     private static readonly ConditionalWeakTable<Bpl.Program, LiftedLambdas> Lifted = new();
+    private static readonly ConditionalWeakTable<Bpl.Program, BoogieValidationException> Invalid = new();
     private static readonly ConditionalWeakTable<Bpl.Program, ProgramKeys> Computed = new();
     private static readonly ConditionalWeakTable<Bpl.Program, string> Ordered = new();
 
     internal static bool IsLifted(Bpl.Program program) => Lifted.TryGetValue(program, out _);
+
+    internal static void ThrowIfInvalid(Bpl.Program program) {
+      if (Invalid.TryGetValue(program, out var failure)) {
+        throw failure;
+      }
+    }
 
     /// <summary>The keys already computed for this program object, if any.</summary>
     internal static ProgramKeys? Existing(Bpl.Program program) => Computed.TryGetValue(program, out var keys) ? keys : null;
@@ -95,16 +107,19 @@ public static partial class DefinitionAnalysis {
         if (Lifted.TryGetValue(program, out _)) {
           return;
         }
-        var lifting = new DafnyOptions(options, useNullWriters: true) { VerifySnapshots = 0 };
-        // The engine would reject an ill-formed program before verification. Lifting runs first and prints to a
-        // null writer, so reject here with the engine's message instead of handing on an already lifted program.
-        var resolutionErrors = program.Resolve(lifting);
-        if (resolutionErrors != 0) {
-          throw new ArgumentException($"Boogie program had {resolutionErrors} resolution errors: ");
+        if (Invalid.TryGetValue(program, out var failure)) {
+          throw failure;
         }
-        var typeErrors = program.Typecheck(lifting);
-        if (typeErrors != 0) {
-          throw new ArgumentException($"Boogie program had {typeErrors} type errors: ");
+        var lifting = new DafnyOptions(options, useNullWriters: true) { VerifySnapshots = 0 };
+        // Resolution mutates the program even on failure, so it must never be retried on that object.
+        var errors = new ValidationErrors();
+        if (program.Resolve(lifting, errors) != 0 || program.Typecheck(lifting, errors) != 0) {
+          if (errors.Diagnostics.Count == 0) {
+            throw new InvalidOperationException("Boogie validation failed without a diagnostic.");
+          }
+          failure = new BoogieValidationException(errors.Diagnostics.ToArray());
+          Invalid.Add(program, failure);
+          throw failure;
         }
         Bpl.LambdaHelper.Desugar(lifting, program, out var axioms, out var functions);
         foreach (var function in functions) {
@@ -120,6 +135,11 @@ public static partial class DefinitionAnalysis {
       }
     }
 
+    private sealed class ValidationErrors : Bpl.IErrorSink {
+      public List<(Bpl.IToken Token, string Message)> Diagnostics { get; } = new();
+      public void Error(Bpl.IToken token, string message) => Diagnostics.Add((token, message));
+    }
+
     /// <summary>Lifts the program if needed and computes its implementation keys once.</summary>
     internal static ProgramKeys Compute(DafnyOptions options, Bpl.Program program) {
       lock (program) {
@@ -133,8 +153,11 @@ public static partial class DefinitionAnalysis {
           try {
             LiftLambdas(options, program);
             result = ComputeLifted(options, program);
+          } catch (BoogieValidationException exception) {
+            // Proof-key-only callers may treat invalid translations as unsupported. A session must
+            // propagate this recorded failure before it attempts to verify the mutated program.
+            result = new ProgramKeys { Unsupported = exception.Message };
           } catch (ArgumentException exception) {
-            // The engine reports the same ill-formed program again when it prepares tasks.
             result = new ProgramKeys { Unsupported = exception.Message };
           }
         }

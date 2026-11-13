@@ -262,7 +262,8 @@ internal sealed class NativeVerificationCache : IVerificationResultCache, IDispo
         run.ResourceCount, run.SolverUsed, Shapes(run).ToArray())).ToArray());
     lock (gate) {
       CheckOwner();
-      Store(implementation.Id, result);
+      var detachedIdentity = snapshot.Identity();
+      Store(implementation.Id, snapshot.Restore(detachedIdentity));
       journal[implementation.Id] = snapshot;
     }
   }

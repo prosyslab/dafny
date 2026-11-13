@@ -100,13 +100,26 @@ public class AnalysisSessionLambdaLiftingTests {
     Assert.True(evidence.GetProperty("solverRunCount").GetInt32() > 0);
   }
 
+  // Seeded one-shot verification reports an invalid trigger as a source error and terminates.
+  [Fact]
+  public async Task SeededOneShotReportsInvalidTrigger() {
+    using var input = new StringReader("lemma L(n: nat) { assert forall k: nat {:trigger k} | k < n :: k < n; }");
+    using var stdout = new StringWriter();
+    using var stderr = new StringWriter();
+    var result = await DafnyNewCli.Execute(new WritersConsole(input, stdout, stderr),
+      ["verify", "--stdin", "--standard-libraries:false", "--boogie=/randomSeed:42", "--isolate-assertions"]);
+    Assert.InRange(result, 1, 5);
+    Assert.Contains("matching pattern must be more than just a variable", stdout.ToString() + stderr);
+  }
+
   // An ill-formed Boogie program is rejected by the pre-lift pass, as the engine would reject it, never accepted.
   [Theory]
-  [InlineData("procedure P(n: int) { var b: [int]bool; b := (lambda q: int :: q < n && Undeclared(q)); }", "resolution errors")]
-  [InlineData("function F(m: [int]bool): int;\nprocedure P(n: int) { var x: int; x := F((lambda q: int :: q + true)); }", "type errors")]
-  public void IllFormedProgramsAreRejectedBeforeLifting(string text, string expected) {
+  [InlineData("procedure P(n: int) { var b: [int]bool; b := (lambda q: int :: q < n && Undeclared(q)); }")]
+  [InlineData("function F(m: [int]bool): int;\nprocedure P(n: int) { var x: int; x := F((lambda q: int :: q + true)); }")]
+  public void IllFormedProgramsAreRejectedBeforeLifting(string text) {
     Assert.Equal(0, BoogieParser.Parse(text, "Invalid.bpl", out var program));
-    var error = Assert.Throws<ArgumentException>(() => AnalysisSessionCommand.LiftLambdasAsOneShot(SnapshotOptions(), program));
-    Assert.Contains(expected, error.Message);
+    var error = Assert.Throws<DefinitionAnalysis.BoogieValidationException>(() => AnalysisSessionCommand.LiftLambdasAsOneShot(SnapshotOptions(), program));
+    Assert.NotEmpty(error.Diagnostics);
+    Assert.All(error.Diagnostics, diagnostic => Assert.False(string.IsNullOrWhiteSpace(diagnostic.Message)));
   }
 }
