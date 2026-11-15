@@ -1084,7 +1084,13 @@ class _SessionTransport:
             for thread in self._threads:
                 if thread is not threading.current_thread():
                     thread.join(timeout=0.1)
-            for stream in (self._process.stdin, self._process.stdout, self._process.stderr):
+            if self._process.stdin is not None:
+                try:
+                    self._process.stdin.close()
+                except BrokenPipeError:
+                    # The reaped worker left request bytes unflushed; the stream is closed anyway.
+                    pass
+            for stream in (self._process.stdout, self._process.stderr):
                 if stream is not None:
                     stream.close()
             with self._condition:

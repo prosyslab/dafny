@@ -771,6 +771,53 @@ def test_eof_stops_orphaned_solver_group(make_session: Callable[..., Any]) -> No
     assert not peer.orphaned_solver
 
 
+# A worker that died with unflushed request bytes is reaped, and close does not report it as stuck.
+@pytest.mark.integration
+def test_reaped_worker_broken_stdin_does_not_fail_close(make_session: Callable[..., Any]) -> None:
+    native, peer = make_session(lambda process, request: process.finish())
+
+    def close_stdin() -> None:
+        if peer.exited.is_set():
+            raise BrokenPipeError(32, "Broken pipe")
+
+    peer.stdin.close = close_stdin
+    with pytest.raises(SessionClosedError):
+        native.run(_invocation())
+    native.close()
+    native.close()
+    assert peer.exited.is_set()
+    assert native._transport._stopped.is_set()
+    assert native._transport._close_error is None
+
+
+# A worker that survives every stop stage still fails close, even when its stdin pipe is broken.
+@pytest.mark.integration
+def test_unreaped_worker_with_broken_stdin_still_fails_close(
+    make_session: Callable[..., Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(session_module, "_CLOSE_SECONDS", 0.02)
+    native, peer = make_session()
+    peer.ignore_shutdown = True
+    peer.ignore_terminate = True
+
+    def kill() -> None:
+        peer.killed = True
+
+    def close_stdin() -> None:
+        raise BrokenPipeError(32, "Broken pipe")
+
+    peer.kill = kill
+    peer.stdin.close = close_stdin
+    for _ in range(2):
+        with pytest.raises(NativeSessionError, match="could not stop and reap") as caught:
+            native.close()
+        assert isinstance(caught.value.__cause__, subprocess.TimeoutExpired)
+    assert peer.killed and not native._transport._stopped.is_set()
+    # The failed close is sticky by design; release the fake worker and skip fixture teardown.
+    peer.finish()
+    monkeypatch.setattr(native, "close", lambda: None)
+
+
 # Poisoning between the ready check and cancellation still waits for worker cleanup.
 @pytest.mark.integration
 def test_cancel_transport_failure_race_waits_for_physical_stop(
