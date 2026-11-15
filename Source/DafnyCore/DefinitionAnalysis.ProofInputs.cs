@@ -305,6 +305,10 @@ public static partial class DefinitionAnalysis {
       }
     }
 
+    // A proof input names its definition by source path and reported name; only unique identities qualify.
+    var identityCounts = sourceDefinitions
+      .GroupBy(other => (SourcePath(other.Declaration), other.ReportFullName))
+      .ToDictionary(group => group.Key, group => group.Count());
     var results = new List<DafnyDefinitionProofInput>();
     foreach (var definition in sourceDefinitions) {
       // By-method and generated/extreme declarations require more than one logical
@@ -333,8 +337,7 @@ public static partial class DefinitionAnalysis {
         continue;
       }
       var sourcePath = SourcePath(definition.Declaration);
-      if (sourcePath.Length == 0 || sourceDefinitions.Count(other => SourcePath(other.Declaration) == sourcePath &&
-            other.ReportFullName == definition.ReportFullName) != 1) {
+      if (sourcePath.Length == 0 || identityCounts[(sourcePath, definition.ReportFullName)] != 1) {
         continue;
       }
       var keyed = implementations.Select(key => new[] {
