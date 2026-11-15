@@ -47,6 +47,26 @@ public class AnalysisSessionDiagnosticLocationTests {
     Assert.Equal(new[] { new Uri(Logical + "/Main.dfy"), external.Uri }, files.Reads);
   }
 
+  // A related location without its own message, as from a NestedOrigin without text, keeps its null part.
+  [Fact]
+  public void MessagelessRelatedLocationIsRemapped() {
+    var cached = Diagnostic() with {
+      RelatedInformation = [new DafnyRelatedInformation(Range(Logical + "/Other.dfy"), "", [null!])]
+    };
+    using var output = new StringWriter();
+    var options = new DafnyOptions(TextReader.Null, output, TextWriter.Null) {
+      PrintPathMapper = path => AnalysisSessionCommand.RemapOutputPath(path, Request())
+    };
+    options.Set(Snippets.ShowSnippets, false);
+
+    var mapped = AnalysisSessionCommand.RemapDiagnostic(cached, Request());
+    options.OutputWriter.WriteDiagnostic(mapped);
+
+    Assert.Null(mapped.RelatedInformation[0].MessageParts[0]);
+    Assert.Contains(Physical + "/Main.dfy(1,2): Error: assertion could not be proved", output.ToString());
+    Assert.Contains(Physical + "/Other.dfy(1,2): Related location", output.ToString());
+  }
+
   private static DafnyDiagnostic Diagnostic(TokenRange? range = null) => new(MessageSource.Verifier, "",
     range ?? Range(Logical + "/Main.dfy"), ["assertion could not be proved"], ErrorLevel.Error,
     [new DafnyRelatedInformation(Range(Logical + "/Spec.dfy"), "", ["the specification"])]);

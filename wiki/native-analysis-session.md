@@ -29,6 +29,51 @@ with NativeDafnySession(["/absolute/Dafny"], cwd=workspace,
     assert result.native_evidence.completed
 ```
 
+## Candidate inputs that ended session requests (2026-11-15)
+
+Status: local source repair on `expecto` base `87dcbe557`, independently reviewed; not yet
+pinned or in an image. Plan: [candidate native crashes](../plan/2026-11-15-candidate-native-crashes.md).
+Parent: [weekly FAIL:F classification](../../plan/2026-11-15-weekly-fail-f-native-classification.md).
+
+Two candidate programs from weekly run `weekly-20261114t015031z-a6d430c1b660` ended a session
+request as an operational failure instead of returning a diagnostic.
+
+- Message-less related locations. Some resolver errors attach a related location with no text
+  of its own: `Duplicate module name` (`LiteralModuleDecl.cs`) and duplicate top-level names
+  (`ModuleDefinition.cs`) report `new NestedOrigin(Origin, other.Origin)`, and
+  `ErrorReporterExtensions` turns that into related information with `MessageParts = [null]`.
+  When the request's source root differs from its logical root, `RemapDiagnostic` remapped every
+  part and threw a NullReferenceException (exit 6). It now keeps a null part as null. Requests
+  with equal roots and the one-shot CLI never remap and were not affected.
+- hide/reveal arguments inside a `match`. `HideRevealStmt.GenResolve` resolves only the callee
+  name (`applySuffix.Lhs`); the arguments are accepted and never resolved. Match flattening clones
+  the case body with resolved fields (`new Cloner(false, true)`). Two clone constructors then read
+  resolution state the arguments never got: `BinaryExpr` read `ResolvedOp`, whose
+  `Debug.Assert` ends the Debug-built process ("Process terminated. Assertion failed.", return
+  code -6, seen as `hide P(x + y);`), and `UserDefinedType` looked up a null `ResolvedClass`
+  (`Value cannot be null. (Parameter 'key')`, exit 6, for example `x is Mode`, `n as Small` or a
+  typed lambda). `HideRevealStmt.CloneTarget` now clones the arguments of a hidden or revealed
+  call as unresolved syntax and keeps the resolved callee, `OffsetMembers` and
+  `ResolvedStatements`. Post-resolution readers of `Exprs` only count them or skip unresolved
+  expressions. One loss: `ContractReductionCloner` does not run its cancellation check inside the
+  (small) argument subtrees.
+- Upstream behavior kept as is: hide/reveal arguments have no effect, and without
+  `--isolate-assertions` a `reveal` in one branch of a method also cancels a `hide` in its other
+  branches. The LIT test `ast/reveal/hideArgumentsInMatch.dfy` keeps its reveals in a separate
+  method and runs with `--isolate-assertions`.
+- Evidence: Driver test `MessagelessRelatedLocationIsRemapped` and the LIT test fail without the
+  repair and pass with it. Sweeps of argument forms inside a match against the same statement in
+  if/else (212 files locally; 379 pairs in the independent review, with dotted, static, instance
+  and constant callees, wildcards, auto-reveal and the old resolver) give equal results and no
+  internal failure; the pinned build crashes in 166 of the reviewed match cases. A live session
+  returns exit 2 with `Duplicate module name` and the related location on the physical path.
+- Limits: revealing a labeled assert or requires label inside a match still aborts (exit 134, on
+  the pinned build too): the clone creates new `AssertLabel` objects whose `E` is never set, and a
+  fix needs a label map in the cloner. Native Dafny is still built in Debug configuration, so
+  other `Debug.Assert`s reachable from candidate input remain possible. The Python client and Cosyn keep such a crash from
+  wedging a run (see [client close](python-analysis-client.md)). The weekly image uses the pinned
+  commit until the parent moves the pin.
+
 ## Boogie validation before verification (2026-11-12)
 
 Status: local source repair, final archived-input replay and independent review

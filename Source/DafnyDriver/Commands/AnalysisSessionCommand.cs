@@ -1745,7 +1745,8 @@ static class AnalysisSessionCommand {
       IReadOnlyList<object> remaining = parts;
       DafnyDiagnostic.GetFormatMsgAndRemainingParts(errorId, ref remaining);
       var hasFormat = remaining.Count < parts.Count;
-      return parts.Select((part, index) => RemapOutputText(part, request, hasFormat && index == 0)).ToList();
+      // A related location without its own message (a NestedOrigin without text) has a null part.
+      return parts.Select((part, index) => part is null ? part : RemapOutputText(part, request, hasFormat && index == 0)).ToList();
     }
     return diagnostic with {
       MessageParts = Parts(diagnostic.ErrorId, diagnostic.MessageParts),

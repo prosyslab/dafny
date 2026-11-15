@@ -1,3 +1,5 @@
+- [Candidate inputs that ended session requests](native-analysis-session.md#candidate-inputs-that-ended-session-requests-2026-11-15) — message-less related locations no longer break remapped diagnostics; hide/reveal arguments inside a match are cloned as unresolved syntax; the Python client closes cleanly after a crashed worker. Local and independent checks; not pinned. [Plan](../plan/2026-11-15-candidate-native-crashes.md).
+
 - [Native validation before verification](native-analysis-session.md#boogie-validation-before-verification-2026-11-12) — preserved validation diagnostics and detached successful caches; final archived replay and independent native checks accepted; existing images unchanged. [Plan](../plan/2026-11-12-native-verification-oom.md).
 
 - [Native session execution timings](execution-profiling.md) — negotiated request-local timing evidence, cache and overlapping-work semantics; source verified locally and independently 2026-11-12. [Plan](../plan/2026-11-12-native-phase-profiling.md).

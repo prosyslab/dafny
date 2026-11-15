@@ -1,0 +1,8 @@
+hideArgumentsInMatch.dfy(23,6): Error: assertion could not be proved
+hideArgumentsInMatch.dfy(27,6): Error: assertion could not be proved
+hideArgumentsInMatch.dfy(31,6): Error: assertion could not be proved
+hideArgumentsInMatch.dfy(41,6): Error: assertion could not be proved
+hideArgumentsInMatch.dfy(45,6): Error: assertion could not be proved
+hideArgumentsInMatch.dfy(49,6): Error: assertion could not be proved
+
+Dafny program verifier finished with 4 verified, 6 errors

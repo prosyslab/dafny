@@ -34,13 +34,26 @@ public class HideRevealStmt : Statement, ICloneable<HideRevealStmt>, ICanFormat,
 
   public HideRevealStmt(Cloner cloner, HideRevealStmt original) : base(cloner, original) {
     Mode = original.Mode;
-    Exprs = original.Exprs?.Select(cloner.CloneExpr).ToList();
+    Exprs = original.Exprs?.Select(expr => CloneTarget(cloner, expr)).ToList();
     Wildcard = original.Wildcard;
     if (cloner.CloneResolvedFields) {
       OffsetMembers = original.OffsetMembers.ToList();
       LabeledAsserts = original.LabeledAsserts.Select(a => new AssertLabel(cloner.Origin(a.Tok), a.Name)).ToList();
       ResolvedStatements = original.ResolvedStatements.Select(stmt => cloner.CloneStmt(stmt, false)).ToList();
     }
+  }
+
+  /// <summary>
+  /// Resolution resolves only the name in a hidden or revealed call (see GenResolve), never its
+  /// arguments. A clone with resolved fields therefore copies the arguments as unresolved syntax.
+  /// </summary>
+  private static Expression CloneTarget(Cloner cloner, Expression expr) {
+    if (!cloner.CloneResolvedFields || expr is not ApplySuffix applySuffix) {
+      return cloner.CloneExpr(expr);
+    }
+    return new ApplySuffix(new Cloner(), applySuffix) {
+      Lhs = cloner.CloneExpr(applySuffix.Lhs)
+    };
   }
 
   public HideRevealStmt(IOrigin origin, HideRevealCmd.Modes mode)
