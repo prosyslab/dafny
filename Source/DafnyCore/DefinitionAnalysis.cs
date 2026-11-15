@@ -705,13 +705,9 @@ public static partial class DefinitionAnalysis {
     var end = TokenEnd(reference.Referer.EndToken);
     var referred = reference.Referred is NonNullTypeDecl nonNull ? nonNull.Class : reference.Referred;
     if (declarationNodes.TryGetValue(referred, out var target)) {
-      var suffix = $".{target.Name}";
-      var targetModule = target.ReportFullName.EndsWith(suffix, StringComparison.Ordinal)
-        ? target.ReportFullName[..^suffix.Length]
-        : target.EnclosingName;
       return new DefinitionReference(
         target.ReportFullName,
-        targetModule,
+        DeclaringModuleName(target),
         target.Kind,
         isPattern,
         start,
@@ -729,6 +725,18 @@ public static partial class DefinitionAnalysis {
         end);
     }
     return null;
+  }
+
+  /// <summary>
+  /// The full Dafny name of the module that declares a source definition. A class, trait or
+  /// datatype member reports its module, never its enclosing type.
+  /// </summary>
+  private static string DeclaringModuleName(DefinitionNode node) {
+    return node.Declaration switch {
+      TopLevelDecl topLevel => topLevel.EnclosingModuleDefinition.FullDafnyName,
+      MemberDecl { EnclosingClass: { } enclosing } => enclosing.EnclosingModuleDefinition.FullDafnyName,
+      _ => node.EnclosingName
+    };
   }
 
   private static List<DefinitionPostconditionCall> DirectPostconditionCallsFor(
