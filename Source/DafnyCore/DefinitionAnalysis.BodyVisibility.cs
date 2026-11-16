@@ -25,6 +25,196 @@ public static partial class DefinitionAnalysis {
   private sealed class BodyVisibilityAnalysis(DafnyOptions options) {
     private readonly Dictionary<INode, DirectBodyVisibilityFacts> directFacts = new(ReferenceEqualityComparer.Instance);
 
+    // Closures are memoized per strongly connected component of the declaration dependency graph.
+    private Dictionary<INode, int>? indexOf;
+    private string?[] names = [];
+    private bool[] unnamed = [];
+    private int[] sccOf = [];
+    private readonly List<ulong[]> sccClosure = new();
+    private readonly List<ulong[]> sccRevealed = new();
+    private readonly List<bool> sccRevealsAll = new();
+    private string[] revealedNames = [];
+
+    private static bool Analyzable(INode declaration) {
+      var module = declaration switch {
+        MemberDecl member => member.EnclosingClass?.EnclosingModuleDefinition,
+        TopLevelDecl topLevel => topLevel.EnclosingModuleDefinition,
+        _ => null
+      };
+      return module is { SuccessfullyResolved: true };
+    }
+
+    private static string? NameOf(INode declaration) => declaration switch {
+      MemberDecl member when member.EnclosingClass != null => member.FullDafnyName,
+      TypeParameter => null,
+      TopLevelDecl topLevel when topLevel.EnclosingModuleDefinition != null => topLevel.FullDafnyName,
+      DatatypeCtor { EnclosingDatatype: { } datatype } => datatype.FullDafnyName,
+      _ => null
+    };
+
+    /// <summary>Discover the dependency graph of all roots once and memoize one closure per component.</summary>
+    public void Prepare(IEnumerable<INode> roots) {
+      // Phase 1: every declaration reachable from an analyzable root.
+      var discovered = new List<INode>();
+      var seen = new HashSet<INode>(ReferenceEqualityComparer.Instance);
+      var pending = new Stack<INode>();
+      foreach (var root in roots.Where(Analyzable)) {
+        pending.Push(root);
+        while (pending.TryPop(out var current)) {
+          if (!seen.Add(current)) {
+            continue;
+          }
+          discovered.Add(current);
+          foreach (var dependency in FactsFor(current).Dependencies) {
+            pending.Push(dependency);
+          }
+        }
+      }
+      // Index declarations in ordinal name order, so a closure enumerates its names already sorted.
+      var ordered = discovered.Select(node => (Node: node, Name: NameOf(node)))
+        .OrderBy(item => item.Name, StringComparer.Ordinal).ToList();
+      var count = ordered.Count;
+      indexOf = new Dictionary<INode, int>(count, ReferenceEqualityComparer.Instance);
+      names = new string?[count];
+      unnamed = new bool[count];
+      for (var i = 0; i < count; i++) {
+        indexOf[ordered[i].Node] = i;
+        names[i] = ordered[i].Name;
+        unnamed[i] = ordered[i].Name == null && ordered[i].Node is not TypeParameter;
+      }
+      var facts = ordered.Select(item => FactsFor(item.Node)).ToArray();
+      var adjacency = facts.Select(fact => fact.Dependencies.Select(dependency => indexOf[dependency]).ToArray()).ToArray();
+      revealedNames = facts.SelectMany(fact => fact.RevealedFunctions).Distinct(StringComparer.Ordinal)
+        .OrderBy(name => name, StringComparer.Ordinal).ToArray();
+      var revealedIndex = new Dictionary<string, int>(StringComparer.Ordinal);
+      for (var i = 0; i < revealedNames.Length; i++) {
+        revealedIndex[revealedNames[i]] = i;
+      }
+      var words = (count + 63) / 64;
+      var revealedWords = (revealedNames.Length + 63) / 64;
+
+      // Phase 2: iterative Tarjan; components complete in reverse topological order.
+      sccOf = Enumerable.Repeat(-1, count).ToArray();
+      var order = Enumerable.Repeat(-1, count).ToArray();
+      var low = new int[count];
+      var onStack = new bool[count];
+      var stack = new Stack<int>();
+      var calls = new Stack<(int Node, int Next)>();
+      var counter = 0;
+      for (var start = 0; start < count; start++) {
+        if (order[start] != -1) {
+          continue;
+        }
+        calls.Push((start, 0));
+        while (calls.TryPop(out var frame)) {
+          var (node, next) = frame;
+          if (next == 0) {
+            order[node] = low[node] = counter++;
+            stack.Push(node);
+            onStack[node] = true;
+          }
+          var descended = false;
+          for (var i = next; i < adjacency[node].Length; i++) {
+            var target = adjacency[node][i];
+            if (order[target] == -1) {
+              calls.Push((node, i + 1));
+              calls.Push((target, 0));
+              descended = true;
+              break;
+            }
+            if (onStack[target]) {
+              low[node] = Math.Min(low[node], order[target]);
+            }
+          }
+          if (descended) {
+            continue;
+          }
+          if (low[node] == order[node]) {
+            var component = sccClosure.Count;
+            var members = new List<int>();
+            int member;
+            do {
+              member = stack.Pop();
+              onStack[member] = false;
+              sccOf[member] = component;
+              members.Add(member);
+            } while (member != node);
+            var closure = new ulong[words];
+            var revealed = new ulong[revealedWords];
+            var revealsAll = false;
+            var merged = new HashSet<int>();
+            foreach (var current in members) {
+              closure[current >> 6] |= 1UL << (current & 63);
+              revealsAll |= facts[current].RevealsAllFunctions;
+              foreach (var name in facts[current].RevealedFunctions) {
+                var bit = revealedIndex[name];
+                revealed[bit >> 6] |= 1UL << (bit & 63);
+              }
+              foreach (var target in adjacency[current]) {
+                var other = sccOf[target];
+                if (other == component || !merged.Add(other)) {
+                  continue;
+                }
+                var otherClosure = sccClosure[other];
+                for (var w = 0; w < words; w++) {
+                  closure[w] |= otherClosure[w];
+                }
+                var otherRevealed = sccRevealed[other];
+                for (var w = 0; w < revealedWords; w++) {
+                  revealed[w] |= otherRevealed[w];
+                }
+                revealsAll |= sccRevealsAll[other];
+              }
+            }
+            sccClosure.Add(closure);
+            sccRevealed.Add(revealed);
+            sccRevealsAll.Add(revealsAll);
+          }
+          if (calls.TryPeek(out var parent)) {
+            low[parent.Node] = Math.Min(low[parent.Node], low[node]);
+          }
+        }
+      }
+    }
+
+    private DefinitionBodyVisibility FromClosure(INode declaration, int index) {
+      var component = sccOf[index];
+      var closure = sccClosure[component];
+      var revealsAll = sccRevealsAll[component];
+      var referenced = new List<string>();
+      string? last = null;
+      for (var w = 0; w < closure.Length; w++) {
+        var word = closure[w];
+        while (word != 0) {
+          var bit = (w << 6) + BitOperations.TrailingZeroCount(word);
+          word &= word - 1;
+          if (bit == index) {
+            continue;
+          }
+          if (names[bit] is { } name) {
+            if (!string.Equals(name, last, StringComparison.Ordinal)) {
+              referenced.Add(name);
+              last = name;
+            }
+          } else if (unnamed[bit]) {
+            revealsAll = true;
+          }
+        }
+      }
+      var revealed = new List<string>();
+      var revealedBits = sccRevealed[component];
+      for (var w = 0; w < revealedBits.Length; w++) {
+        var word = revealedBits[w];
+        while (word != 0) {
+          revealed.Add(revealedNames[(w << 6) + BitOperations.TrailingZeroCount(word)]);
+          word &= word - 1;
+        }
+      }
+      return new DefinitionBodyVisibility(
+        declaration is MemberDecl memberDeclaration && BoogieGenerator.IsOpaque(memberDeclaration, options),
+        revealed, revealsAll, referenced);
+    }
+
     public DefinitionBodyVisibility? For(INode declaration) {
       var module = declaration switch {
         MemberDecl member => member.EnclosingClass?.EnclosingModuleDefinition,
@@ -33,6 +223,9 @@ public static partial class DefinitionAnalysis {
       };
       if (module is not { SuccessfullyResolved: true }) {
         return null;
+      }
+      if (indexOf != null && indexOf.TryGetValue(declaration, out var prepared)) {
+        return FromClosure(declaration, prepared);
       }
       var revealed = new HashSet<string>(StringComparer.Ordinal);
       var referenced = new HashSet<string>(StringComparer.Ordinal);

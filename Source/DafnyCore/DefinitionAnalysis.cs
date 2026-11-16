@@ -341,6 +341,7 @@ public static partial class DefinitionAnalysis {
     var recursionFacts = AnalyzeRecursion(recursionGraph);
 
     var bodyVisibility = new BodyVisibilityAnalysis(program.Options);
+    bodyVisibility.Prepare(uncachedDeclarations.Select(declaration => declaration.Declaration));
     var results = declarations
       .OrderBy(declaration => declaration.Start)
       .Select(declaration => (sessionCache?.Result(declaration, () => Create(declaration)) ?? Create(declaration)) with {
@@ -831,10 +832,8 @@ public static partial class DefinitionAnalysis {
         declarationNodes.TryGetValue(member.EnclosingClass, out var parent)) {
       dependencies.Add(parent);
     }
-    if (declaration.SourceGroup != null) {
-      foreach (var sibling in declarationNodes.Values.Where(candidate =>
-                 candidate.Declaration.StartToken.Uri == declaration.Declaration.StartToken.Uri &&
-                 candidate.SourceGroup == declaration.SourceGroup)) {
+    if (declaration.SourceGroupMembers != null) {
+      foreach (var sibling in declaration.SourceGroupMembers) {
         dependencies.Add(sibling);
       }
     }
@@ -1004,8 +1003,10 @@ public static partial class DefinitionAnalysis {
       }
       var span = new DefinitionSourceSpan(group[0].Declaration.StartToken.pos,
         TokenEnd(group.Last().Declaration.EndToken));
+      var members = group.ToList();
       foreach (var node in group) {
         node.SourceGroup = span;
+        node.SourceGroupMembers = members;
       }
     }
 
@@ -1490,7 +1491,32 @@ internal sealed record SourceFacts(
       wiring);
   }
 
+  private readonly Dictionary<string, IReadOnlyList<string>> localIncludedModulesByPath = new(StringComparer.Ordinal);
+  private readonly Dictionary<string, IReadOnlyList<string>> importedModulesByPath = new(StringComparer.Ordinal);
+  private readonly Dictionary<string, IReadOnlyList<DefinitionAnalysisInclude>> localIncludesByPath = new(StringComparer.Ordinal);
+
   public IReadOnlyList<string> LocalIncludedModulesFor(string sourcePath) {
+    if (!localIncludedModulesByPath.TryGetValue(sourcePath, out var cached)) {
+      localIncludedModulesByPath[sourcePath] = cached = ComputeLocalIncludedModulesFor(sourcePath);
+    }
+    return cached;
+  }
+
+  public IReadOnlyList<string> ImportedModulesFor(string sourcePath) {
+    if (!importedModulesByPath.TryGetValue(sourcePath, out var cached)) {
+      importedModulesByPath[sourcePath] = cached = ComputeImportedModulesFor(sourcePath);
+    }
+    return cached;
+  }
+
+  public IReadOnlyList<DefinitionAnalysisInclude> LocalIncludesFor(string sourcePath) {
+    if (!localIncludesByPath.TryGetValue(sourcePath, out var cached)) {
+      localIncludesByPath[sourcePath] = cached = ComputeLocalIncludesFor(sourcePath);
+    }
+    return cached;
+  }
+
+  private IReadOnlyList<string> ComputeLocalIncludedModulesFor(string sourcePath) {
     var targetPaths = Structured.Includes
       .Where(include => SamePath(include.SourcePath, sourcePath))
       .Select(include => Path.GetFullPath(include.TargetPath))
@@ -1503,7 +1529,7 @@ internal sealed record SourceFacts(
       .ToList();
   }
 
-  public IReadOnlyList<string> ImportedModulesFor(string sourcePath) {
+  private IReadOnlyList<string> ComputeImportedModulesFor(string sourcePath) {
     return Structured.Imports
       .Where(importItem => SamePath(importItem.SourcePath, sourcePath))
       .Select(importItem => importItem.ResolvedTarget)
@@ -1512,7 +1538,7 @@ internal sealed record SourceFacts(
       .ToList();
   }
 
-  public IReadOnlyList<DefinitionAnalysisInclude> LocalIncludesFor(string sourcePath) {
+  private IReadOnlyList<DefinitionAnalysisInclude> ComputeLocalIncludesFor(string sourcePath) {
     return Structured.Includes
       .Where(include => SamePath(include.SourcePath, sourcePath))
       .ToList();
@@ -1741,6 +1767,7 @@ internal sealed class DefinitionNode(
   public Statement? StatementBody { get; } = statementBody;
   public DefinitionReportFacts? ReportFacts { get; } = reportFacts;
   public DefinitionSourceSpan? SourceGroup { get; set; }
+  public IReadOnlyList<DefinitionNode>? SourceGroupMembers { get; set; }
 
   public int Line => ReportFacts!.Line;
   public int Column => ReportFacts!.Column;
