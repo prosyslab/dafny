@@ -131,10 +131,10 @@ public class CachedParserAnalysisTests {
       var exports = warm.Document.Definitions.Where(definition => definition.Kind == "export").ToList();
       Assert.Equal(4, exports.Count);
       Assert.All(exports, definition => Assert.NotNull(definition.BodyVisibility));
-      var publicExport = Assert.Single(exports.Where(definition => definition.FullName == "Helper.Public"));
+      var publicExport = Assert.Single(exports.Where(definition => definition.FullName == "Helper.Public#export"));
       Assert.Contains("Helper.Hidden", publicExport.BodyVisibility!.RevealedFunctions);
       Assert.Contains("Helper.RevealHidden", publicExport.BodyVisibility.ReferencedDeclarations);
-      var emptyExport = Assert.Single(exports.Where(definition => definition.FullName == "Empty.Empty"));
+      var emptyExport = Assert.Single(exports.Where(definition => definition.FullName == "Empty.Empty#export"));
       Assert.Empty(emptyExport.BodyVisibility!.RevealedFunctions);
       Assert.Empty(emptyExport.BodyVisibility.ReferencedDeclarations);
       Assert.False(emptyExport.BodyVisibility.RevealsAllFunctions);

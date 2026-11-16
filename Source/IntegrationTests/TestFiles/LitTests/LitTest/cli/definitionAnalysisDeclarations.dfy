@@ -62,7 +62,7 @@ module Outer.Inner {
 // CHECK-NEXT-L: "kind": "least predicate",
 // CHECK-L: "fullName": "Coverage.Maximum",
 // CHECK-NEXT-L: "kind": "greatest predicate",
-// CHECK-L: "fullName": "Coverage.Public",
+// CHECK-L: "fullName": "Coverage.Public#export",
 // CHECK-NEXT-L: "kind": "export",
 // CHECK-L: "fullName": "Outer.Inner.Item",
 // CHECK-NEXT-L: "kind": "type synonym",
