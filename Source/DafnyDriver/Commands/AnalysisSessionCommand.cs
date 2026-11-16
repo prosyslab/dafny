@@ -992,13 +992,15 @@ static class AnalysisSessionCommand {
                 await stderr.WriteLineAsync(RemapOutputText(selectionError!, request));
                 selectionRejected = true;
               }
-              var analyzed = reported == null ? null : DefinitionAnalysis.AnalyzeDocument(resolution.ResolvedProgram, reported,
-                options.Get(DefinitionAnalysisCommand.IncludeStatements),
-                options.Get(DefinitionAnalysisCommand.IncludeSemanticFacts),
-                options.Get(DefinitionAnalysisCommand.IncludeProofInputs),
-                options.Get(DefinitionAnalysisCommand.IncludeVerificationFacts)
-                  ? resolution.CanVerifies!.Values.SelectMany(tree => tree.Values) : null,
-                selected.Files.TextSnapshots, selected.Facts, () => selected.ProofInputs);
+              // The analysis recurses over the AST like the resolver, so it needs the resolver's stack.
+              var analyzed = reported == null ? null : await DafnyMain.LargeStackFactory.StartNew(() =>
+                DefinitionAnalysis.AnalyzeDocument(resolution.ResolvedProgram, reported,
+                  options.Get(DefinitionAnalysisCommand.IncludeStatements),
+                  options.Get(DefinitionAnalysisCommand.IncludeSemanticFacts),
+                  options.Get(DefinitionAnalysisCommand.IncludeProofInputs),
+                  options.Get(DefinitionAnalysisCommand.IncludeVerificationFacts)
+                    ? resolution.CanVerifies!.Values.SelectMany(tree => tree.Values) : null,
+                  selected.Files.TextSnapshots, selected.Facts, () => selected.ProofInputs));
               if (analyzed != null) {
                 moduleHits = selected.Facts.ModuleHits;
                 moduleMisses = selected.Facts.ModuleMisses;

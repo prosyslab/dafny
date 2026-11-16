@@ -144,14 +144,12 @@ static class DefinitionAnalysisCommand {
         verificationTargets: options.Get(IncludeVerificationFacts)
           ? resolution.CanVerifies!.Values.SelectMany(tree => tree.Values)
           : null);
-      results = options.Get(IncludeProofInputs)
-        ? await DafnyMain.LargeStackFactory.StartNew(AnalyzeDocument)
-        : AnalyzeDocument();
+      results = await DafnyMain.LargeStackFactory.StartNew(AnalyzeDocument);
     } else {
-      results = DefinitionAnalysis.Analyze(
+      results = await DafnyMain.LargeStackFactory.StartNew(() => DefinitionAnalysis.Analyze(
         resolution.ResolvedProgram,
         analysisSourceUris,
-        options.Get(IncludeStatements));
+        options.Get(IncludeStatements)));
     }
     var json = JsonSerializer.Serialize(results, new JsonSerializerOptions {
       PropertyNamingPolicy = JsonNamingPolicy.CamelCase,

@@ -1,3 +1,4 @@
+using DafnyDriver.Commands;
 using Microsoft.Dafny;
 using Microsoft.Dafny.LanguageServer.Workspace;
 using Microsoft.Extensions.FileSystemGlobbing.Abstractions;
@@ -9,7 +10,9 @@ namespace DafnyDriver.Test;
 
 [Collection("Proof input translation")]
 public class DefinitionAnalysisFactTests {
-  private static readonly Uri Root = new("file:///workspace/analysis-facts/root.dfy");
+  private const string Cwd = "/workspace/analysis-facts";
+  private const string Path = Cwd + "/root.dfy";
+  private static readonly Uri Root = new("file://" + Path);
 
   // An assumption is trusted wherever it is written, not only as a statement of a method body.
   [Fact]
@@ -185,6 +188,18 @@ public class DefinitionAnalysisFactTests {
     Assert.True(spans["R.At"].HasAxiomAttribute);
     Assert.True(spans["R.Brace"].HasAxiomAttribute);
     Assert.False(spans["R.Plain"].HasAxiomAttribute);
+  }
+
+  // A session analyzes any expression the resolver accepts, however deeply it nests.
+  [Fact]
+  public async Task SessionAnalyzesDeeplyNestedExpressions() {
+    var sum = string.Join(" + ", Enumerable.Repeat("g(x)", 12000));
+    var source = $"module M {{ function g(x: int): int {{ x }} function f(x: int): int {{ {sum} }} }}";
+    using var session = new AnalysisSessionCommand.Session();
+    var response = await session.Execute(new AnalysisSessionCommand.Request("deep", ["definition-analysis", Path], Cwd,
+      "default", new Dictionary<string, string> { [Path] = source }), CancellationToken.None);
+    Assert.True(response.Returncode == 0, response.Stderr);
+    Assert.Contains("\"M.f\"", response.Stdout);
   }
 
   private static async Task<Dictionary<string, DefinitionAnalysisResult>> Analyze(string source, bool statements = false) {
