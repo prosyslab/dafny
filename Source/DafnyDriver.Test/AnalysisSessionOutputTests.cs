@@ -30,15 +30,31 @@ public class AnalysisSessionOutputTests {
     Assert.Equal(!allowWarnings, options.FailOnWarnings);
   }
 
-  // Routing proof-input diagnostics does not redirect other CLI request output.
-  [Theory]
-  [InlineData("resolve")]
-  [InlineData("verify")]
-  [InlineData("definition-analysis")]
-  public void OtherRequestDiagnosticsKeepTheirWriter(string command) {
+  // Every analysis document stays parseable: human-readable diagnostics leave its stream.
+  [Fact]
+  public void PlainAnalysisDiagnosticsStaySeparateFromJson() {
     using var stdout = new StringWriter();
     using var stderr = new StringWriter();
     var options = new DafnyOptions(TextReader.Null, stdout, stderr);
+    AnalysisSessionCommand.RouteAnalysisDiagnostics(options, "definition-analysis");
+    var reporter = new ConsoleErrorReporter(options);
+    reporter.Warning(MessageSource.Resolver, "retained_diagnostic", Token.Cli, "retained diagnostic");
+
+    Assert.Empty(stdout.ToString());
+    Assert.Contains("retained diagnostic", stderr.ToString());
+    Assert.Equal(1, reporter.Count(ErrorLevel.Warning));
+  }
+
+  // Routing analysis diagnostics does not redirect other requests, nor output that --json-output already frames.
+  [Theory]
+  [InlineData("resolve", false)]
+  [InlineData("verify", false)]
+  [InlineData("definition-analysis", true)]
+  public void OtherRequestDiagnosticsKeepTheirWriter(string command, bool jsonOutput) {
+    using var stdout = new StringWriter();
+    using var stderr = new StringWriter();
+    var options = new DafnyOptions(TextReader.Null, stdout, stderr);
+    options.Set(CommonOptionBag.JsonOutput, jsonOutput);
     AnalysisSessionCommand.RouteAnalysisDiagnostics(options, command);
     var reporter = new ConsoleErrorReporter(options);
     reporter.Warning(MessageSource.Resolver, "retained_diagnostic", Token.Cli, "retained diagnostic");

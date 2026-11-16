@@ -44,8 +44,8 @@ static class AnalysisSessionCommand {
   }
 
   internal static void RouteAnalysisDiagnostics(DafnyOptions options, string command) {
-    if (command == "definition-analysis" && options.Get(DefinitionAnalysisCommand.IncludeProofInputs)) {
-      // Match the one-shot certificate command: diagnostics must not prefix its JSON document.
+    if (command == "definition-analysis" && DefinitionAnalysisCommand.SeparatesDiagnostics(options)) {
+      // Match the one-shot command: diagnostics must not prefix its JSON document.
       ((Bpl.CommandLineOptions)options).OutputWriter = options.ErrorWriter;
     }
   }

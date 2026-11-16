@@ -713,6 +713,16 @@ successful retry remain under `/workspace/tmp/experiment/verifier-optimization-v
 Actual retry tmux session is `proof-input-output-checks-20261103-r2`; raw helper
 metadata retains the base session name.
 
+Update 2026-11-16 (change based on `cab6a4cd0`, no plan): the sentence
+"Other requests retain their writer" no longer holds for
+`definition-analysis`. The one-shot command and the session now share
+`DefinitionAnalysisCommand.SeparatesDiagnostics`: human-readable diagnostics of
+every `definition-analysis` mode, including `--spans-only`, go to stderr so that
+stdout holds only the JSON document. `--json-output` without proof inputs keeps
+one stream because it frames each line itself. `resolve` and `verify` requests
+still retain their writer. Checked with `AnalysisSessionOutputTests` and manual
+one-shot runs in a scratch build of the same sources; no new-image control ran.
+
 Fresh independent source review finds no narrow routing blocker. New-image
 library-warning allow/deny and exact recorded-source controls remain required.
 Broader preexisting limits remain: malformed option-binding failures can write

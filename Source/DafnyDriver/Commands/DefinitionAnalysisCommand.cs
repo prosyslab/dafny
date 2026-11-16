@@ -68,11 +68,28 @@ static class DefinitionAnalysisCommand {
     return result;
   }
 
+  /// <summary>
+  /// Human-readable diagnostics go to the error stream so that standard output holds only the JSON document.
+  /// --json-output frames every line itself, so it keeps one stream unless proof inputs are requested.
+  /// </summary>
+  internal static bool SeparatesDiagnostics(DafnyOptions options) =>
+    options.Get(IncludeProofInputs) || !options.Get(CommonOptionBag.JsonOutput);
+
   private static async Task<int> Execute(DafnyOptions options) {
     if (options.Get(Format) != "json") {
       await options.ErrorWriter.WriteLineAsync("definition-analysis only supports --format json.");
       return (int)ExitValue.PREPROCESSING_ERROR;
     }
+
+    var documentOutput = options.BaseOutputWriter;
+    var separateDiagnostics = SeparatesDiagnostics(options);
+    if (separateDiagnostics) {
+      // Keep the JSON document independently parseable while preserving every diagnostic for the caller.
+      ((Microsoft.Boogie.CommandLineOptions)options).OutputWriter = options.ErrorWriter;
+    }
+    Task WriteDocument(string json) => separateDiagnostics
+      ? documentOutput.WriteLineAsync(json)
+      : options.OutputWriter.Code(json + "\n");
 
     if (options.Get(SpansOnly)) {
       if (options.Get(IncludeProofInputs)) {
@@ -105,15 +122,9 @@ static class DefinitionAnalysisCommand {
           "definition-analysis does not support --analysis-source with --spans-only.");
         return (int)ExitValue.PREPROCESSING_ERROR;
       }
-      return await ExecuteSpansOnly(options);
+      return await ExecuteSpansOnly(options, WriteDocument);
     }
 
-    var certificateOutput = options.BaseOutputWriter;
-    if (options.Get(IncludeProofInputs)) {
-      // Keep the optional certificate document independently parseable while
-      // preserving all existing qualification diagnostics for the caller.
-      ((Microsoft.Boogie.CommandLineOptions)options).OutputWriter = options.ErrorWriter;
-    }
     var compilation = CliCompilation.Create(options);
     if (options.Get(IncludeProofInputs)) {
       // Translation consumes declared solver settings, not the executable's
@@ -155,16 +166,12 @@ static class DefinitionAnalysisCommand {
       PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
       WriteIndented = true
     });
-    if (options.Get(IncludeProofInputs)) {
-      await certificateOutput.WriteLineAsync(json);
-    } else {
-      await options.OutputWriter.Code(json + "\n");
-    }
+    await WriteDocument(json);
 
     return await compilation.GetAndReportExitCode();
   }
 
-  private static async Task<int> ExecuteSpansOnly(DafnyOptions options) {
+  private static async Task<int> ExecuteSpansOnly(DafnyOptions options, Func<string, Task> writeDocument) {
     var (code, dafnyFiles, _) = await SynchronousCliCompilation.GetDafnyFiles(options);
     if (code != ExitValue.SUCCESS) {
       return (int)code;
@@ -183,7 +190,7 @@ static class DefinitionAnalysisCommand {
       PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
       WriteIndented = true
     });
-    await options.OutputWriter.Code(json + "\n");
+    await writeDocument(json);
     return (int)ExitValue.SUCCESS;
   }
 
