@@ -1,0 +1,4 @@
+infer-modifies-cli-explicit.dfy(13,4): Error: modified field could not be proved to be in the current modifies clause
+infer-modifies-cli-explicit.dfy(20,9): Error: modified field could not be proved to be in the current modifies clause
+
+Dafny program verifier finished with 1 verified, 2 errors

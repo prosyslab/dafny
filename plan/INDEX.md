@@ -1,3 +1,9 @@
+- [Compute recursive modifies frames and narrow cache invalidation](2026-11-22-infer-modifies-scc-cache.md) — done, nine Lit tests, two in-memory cache tests, recursive library round trip, and independent review. [Wiki](../wiki/inferred-modifies.md).
+
+- [Enable modifies inference from the CLI](2026-11-22-infer-modifies-cli.md) — done, both controls verify, with CLI fixtures, actual BenchIO, and archived contracts checked. [Wiki](../wiki/inferred-modifies.md).
+
+- [Infer modifies for fixed IO regions](2026-11-22-infer-modifies.md) — done, native build, 9 affected Lit cases, actual BenchIO proof, and serialization round trips passed. [Wiki](../wiki/inferred-modifies.md).
+
 - [Add native execution phase timing observations](2026-11-12-native-phase-profiling.md) — done; user-approved profiling implementation.
 - [Modular proof-input fingerprints over the pruned solver input](2026-11-06-modular-proof-fingerprints.md) — in-progress (implemented, awaiting independent verification); fingerprint per implementation from the pruned live declaration set; zero-obligation certificates; solver binary in toolchain identity; order-insensitive key and native lookup by key after review; Cat: 46 of 60 targets keep their key after an unrelated merge, 7 of 7 given keys stable skeleton to reference; options hash independent of the install path (2026-11-07); solver-path-bound session context, full Boogie/Dafny toolchain, relative solver paths fail closed, inode/ctime-aware file hashes (2026-11-07 round 2); [wiki](../wiki/native-analysis-session.md#modular-proof-input-fingerprints-2026-11-06).
 

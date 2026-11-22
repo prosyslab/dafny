@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using MediatR;
@@ -23,6 +24,7 @@ public class CachingResolver : ProgramResolver {
   private readonly Dictionary<ModuleDecl, byte[]> hashes = new();
   private readonly ResolutionCache cache;
   private readonly TelemetryPublisherBase telemetryPublisher;
+  private readonly ISet<Uri>? inferModifiesVerifiedUris;
 
   public CachingResolver(
     Program program,
@@ -33,6 +35,10 @@ public class CachingResolver : ProgramResolver {
     this.logger = logger;
     this.cache = cache;
     this.telemetryPublisher = telemetryPublisher;
+    if (program.Options.Get(CommonOptionBag.InferModifiesOption)) {
+      // The same parsed method can be verified as source or loaded as part of a library.
+      inferModifiesVerifiedUris = program.Compilation.VerifiedUris();
+    }
   }
 
   public override Task Resolve(CancellationToken cancellationToken) {
@@ -87,6 +93,22 @@ public class CachingResolver : ProgramResolver {
       }
 
       hashAlgorithm.TransformBlock(cache.Builtins!.MyHash, 0, cache.Builtins!.MyHash.Length, null, 0);
+      if (inferModifiesVerifiedUris != null && moduleDeclaration is LiteralModuleDecl literal) {
+        // Eligibility also depends on resolved properties, so conservatively include every
+        // parsed method's origin. The default module can contain methods from many files.
+        // Modules without methods (including synthetic parents) need no local salt;
+        // their dependency hashes still reflect changes in their children and imports.
+        var origins = literal.ModuleDef.TopLevelDecls.OfType<TopLevelDeclWithMembers>()
+          .SelectMany(decl => decl.Members).OfType<Method>()
+          .Select(method => method.Origin.Uri).Where(uri => uri != null).Distinct()
+          .OrderBy(uri => uri.AbsoluteUri, StringComparer.Ordinal).ToList();
+        if (origins.Count != 0) {
+          var context = "inferModifies\0" + string.Concat(origins.Select(uri =>
+            uri.AbsoluteUri + "\0" + (inferModifiesVerifiedUris.Contains(uri) ? "1" : "0") + "\0"));
+          var contextHash = SHA256.HashData(Encoding.UTF8.GetBytes(context));
+          hashAlgorithm.TransformBlock(contextHash, 0, contextHash.Length, null, 0);
+        }
+      }
       // Here we would like to use a hash of the contents of the module declaration, but we don't have that.
       // We use the CloneId as a defensive proxy for a content hash.
       // The CloneId stays unchanged if none of the files in which the module occurs have been changed.

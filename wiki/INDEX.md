@@ -1,3 +1,5 @@
+- [Inferred modifies for fixed heap locations](inferred-modifies.md) — opt-in by declaration or CLI, with recursive fixed-point inference, module-local resolution caching, and ordinary verification. [Method-level plan](../plan/2026-11-22-infer-modifies.md), [CLI plan](../plan/2026-11-22-infer-modifies-cli.md), [SCC and cache plan](../plan/2026-11-22-infer-modifies-scc-cache.md).
+
 - [Candidate inputs that ended session requests](native-analysis-session.md#candidate-inputs-that-ended-session-requests-2026-11-15) — message-less related locations no longer break remapped diagnostics; hide/reveal arguments inside a match are cloned as unresolved syntax; the Python client closes cleanly after a crashed worker. Local and independent checks; not pinned. [Plan](../plan/2026-11-15-candidate-native-crashes.md).
 
 - [Native validation before verification](native-analysis-session.md#boogie-validation-before-verification-2026-11-12) — preserved validation diagnostics and detached successful caches; final archived replay and independent native checks accepted; existing images unchanged. [Plan](../plan/2026-11-12-native-verification-oom.md).

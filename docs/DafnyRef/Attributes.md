@@ -684,6 +684,53 @@ options revert to their previous values.
 Only a small subset of Dafny's command line options is supported.  Use the
 `/attrHelp` flag to see which ones.
 
+### 11.2.29. `{:inferModifies}` {#sec-attr-infer-modifies}
+
+An ordinary method with a body can use `{:inferModifies}` in place of a
+handwritten `modifies` clause. Dafny collects direct heap writes and the
+frames of called methods, then verifies the result with the usual frame checks.
+
+<!-- %check-verify -->
+```dafny
+class Cell {
+  var value: int
+}
+
+method Set(c: Cell, value: int)
+  modifies c`value
+  ensures c.value == value
+{
+  c.value := value;
+}
+
+method {:inferModifies} Reset(c: Cell)
+  ensures c.value == 0
+{
+  Set(c, 0);
+}
+```
+
+The generated frame of `Reset` is ``modifies c`value``. A location must be
+expressible at method entry using `this`, an input, or a chain of constant
+fields from either. Finite set displays of these expressions are also supported.
+Writing a field gives a field-specific frame, and writing an array element gives
+a frame for the array object. Dafny can infer frames for recursive methods when
+propagating writes through their calls reaches a supported fixed point. Passing
+the same object to a recursive call can preserve the frame. Passing a constant
+field such as `c.next` at each call can keep adding longer paths. Use a
+handwritten `modifies` clause for such growing frames, mutable reference paths,
+allocation, or `modify` statements. The inferred expressions must be well formed
+under the method's preconditions. Inference is available for non-ghost methods
+with bodies outside traits, refinement, override, and `{:autocontracts}`. Explicit callee
+frames continue to apply to bodyless and external methods.
+
+Use `dafny verify --inferModifies file.dfy` to request inference for all
+supported source methods that omit `modifies`. Handwritten frames still apply.
+When inference cannot find a frame for an unannotated method, Dafny applies its
+usual verification checks with the omitted frame. The declaration attribute
+can still request inference on individual methods, including when the CLI
+option is off. Already-verified library imports keep their contracts.
+
 ## 11.3. Attributes on reads and modifies clauses
 
 ### 11.3.1. `{:assume_concurrent}`

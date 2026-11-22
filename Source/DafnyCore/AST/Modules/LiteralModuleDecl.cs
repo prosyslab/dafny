@@ -138,6 +138,10 @@ public class LiteralModuleDecl : ModuleDecl, ICanFormat, IHasSymbolChildren {
     var good = module.Resolve(sig, resolver);
 
     if (good && resolver.reporter.ErrorCount == preResolveErrorCount) {
+      InferModifiesClause.Run(module, resolver.reporter, compilation);
+    }
+
+    if (good && resolver.reporter.ErrorCount == preResolveErrorCount) {
       // Check that the module export gives a self-contained view of the module.
       resolver.CheckModuleExportConsistency(compilation, module);
     }

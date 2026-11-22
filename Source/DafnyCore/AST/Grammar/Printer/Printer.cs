@@ -1073,7 +1073,18 @@ NoGhost - disable printing of functions, ghost methods, and proof
         k = "ghost " + k;
       }
       string nm = method is Constructor && !((Constructor)method).HasName ? "" : method.Name;
-      PrintClassMethodHelper(k, method.Attributes, nm, method.TypeArgs);
+      var attributes = method.Attributes;
+      if (printMode == PrintModes.Serialization && method.Mod.Expressions?.Count > 0 &&
+          Attributes.Contains(attributes, InferModifiesClause.AttributeName)) {
+        // Library source is resolved again on import. Its materialized frame is already explicit.
+        attributes = null;
+        foreach (var attribute in method.Attributes.AsEnumerable().Reverse()) {
+          if (attribute.Name != InferModifiesClause.AttributeName) {
+            attributes = attribute.CloneAfter(attributes);
+          }
+        }
+      }
+      PrintClassMethodHelper(k, attributes, nm, method.TypeArgs);
       if (method.SignatureIsOmitted) {
         wr.Write(" ...");
       } else {

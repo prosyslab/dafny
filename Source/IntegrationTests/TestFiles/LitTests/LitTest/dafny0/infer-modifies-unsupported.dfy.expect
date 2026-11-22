@@ -1,0 +1,6 @@
+infer-modifies-unsupported.dfy(36,24): Error: {:inferModifies} cannot be combined with an explicit modifies clause
+infer-modifies-unsupported.dfy(42,24): Error: {:inferModifies} is unsupported for this method (ghost, bodyless, refinement, override, trait, constructor, lemma, or autocontracts)
+infer-modifies-unsupported.dfy(45,2): Error: {:inferModifies} cannot infer this effect: allocation is unsupported
+infer-modifies-unsupported.dfy(18,5): Error: {:inferModifies} cannot infer this effect: frame must use this or an input and constant fields, or a finite set display of these
+infer-modifies-unsupported.dfy(32,13): Error: {:inferModifies} cannot infer this effect: recursive frame expansion exceeds the supported structural depth
+5 resolution/type errors detected in infer-modifies-unsupported.dfy

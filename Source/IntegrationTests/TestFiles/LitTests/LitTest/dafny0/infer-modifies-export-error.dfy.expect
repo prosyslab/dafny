@@ -1,0 +1,4 @@
+infer-modifies-export-error.dfy(20,6): Error: member 'privateCell' does not exist in class 'Holder'
+infer-modifies-export-error.dfy(5,2): Related location: raised while checking export set Hidden
+infer-modifies-export-error.dfy(5,2): Error: This export set is not consistent: Hidden
+2 resolution/type errors detected in infer-modifies-export-error.dfy

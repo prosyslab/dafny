@@ -120,6 +120,7 @@ public static class DafnyCommands {
 
   public static IReadOnlyList<Option> ResolverOptions = new List<Option>(new Option[] {
     CommonOptionBag.ShowHints,
+    CommonOptionBag.InferModifiesOption,
     CommonOptionBag.WarnShadowing,
     CommonOptionBag.WarnMissingConstructorParenthesis,
     PrintStmt.TrackPrintEffectsOption,

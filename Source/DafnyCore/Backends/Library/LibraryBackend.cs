@@ -59,8 +59,65 @@ public class LibraryBackend : ExecutableBackend {
       throw new UnsupportedFeatureException(dafnyProgram.GetStartOfFirstFileToken(), Feature.LegacyCLI);
     }
 
-    var dooFile = new DooFile(dafnyProgram.AfterParsingClone);
+    var snapshot = dafnyProgram.Options.Get(CommonOptionBag.InferModifiesOption)
+      ? WithInferredFrames(dafnyProgram)
+      : dafnyProgram.AfterParsingClone;
+    var dooFile = new DooFile(snapshot);
     dooFile.Write(output);
+  }
+
+  // The parse snapshot preserves prefix module syntax, but predates inference. Copy
+  // source-shaped frames into that snapshot so a library keeps its verified contract.
+  private static Program WithInferredFrames(Program program) {
+    var inferred = program.RawModules()
+      .SelectMany(module => module.TopLevelDecls.OfType<TopLevelDeclWithMembers>())
+      .SelectMany(decl => decl.Members.OfType<MethodOrConstructor>())
+      .Where(method => method.InferredModifiesFromCli)
+      .Distinct()
+      .GroupBy(SourceKey)
+      .ToDictionary(group => group.Key, group => group.ToList());
+    if (inferred.Count == 0) {
+      return program.AfterParsingClone;
+    }
+
+    var snapshot = new Program(new Cloner(true), program.AfterParsingClone);
+    var sourceMethods = SourceMethods(snapshot.DefaultModuleDef)
+      .GroupBy(SourceKey).ToDictionary(group => group.Key, group => group.ToList());
+    // Validate all matches before changing the snapshot.
+    foreach (var (key, methods) in inferred) {
+      if (methods.Count != 1 || !sourceMethods.TryGetValue(key, out var originals) || originals.Count != 1 ||
+          originals[0].Mod.Expressions.Count != 0 || originals[0].Mod.Attributes != null) {
+        throw new InvalidOperationException($"Cannot serialize inferred modifies clause for {key.Name} at {key.Uri}:{key.Position}");
+      }
+    }
+    var cloner = new Cloner();
+    foreach (var (key, methods) in inferred) {
+      sourceMethods[key][0].Mod.Expressions.AddRange(methods[0].Mod.Expressions.Select(cloner.CloneFrameExpr));
+    }
+    return snapshot;
+  }
+
+  private static (Uri Uri, int Position, string Name) SourceKey(MethodOrConstructor method) =>
+    (method.Origin.Uri, method.Origin.pos, method.Name);
+
+  private static IEnumerable<MethodOrConstructor> SourceMethods(ModuleDefinition module) {
+    foreach (var declaration in module.TopLevelDecls) {
+      if (declaration is TopLevelDeclWithMembers withMembers) {
+        foreach (var method in withMembers.Members.OfType<MethodOrConstructor>()) {
+          yield return method;
+        }
+      }
+      if (declaration is LiteralModuleDecl nested) {
+        foreach (var method in SourceMethods(nested.ModuleDef)) {
+          yield return method;
+        }
+      }
+    }
+    foreach (var prefix in module.PrefixNamedModules) {
+      foreach (var method in SourceMethods(prefix.Module.ModuleDef)) {
+        yield return method;
+      }
+    }
   }
 
   public override void EmitCallToMain(Method mainMethod, string baseName, ConcreteSyntaxTree callToMainTree) {

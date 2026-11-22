@@ -34,6 +34,8 @@ public abstract class MethodOrConstructor : MethodOrFunction, TypeParameter.Pare
   public bool MustReverify;
   public bool IsEntryPoint = false;
   public readonly Specification<FrameExpression> Mod;
+  // Needed when serializing the original parse tree to a .doo archive.
+  [FilledInDuringResolution] public bool InferredModifiesFromCli;
   [FilledInDuringResolution] public bool IsRecursive;
   [FilledInDuringResolution] public bool IsTailRecursive;
   [FilledInDuringResolution] public Function? FunctionFromWhichThisIsByMethodDecl;
@@ -120,6 +122,9 @@ public abstract class MethodOrConstructor : MethodOrFunction, TypeParameter.Pare
 
   protected MethodOrConstructor(Cloner cloner, MethodOrConstructor original) : base(cloner, original) {
     this.Mod = cloner.CloneSpecFrameExpr(original.Mod);
+    if (cloner.CloneResolvedFields) {
+      InferredModifiesFromCli = original.InferredModifiesFromCli;
+    }
   }
 
   [SyntaxConstructor]

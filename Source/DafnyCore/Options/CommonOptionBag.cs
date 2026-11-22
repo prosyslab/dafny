@@ -51,6 +51,9 @@ public class CommonOptionBag {
       IsHidden = true
     };
 
+  public static readonly Option<bool> InferModifiesOption = new("--inferModifies",
+    "Infer modifies clauses for supported source methods that omit them.");
+
   public static readonly Option<uint?> UnrollBoundedQuantifiers = new("--unroll-bounded-quantifiers", () => null,
     @"
 When verifying, expand bounded `forall`/`exists` quantifiers over `int` and `nat` by enumerating all values when the bounds are concrete.
@@ -704,6 +707,7 @@ NoGhost - disable printing of functions, ghost methods, and proof
     OptionRegistry.RegisterOption(ProgressOption, OptionScope.Cli);
     OptionRegistry.RegisterOption(LogLocation, OptionScope.Cli);
     OptionRegistry.RegisterOption(LogLevelOption, OptionScope.Cli);
+    OptionRegistry.RegisterOption(InferModifiesOption, OptionScope.Cli);
     OptionRegistry.RegisterOption(UnrollBoundedQuantifiers, OptionScope.Cli);
     OptionRegistry.RegisterOption(PartialEvalEntry, OptionScope.Cli);
     OptionRegistry.RegisterOption(PartialEvalInlineDepth, OptionScope.Cli);
