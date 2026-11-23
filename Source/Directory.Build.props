@@ -1,6 +1,7 @@
 <Project>
 
   <PropertyGroup>
+    <RestoreAdditionalProjectSources>$(RestoreAdditionalProjectSources);$(MSBuildThisFileDirectory)LocalPackages</RestoreAdditionalProjectSources>
     <TargetFramework>net8.0</TargetFramework>
     <VersionPrefix>4.11.1</VersionPrefix>
     <NoWarn>1701;1702;VSTHRD200</NoWarn>
