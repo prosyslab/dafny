@@ -75,6 +75,9 @@ public record DefinitionAnalysisResult(
   public IReadOnlyList<string> YieldRequires { get; init; } = [];
   public IReadOnlyList<string> YieldEnsures { get; init; } = [];
   public IReadOnlyList<string> HeaderDependencies { get; init; } = [];
+  /// <summary>Authored signature tokens, available even before resolution.</summary>
+  [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+  public IReadOnlyList<string>? Signature { get; init; }
   /// <summary>Resolved body opacity and conservative reveal exposure, when available.</summary>
   [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
   public DefinitionBodyVisibility? BodyVisibility { get; init; }
@@ -517,6 +520,7 @@ public static partial class DefinitionAnalysis {
       declaration.ContractHeaderWithAxiom,
       references,
       dependencies) {
+      Signature = SignatureFor(declaration.Declaration),
       SourceGroup = declaration.SourceGroup,
       YieldRequires = declaration.Declaration is IteratorDecl iterator
         ? iterator.YieldRequires.Select(item => item.E.EntireRange.PrintOriginal()).ToList() : [],
@@ -530,6 +534,19 @@ public static partial class DefinitionAnalysis {
           .ToList()
         : []
     };
+  }
+
+  private static IReadOnlyList<string>? SignatureFor(INode declaration) {
+    if (declaration is not MethodOrFunction { AuthoredSignature: { } span }) {
+      return null;
+    }
+    var tokens = new List<string>();
+    for (var token = span.StartToken; ; token = token.Next) {
+      tokens.Add(token.val);
+      if (token == span.EndToken) {
+        return tokens;
+      }
+    }
   }
 
   private static IReadOnlyList<DefinitionContractClause> ContractClausesFor(INode declaration) {

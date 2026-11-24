@@ -522,6 +522,7 @@ class DefinitionInfo(BaseModel):
     yield_requires: tuple[StrictStr, ...] = Field(default=(), alias="yieldRequires")
     yield_ensures: tuple[StrictStr, ...] = Field(default=(), alias="yieldEnsures")
     header_dependencies: tuple[StrictStr, ...] = Field(default=(), alias="headerDependencies")
+    signature: tuple[StrictStr, ...] | None = None
 
     @field_validator("source_path", mode="before")
     @classmethod

@@ -1255,6 +1255,7 @@ MethodDecl<DeclModifierData dmod, bool allowConstructor, out MethodOrConstructor
     ]
   | ellipsis                                    (. signatureEllipsis = t; .)
   )
+  (. var signature = new TokenRange(dmod.FirstToken, t); .)
   MethodSpec<isSpecGhost, allowWildcardDecreases,
              req, reads, mod, ens, dec, ref decAttrs, ref modAttrs, ref readsAttrs, caption, isConstructor>
   [ IF(isConstructor)
@@ -1288,6 +1289,7 @@ MethodDecl<DeclModifierData dmod, bool allowConstructor, out MethodOrConstructor
                       new Specification<FrameExpression>(mod, modAttrs), body, signatureEllipsis);
      }
      m.BodyStartTok = bodyStart;
+     m.AuthoredSignature = signature;
  .)
   .
 
@@ -1837,7 +1839,8 @@ FunctionDecl<DeclModifierData dmod, out Function/*!*/ f>
     )
   )
 
-  (. decreases = isLeastPredicate || isGreatestPredicate ? null : new List<Expression/*!*/>();
+  (. var signature = new TokenRange(dmod.FirstToken, t);
+     decreases = isLeastPredicate || isGreatestPredicate ? null : new List<Expression/*!*/>();
   .)
   FunctionSpec<reqs, reads, ens, decreases, ref decAttrs, ref readsAttrs>
   (. Token byMethodTok = null; BlockStmt byMethodBody = null; .)
@@ -2030,6 +2033,7 @@ FunctionDecl<DeclModifierData dmod, out Function/*!*/ f>
                         dmod.Attributes, signatureEllipsis);
      }
      f.BodyStartTok = bodyStart;
+     f.AuthoredSignature = signature;
      SystemModuleModifiers.Add(b => b.CreateArrowTypeDecl(formals.Count));
      if (isLeastPredicate || isGreatestPredicate) {
        // also create an arrow type for the corresponding prefix predicate

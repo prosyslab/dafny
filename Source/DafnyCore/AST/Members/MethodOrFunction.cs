@@ -27,6 +27,7 @@ public abstract class MethodOrFunction : MemberDecl, ICodeContainer {
     SignatureEllipsis != null;
 
   public IOrigin? SignatureEllipsis;
+  internal TokenRange? AuthoredSignature { get; set; }
   public override bool IsRefining => SignatureIsOmitted;
 
   [SyntaxConstructor]
@@ -54,6 +55,7 @@ public abstract class MethodOrFunction : MemberDecl, ICodeContainer {
     this.Reads = cloner.CloneSpecFrameExpr(original.Reads);
     this.Ins = original.Ins.ConvertAll(p => cloner.CloneFormal(p, false));
     this.SignatureEllipsis = original.SignatureEllipsis;
+    this.AuthoredSignature = original.AuthoredSignature;
     if (cloner.CloneResolvedFields) {
       this.ContainsHide = original.ContainsHide;
     }
